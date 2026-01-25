@@ -190,6 +190,7 @@ class BaseCompressor(object):
         disable_opt_rtn: bool | None = None,
         seed: int = 42,
         low_cpu_mem_usage: bool = True,
+        transform_config: dict = {},
         **kwargs,
     ):
         """Initialize AutoRound with quantization and tuning configuration.
@@ -489,6 +490,7 @@ class BaseCompressor(object):
                 wrapper_autoround(self)
             except (ImportError, ModuleNotFoundError):
                 logger.error("algorithm extension import error, fallback to default mode")
+        self.transform_config = transform_config
 
     def _gen_auto_scheme(
         self, model: torch.nn.Module, scheme: AutoScheme, dataset: str, device_map: Union[str, int, dict, torch.device]
@@ -1124,6 +1126,11 @@ class BaseCompressor(object):
             m = convert_fp8_layer_to_linear(m, self.amp_dtype, self.device)
             set_module(self.model, name, m)
         tuning_device = m.tuning_device if hasattr(m, "tuning_device") else self.device
+
+        print(f"========================================_quantize_layer_via_rtn, tuning_device: {tuning_device}")
+        print(f"========================================_quantize_layer_via_rtn, is_fp8_linear(m): {is_fp8_linear(m)}")
+        print(f"========================================_quantize_layer_via_rtn, disable_opt_rtn: {self.disable_opt_rtn}")
+        print(f"========================================_quantize_layer_via_rtn, self.is_immediate_packing: {self.is_immediate_packing}")
         # Step 1: let gguf merge layers or rename module first and we will handle the RTN is gguf specific logic
         if self.is_immediate_packing and self.iters == 0 and self.formats[0].is_gguf() and not self.disable_opt_rtn:
             m = m.to(tuning_device)
@@ -1154,8 +1161,13 @@ class BaseCompressor(object):
                     enable_round_tuning=False,
                     enable_torch_compile=self.enable_torch_compile,
                     disable_opt_rtn=disable_opt_rtn,
+                    transform_config=self.transform_config,
                 )
+                print(m)
+                
                 m = m.unwrapper({})
+
+                print(m)
             except torch.OutOfMemoryError:
                 cuda_error_msg = traceback.format_exc()
                 m = m.orig_layer if hasattr(m, "orig_layer") else m
@@ -1169,11 +1181,14 @@ class BaseCompressor(object):
                         enable_norm_bias_tuning=False,
                         enable_round_tuning=False,
                         enable_torch_compile=self.enable_torch_compile,
+                        transform_config=self.transform_config,
                     )
                     m = m.unwrapper({})
                 except Exception as e:
                     raise
 
+        print(f"======================================self.is_immediate_packing: {self.is_immediate_packing}")
+        print(f"======================================self.is_immediate_saving: {self.is_immediate_saving}")
         # Step 2: Optional immediate packing/export
         if self.is_immediate_packing:  # For gguf, packing conducts on block level
             self._immediate_pack(name)
@@ -1215,8 +1230,11 @@ class BaseCompressor(object):
         if self.amp and self.model.dtype != self.amp_dtype:
             self.model.to(self.amp_dtype)
 
+        print(self.model)
         all_to_quantized_module_names: list[str] = [n for n, m in self.model.named_modules() if check_to_quantized(m)]
         self.all_to_quantized_module_names = all_to_quantized_module_names
+        print(f"=======================is_nv_fp(self.data_type): {is_nv_fp(self.data_type)}")
+        # print(f"=======================self.all_to_quantized_module_names: {self.all_to_quantized_module_names}")
         if is_nv_fp(self.data_type):
             from auto_round.data_type.nvfp import calculate_gparam
             from auto_round.data_type.utils import update_fused_layer_global_scales
@@ -1262,6 +1280,7 @@ class BaseCompressor(object):
             self.static_kv_dtype,
             self.static_attention_dtype,
         ):  # TODO, mixed datatype has bug
+            print(f"==========================================check_need_act_calibration???")
             hook_handles = self._register_act_max_hook(self.model)
             try:
                 self._quantize_via_rtn_blockwise(all_to_quantized_module_names)
@@ -1280,6 +1299,7 @@ class BaseCompressor(object):
             for handle in hook_handles:
                 handle.remove()
         else:
+            print(f"=========================================use_blockwise_quantization: False")
             use_blockwise_quantization = False
             tied_weights_keys = getattr(self.model, "_tied_weights_keys", [])
             if tied_weights_keys is None:
@@ -1329,6 +1349,7 @@ class BaseCompressor(object):
                         clear_memory(device_list=self.device_list)
                         memory_monitor.log_summary()
             else:
+                print(f"=============================here???????????????????????????????????????????")
                 block_names_cnt = len(flatten_list(get_block_names(self.model, True)))
                 clear_mem_freq = len(all_to_quantized_module_names) // block_names_cnt
                 cnt = 0
@@ -3113,6 +3134,7 @@ class BaseCompressor(object):
             logger.warning("please run autoround.quantize first")
             return
         folders = []
+        print(f"================save_quantized, self.formats: {self.formats}")
         for format in self.formats:
             save_folder = self._get_save_folder_name(format)
             if self.act_bits <= 8 and format.is_fake():

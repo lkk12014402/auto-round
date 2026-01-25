@@ -87,6 +87,7 @@ class AutoRound:
         enable_alg_ext: bool = None,
         disable_opt_rtn: bool | None = None,
         low_cpu_mem_usage: bool = True,
+        transform_config: dict = {},
         **kwargs,
     ) -> BaseCompressor:
         """Initialize AutoRound with quantization and tuning configuration.
@@ -175,6 +176,8 @@ class AutoRound:
 
         if enable_adam:
             model_cls.append(AdamCompressor)
+
+        print(f"==================================model_cls: {model_cls}")
         dynamic_compressor = type("AutoRound", tuple(model_cls), {})
         if extra_config:
             kwargs.update(extra_config.to_dict())
@@ -187,6 +190,14 @@ class AutoRound:
                 "'fp_layers' is deprecated, please use 'ignore_layers' to set layers not to be quantized."
             )
             kwargs["ignore_layers"] = kwargs.pop("fp_layers")
+
+        print(f"==================model: {model}")
+        print(f"==================dynamic_compressor: {dynamic_compressor}")
+        print(f"==================layer_config: {layer_config}")
+        print(f"==================device_map: {device_map}")
+        print(f"==================kwargs: {kwargs}")
+        # exit()
+        
         ar = dynamic_compressor(
             model=model,
             tokenizer=tokenizer,
@@ -204,6 +215,7 @@ class AutoRound:
             enable_torch_compile=enable_torch_compile,
             seed=seed,
             low_cpu_mem_usage=low_cpu_mem_usage,
+            transform_config=transform_config,
             **kwargs,
         )
         return ar
@@ -351,6 +363,8 @@ class AutoRoundLLM(LLMCompressor):
         seed: int = 42,
         **kwargs,
     ):
+        print("???????????????????????????????????????????????????????????????????????")
+        exit()
         super().__init__(
             model=model,
             tokenizer=tokenizer,

@@ -978,6 +978,7 @@ class AutoRoundFormat(OutputFormat):
         serialization_dict: dict = None,
         **kwargs,
     ) -> torch.nn.Module:
+        print(f"=============auto_round/formats.py, save_quantized, self.backend: {self.backend}")
         if self.backend is not None:
             return self.backend.save_quantized(
                 output_dir=output_dir,

@@ -94,6 +94,17 @@ class MXQuantLinearBase(QModuleBase):
         )
         self.register_buffer("weight_scale", init_weight_scale)
 
+        # Rotation matrices buffers
+        # hard code -> block_size
+        self.register_buffer(
+            "forward_hadamard_matrix",
+            torch.empty(
+                32,
+                32,
+                dtype=dtype,
+            ),
+        )
+
     def initialize_weights(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Initialize weights. This method should be overridden by subclasses.
@@ -145,7 +156,20 @@ class MXQuantLinearBase(QModuleBase):
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        qdq_input = self.qdq_input(input)
+        # transform
+        print(input.device)
+        print(self.forward_hadamard_matrix.device)
+        from ..triton.mxfp4 import mxfp4_forward_kernel_wrapper
+        x_flat = input.contiguous().flatten(end_dim=-2)
+        qdq_input, mask = mxfp4_forward_kernel_wrapper(
+            x_flat,
+            self.forward_hadamard_matrix.contiguous(),
+            return_clip_mask=True,
+            quest=False,
+            gaussian_scale=3.0 / 4.0,
+        )
+
+        # qdq_input = self.qdq_input(input)
         qdq_weight = self.dequant_weight_online()
         qdq_weight = qdq_weight.to(qdq_input.dtype)
         out = torch.nn.functional.linear(qdq_input, qdq_weight, self.bias)

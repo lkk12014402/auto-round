@@ -157,6 +157,7 @@ def pack_layer(layer_name, model, backend, device=None):
         None: The function modifies the model in place.
     """
     layer = get_module(model, layer_name)
+    print(f"================pack_layer: {layer}")
     if hasattr(layer, "orig_layer"):
         layer = layer.orig_layer
 
@@ -177,6 +178,8 @@ def pack_layer(layer_name, model, backend, device=None):
 
     scale = layer.scale
     zp = layer.zp
+    print(scale)
+    exit()
     QuantLinear = dynamic_import_quant_linear_for_packing(backend, bits, group_size, sym, act_bits)
 
     if type(layer) == nn.Linear:
@@ -261,6 +264,9 @@ def save_quantized_as_autoround(
     safe_serialization = True if "safe_serialization" not in kwargs.keys() else kwargs["safe_serialization"]
     if not inplace:
         model = copy.deepcopy(model.to("cpu"))
+
+    print(model)
+    exit()
 
     quantization_config = serialization_dict
     quantization_config["block_name_to_quantize"] = quantization_config.pop("to_quant_block_names", None)
