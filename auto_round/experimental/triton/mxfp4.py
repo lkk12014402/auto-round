@@ -150,10 +150,6 @@ def mxfp4_forward_kernel_wrapper(
         clip_mask = None
 
     # Debug prints (optional)
-    print("x:", x.shape, x.device, x.dtype)
-    print("hadamard_matrix:", hadamard_matrix.shape, hadamard_matrix.device, hadamard_matrix.dtype)
-    print("output:", output.shape, output.device, output.dtype)
-    print("clip_mask:", None if clip_mask is None else (clip_mask.shape, clip_mask.device, clip_mask.dtype))
 
     # Get total number of elements and calculate grid for launching the kernel
     n_elements = x.numel()
@@ -196,15 +192,6 @@ def mxfp4_forward_kernel_wrapper_old(
     # Get total number of elements and calculate grid for launching the kernel
     n_elements = x.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-    print(hadamard_matrix.shape)
-    print(x.device)
-    print(x.shape)
-    print(hadamard_matrix.device)
-    print(x.dtype)
-    print(hadamard_matrix.dtype)
-    print(output.device)
-    print(output.dtype)
-    print(clip_mask)
     # Launch optimized kernel
     # with torch.device(x.device):
     with torch.cuda.device(x.device.index):

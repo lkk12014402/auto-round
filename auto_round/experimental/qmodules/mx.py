@@ -157,10 +157,11 @@ class MXQuantLinearBase(QModuleBase):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # transform
-        print(input.device)
-        print(self.forward_hadamard_matrix.device)
         from ..triton.mxfp4 import mxfp4_forward_kernel_wrapper
+        # print(input.shape)
+        orig_shape = input.shape
         x_flat = input.contiguous().flatten(end_dim=-2)
+        # print(x_flat.shape)
         qdq_input, mask = mxfp4_forward_kernel_wrapper(
             x_flat,
             self.forward_hadamard_matrix.contiguous(),
@@ -168,11 +169,14 @@ class MXQuantLinearBase(QModuleBase):
             quest=False,
             gaussian_scale=3.0 / 4.0,
         )
+        qdq_input = qdq_input.reshape(orig_shape)
 
         # qdq_input = self.qdq_input(input)
         qdq_weight = self.dequant_weight_online()
         qdq_weight = qdq_weight.to(qdq_input.dtype)
         out = torch.nn.functional.linear(qdq_input, qdq_weight, self.bias)
+        # print(out.shape)
+        # exit()
         return out
 
     @classmethod

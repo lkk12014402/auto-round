@@ -143,6 +143,7 @@ class WrapperLinear(torch.nn.Module):
             self.orig_forward = self.linear_forward if type(self.orig_layer) == torch.nn.Linear else self.conv1d_forward
 
         self.enable_transform = False
+        transform_config = {"transform_class": "hadamard"}
         if transform_config:
             from .transforms.transforms import build_transform, get_transform_matrix
             # support
@@ -245,12 +246,12 @@ class WrapperLinear(torch.nn.Module):
             quant_kwargs["super_bits"] = self.orig_layer.super_bits
             quant_kwargs["super_group_size"] = self.orig_layer.super_group_size
 
-        print(f"====================_qdq_weight, weight before: {weight}")
+        # print(f"====================_qdq_weight, weight before: {weight}")
         # apply rotate
         if self.enable_transform:
             weight = self.in_transform(weight)
 
-        print(f"====================_qdq_weight, weight transformed: {weight}")
+        # print(f"====================_qdq_weight, weight transformed: {weight}")
 
         weight_q, scale, zp = self.weight_quant_func(
             weight.to(self.device),
@@ -268,10 +269,10 @@ class WrapperLinear(torch.nn.Module):
             global_scale=getattr(self, "weight_global_scale", None),
             **quant_kwargs,
         )
-        print(f"====================scale: {scale}")
-        print(f"====================scale: {scale.shape}")
-        print(f"====================zp: {zp}")
-        print(f"====================weight_q, weight quantized: {weight_q}")
+        # print(f"====================scale: {scale}")
+        # print(f"====================scale: {scale.shape}")
+        # print(f"====================zp: {zp}")
+        # print(f"====================weight_q, weight quantized: {weight_q}")
 
         weight_q = weight_q.to(weight.dtype)
         if type(self.orig_layer) == transformers.pytorch_utils.Conv1D:
@@ -289,8 +290,9 @@ class WrapperLinear(torch.nn.Module):
         Returns:
             tuple: Quantized activation, scale, and zero point.
         """
-        print("_qdq_act ??????????????????????????????????????????????????????????????????????????")
-        exit()
+        # apply rotate
+        if self.enable_transform:
+            x = self.in_transform(x)
         act_max_scale.data.clamp_(0, 1.0)
         x, scale, zp = self.act_quant_func(
             x,
@@ -531,9 +533,17 @@ class WrapperWALayer(torch.nn.Module):
         if self.enable_torch_compile:
             self.act_quant_func = compile_func(self.act_quant_func, self.device)
         self.extra_repr_org = orig_layer.extra_repr
+        transform_config = {"transform_class": "hadamard"}
+        if transform_config:
+            from .transforms.transforms import build_transform, get_transform_matrix
+            # support
+            self.in_transform = build_transform(**transform_config)
+            self.enable_transform = True
 
     def forward(self, x):
         act_max = self.orig_layer.act_max if hasattr(self.orig_layer, "act_max") else None
+        # print("=========================where ???????")
+        x = self.in_transform(x)
         x, _, _ = self.orig_layer.act_quant_func(
             x,
             bits=self.orig_layer.act_bits,

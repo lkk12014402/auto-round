@@ -115,6 +115,7 @@ def pack_layer(name, model, backend, device=None):
     qlayer.pack(layer, scale, global_scale=global_scale, input_global_scale=input_global_scale, device=device)
 
     transform_matrix = getattr(layer, "forward_hadamard_matrix", None)
+
     if transform_matrix is not None:
         qlayer.register_buffer("forward_hadamard_matrix", transform_matrix)
 

@@ -2963,12 +2963,17 @@ class BaseCompressor(object):
             clear_memory(device_list=self.device_list)  # clear cached memory during training
         if len(unquantized_layer_names) != 0:
             logger.info(f"{unquantized_layer_names} have not been quantized")
+
+        print(block)
         with torch.no_grad():
             unwrapper_block(block, best_params)
+        print(f"====================unwrapper_block: {block}")
 
         if is_nv_fp(self.act_data_type):
             # enable moe experts act_max automatic generation for WrapperWALayer
             set_amax_for_all_moe_layers(block, attr_name="orig_layer.act_max")
+
+        print(f"===================self.enable_quanted_input: {self.enable_quanted_input}")
 
         if self.enable_quanted_input:
             q_outputs = self._get_block_outputs(
