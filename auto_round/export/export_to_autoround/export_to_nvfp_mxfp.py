@@ -113,6 +113,12 @@ def pack_layer(name, model, backend, device=None):
     ## no zeros to handle, as mxfp/nvfp do not support asym quantization
     # zero = layer.zp
     qlayer.pack(layer, scale, global_scale=global_scale, input_global_scale=input_global_scale, device=device)
+    transform_config = getattr(layer, "transform_config", None)
+    if transform_config is not None:
+        qlayer.transform_config = transform_config
+    transform_hook = getattr(layer, "transform_hook", None)
+    if transform_hook is not None:
+        qlayer.transform_hook = transform_hook
     qlayer.to(orig_device)
     set_module(model, name, qlayer)
     # Note: release weight and bias explicitly, in case they are referenced elsewhere

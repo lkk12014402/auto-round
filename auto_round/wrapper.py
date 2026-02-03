@@ -27,6 +27,8 @@ from auto_round.utils import (
     set_module,
 )
 
+from .experimental.transforms.hooks import TransformHook
+
 if deepspeed_exists:
     from deepspeed import comm as dist
     from deepspeed.module_inject import LinearAllreduce, LinearLayer
@@ -141,6 +143,9 @@ class WrapperLinear(torch.nn.Module):
         else:
             self.orig_forward = self.linear_forward if type(self.orig_layer) == torch.nn.Linear else self.conv1d_forward
 
+        self.transform_hook: TransformHook | None = getattr(self.orig_layer, "transform_hook", None)
+        self.transform_state: dict = getattr(self.orig_layer, "transform_state", {}) or {}
+
     def _init_tuning_params_and_quant_func(self):
         """Initializes tuning parameters and quantization functions.
 
@@ -235,6 +240,14 @@ class WrapperLinear(torch.nn.Module):
             quant_kwargs["super_bits"] = self.orig_layer.super_bits
             quant_kwargs["super_group_size"] = self.orig_layer.super_group_size
 
+        if self.transform_hook is not None:
+            weight = self.transform_hook.pre_quant_weight(
+                weight,
+                device=self.device,
+                dtype=weight.dtype,
+                extra_state=self.transform_state,
+            )
+
         weight_q, scale, zp = self.weight_quant_func(
             weight.to(self.device),
             bits=self.orig_layer.bits,
@@ -268,6 +281,15 @@ class WrapperLinear(torch.nn.Module):
             tuple: Quantized activation, scale, and zero point.
         """
         act_max_scale.data.clamp_(0, 1.0)
+
+        if self.transform_hook is not None:
+            x = self.transform_hook.pre_quant_act(
+                x,
+                device=self.device,
+                dtype=x.dtype,
+                extra_state=self.transform_state,
+            )
+
         x, scale, zp = self.act_quant_func(
             x,
             bits=self.orig_layer.act_bits,
@@ -323,6 +345,7 @@ class WrapperLinear(torch.nn.Module):
         qdq_weight, scale, zp = self._qdq_weight(v, min_scale, max_scale)
         # if hasattr(self.orig_layer, "imatrix"):
         #     self.orig_layer.imatrix = None
+        orig_dtype = self.orig_layer.weight.dtype
         self.orig_layer.weight.data.copy_(qdq_weight)
         self.orig_layer.weight.grad = None
 
@@ -346,6 +369,14 @@ class WrapperLinear(torch.nn.Module):
             self.orig_layer.scale = scale.reshape(shape[0], -1).to("cpu")
         else:
             self.orig_layer.scale = scale.view(-1).to("cpu")
+
+        if self.transform_hook is not None:
+            self.transform_hook.post_quant_weight(
+                self.orig_layer,
+                device=self.device,
+                dtype=orig_dtype,
+                extra_state=self.transform_state,
+            )
 
         if zp is not None:
             if isinstance(zp, dict):
@@ -502,8 +533,20 @@ class WrapperWALayer(torch.nn.Module):
             self.act_quant_func = compile_func(self.act_quant_func, self.device)
         self.extra_repr_org = orig_layer.extra_repr
 
+        self.transform_hook: TransformHook | None = getattr(
+            self.orig_layer, "transform_hook", None
+        )
+        self.transform_state: dict = getattr(self.orig_layer, "transform_state", {}) or {}
+
     def forward(self, x):
         act_max = self.orig_layer.act_max if hasattr(self.orig_layer, "act_max") else None
+        if self.transform_hook is not None:
+            x = self.transform_hook.pre_quant_act(
+                x,
+                device=self.device if hasattr(self, "device") else x.device,
+                dtype=x.dtype,
+                extra_state=self.transform_state,
+            )
         x, _, _ = self.orig_layer.act_quant_func(
             x,
             bits=self.orig_layer.act_bits,
