@@ -38,7 +38,7 @@ class IdentityTransform(nn.Module):
         pass
 
 
-class HadamardTransform(nn.Module):
+class OldHadamardTransform(nn.Module):
 
     def __init__(self, transform_block_size: int = 32):
         super().__init__()
@@ -55,6 +55,53 @@ class HadamardTransform(nn.Module):
         return hadamard_transform(torch.eye(self.dim, device=device, dtype=dtype), scale=1 / math.sqrt(self.dim))
 
 
+from utils.hadamard import deterministic_hadamard_matrix
+from utils.matrix import apply_transform_weight 
+
+class HadamardTransform(nn.Module):
+
+    def __init__(
+        self,
+        transform_block_size: int = 32,
+        device: torch.device = None,
+        precision: torch.dtype = None,
+        location: str = "weight",
+        module_type: type[torch.nn.Module] = None,
+    ):
+        super().__init__()
+        self.size = transform_block_size
+        self.scale = 1 / math.sqrt(self.size)
+        self.location = location
+        self.module_type = module_type
+        self.weight = self._create_weight(self.size, device, precision)
+        print(self.weight)
+
+    def _create_weight(
+        self,
+        size: int,
+        device: torch.device = None,
+        precision: torch.dtype = None,
+    ) -> torch.nn.Parameter:
+        data = deterministic_hadamard_matrix(size, precision, device) * self.scale
+        # TODO: implement SpinQuant, which rotation matrix is learnable
+        return nn.Parameter(data, requires_grad=False)
+
+    def forward(self, x: torch.Tensor):
+        # Hadamard transform is it own inverse
+        ori_shape = x.shape
+        #weight = self.weight.T.view(-1, self.size)
+        weight = self.weight.view(-1, self.size)
+        print(self.scale)
+        return (
+            apply_transform_weight(
+                weight.to(device=x.device),
+                x.to(dtype=weight.dtype),
+                self.location,
+                self.module_type,
+            )
+        ).to(x.dtype).view(ori_shape)
+
+
 TRANSFORMS = {
     "identity": IdentityTransform,
     "hadamard": HadamardTransform,
@@ -64,3 +111,17 @@ TRANSFORMS = {
 def build_transform(transform_type: str, **transform_kwargs):
     transform = TRANSFORMS[transform_type]
     return transform(**filter_kwarg_dict(transform.__init__, transform_kwargs))
+
+
+a = torch.randn([128, 128], dtype=torch.bfloat16, device="cuda")
+
+old_transform = OldHadamardTransform()
+
+print(old_transform(a))
+
+print(old_transform.get_transform_matrix(device=torch.device("cuda"), dtype=torch.bfloat16))
+
+new_transform = HadamardTransform(device=torch.device("cuda"), precision=torch.bfloat16, module_type=torch.nn.Linear)
+
+
+print(new_transform(a))
