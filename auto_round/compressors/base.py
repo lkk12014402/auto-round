@@ -57,6 +57,7 @@ from auto_round.compressors.utils import (
 from auto_round.data_type import QUANT_FUNC_WITH_DTYPE
 from auto_round.data_type.utils import reshape_pad_tensor_by_group_size, update_block_global_scale_if_needed
 from auto_round.experimental.transform.hadamard_config import HadamardConfig
+from auto_round.experimental.transform.selective import resolve_hadamard_layer_selection
 from auto_round.export.export_to_gguf.config import GGUF_INNER_CONFIG
 from auto_round.formats import OutputFormat, get_formats
 from auto_round.logger import logger
@@ -557,13 +558,12 @@ class BaseCompressor(object):
             except (ImportError, ModuleNotFoundError):
                 logger.error("algorithm extension import error, fallback to default mode")
 
-        # apply hadamard transform
         if hadamard_config:
-            from auto_round.experimental.transform.apply import apply_hadamard_transform
             from auto_round.experimental.utils import normalize_hadamard_config
 
             self.hadamard_config = normalize_hadamard_config(hadamard_config, self.scheme)
-            self.model = apply_hadamard_transform(self.model, self.hadamard_config, scheme=self.scheme)
+            self._hadamard_decisions = {}
+            self._hadamard_applied = False
 
     def _gen_auto_scheme(self) -> dict[str, dict]:
         if self.mllm:
@@ -1425,19 +1425,21 @@ class BaseCompressor(object):
                         materialize_model_(block)
 
                         for name, m in block.named_modules():
-                            if hasattr(m, "global_name") and m.global_name in all_to_quantized_module_names:
-                                self._quantize_layer_via_rtn(m.global_name, to_cpu=self.low_gpu_mem_usage)
-                                all_to_quantized_module_names.remove(m.global_name)
+                            global_name = getattr(m, "global_name", None)
+                            if global_name is not None and global_name in all_to_quantized_module_names:
+                                self._quantize_layer_via_rtn(global_name, to_cpu=self.low_gpu_mem_usage)
+                                all_to_quantized_module_names.remove(global_name)
                             elif (
                                 not any(m.children())
                                 and len(m.state_dict()) > 0
-                                and m.global_name not in tied_weights_layers
+                                and global_name is not None
+                                and global_name not in tied_weights_layers
                                 and self.is_immediate_saving
                             ):
-                                set_module(self.model, m.global_name, copy.deepcopy(m))
+                                set_module(self.model, global_name, copy.deepcopy(m))
                                 if self.is_immediate_saving:
-                                    shard_writer(self, name=m.global_name)
-                                    copied_m = get_module(self.model, m.global_name)
+                                    shard_writer(self, name=global_name)
+                                    copied_m = get_module(self.model, global_name)
                                     copied_m.to("meta")
                                 m.to("meta")
                         # Move remaining GPU tensors to CPU; offload to disk if low_cpu_mem_usage.
@@ -1771,6 +1773,7 @@ class BaseCompressor(object):
             enable_gguf_official_mixed = False
 
         self.configure_layer_config(enable_gguf_official_mixed=enable_gguf_official_mixed)
+        self._prepare_hadamard_transforms()
 
         if self.low_cpu_mem_usage:
             self._offloader.reset()
@@ -1908,6 +1911,68 @@ class BaseCompressor(object):
 
         self.quantized = True
         return self.model, self.layer_config
+
+    def _run_hadamard_selection_calibration(self):
+        hadamard_device = self.device if isinstance(self.device, str) else str(self.device)
+        restore_to_cpu = True
+        remove_dispatch_hooks = False
+
+        try:
+            if hasattr(self.model, "hf_device_map") and len(self.model.hf_device_map) > 1:
+                dispatch_model(self.model, self.model.hf_device_map)
+                remove_dispatch_hooks = True
+                restore_to_cpu = False
+            else:
+                self.model = self.model.to(hadamard_device)
+            self.calib(self.nsamples, self.batch_size)
+        except torch.OutOfMemoryError:
+            logger.warning("Hadamard layer selection ran out of memory on %s; falling back to CPU.", hadamard_device)
+            if remove_dispatch_hooks:
+                accelerate.hooks.remove_hook_from_submodules(self.model)
+                remove_dispatch_hooks = False
+            self.model = mv_module_from_gpu(self.model)
+            clear_memory(device_list=self.device_list)
+            self.model = self.model.to("cpu")
+            self.calib(self.nsamples, self.batch_size)
+        finally:
+            if remove_dispatch_hooks:
+                accelerate.hooks.remove_hook_from_submodules(self.model)
+            if restore_to_cpu:
+                self.model = mv_module_from_gpu(self.model)
+                clear_memory(device_list=self.device_list)
+
+    def _prepare_hadamard_transforms(self):
+        hadamard_config = getattr(self, "hadamard_config", None)
+        if not hadamard_config or getattr(self, "_hadamard_applied", False):
+            return
+
+        from auto_round.experimental.transform.apply import apply_hadamard_transform
+
+        config = hadamard_config if isinstance(hadamard_config, HadamardConfig) else HadamardConfig(**hadamard_config)
+        selected_configs, decisions = resolve_hadamard_layer_selection(
+            self.model,
+            self.layer_config,
+            config,
+            run_forward=self._run_hadamard_selection_calibration if config.selector == "heuristic" else None,
+        )
+        self._hadamard_decisions = decisions
+
+        # Persist Hadamard decisions purely as per-layer overrides so exported
+        # models replay exactly the selected transform set.
+        self.hadamard_config = None
+
+        if not selected_configs:
+            self._hadamard_applied = True
+            logger.info("No layers selected for Hadamard transform.")
+            return
+
+        self.model = apply_hadamard_transform(
+            self.model,
+            config=None,
+            module_configs=selected_configs,
+            scheme=self.scheme,
+        )
+        self._hadamard_applied = True
 
     def _quantize_layers(self, layer_names: list, layer_inputs: dict) -> None:
         """Quantizes specified layers based on inputs and configuration.

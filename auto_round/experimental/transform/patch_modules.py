@@ -7,8 +7,11 @@ import transformers
 from auto_round.export.export_to_autoround.qlinear_fp import QuantLinear, pack_fp4_to_uint8
 from auto_round.wrapper import WrapperLinear, WrapperWALayer
 
+WEIGHT_TRANSFORM_ATTR = "_auto_round_weight_hadamard_transform"
+INPUT_TRANSFORM_ATTR = "_auto_round_input_hadamard_transform"
 
-def patch_wrapperlinear_to_apply_transform(w_transform, inp_transform):
+
+def patch_wrapperlinear_to_apply_transform():
     """
     Globally monkey-patch WrapperLinear._qdq_weight and WrapperLinear._qdq_act so that it applies
     a weight and activation transform before quantization.
@@ -22,11 +25,9 @@ def patch_wrapperlinear_to_apply_transform(w_transform, inp_transform):
     orig_qdq_weight = WrapperLinear._qdq_weight
 
     def _qdq_weight_patched(self, value, min_scale, max_scale):
-        """
-        # If no transform attached, fall back to original behavior
-        if not hasattr(self.orig_layer, transform_attr):
+        transform = getattr(self.orig_layer, WEIGHT_TRANSFORM_ATTR, None)
+        if transform is None:
             return orig_qdq_weight(self, value, min_scale, max_scale)
-        """
 
         if self.orig_layer.bits >= 16:
             # keep original behavior for >=16bit to avoid changing semantics unexpectedly
@@ -41,9 +42,9 @@ def patch_wrapperlinear_to_apply_transform(w_transform, inp_transform):
                 is_conv1d = type(self.orig_layer) == transformers.pytorch_utils.Conv1D
                 if is_conv1d:
                     weight = weight.t().continuous()
-                new_weight = w_transform(weight)
+                new_weight = transform(weight)
                 if is_conv1d:
-                    new_weight = weight.t().continuous()
+                    new_weight = new_weight.t().continuous()
                 self.orig_layer.weight.data.copy_(new_weight)
                 self.applied_weight_hadamard = True
 
@@ -52,8 +53,9 @@ def patch_wrapperlinear_to_apply_transform(w_transform, inp_transform):
     orig_qdq_act = WrapperLinear._qdq_act
 
     def _qdq_act_patched(self, x, act_max_scale, act_max=None):
-
-        x = inp_transform(x)
+        transform = getattr(self.orig_layer, INPUT_TRANSFORM_ATTR, None)
+        if transform is not None:
+            x = transform(x)
 
         return orig_qdq_act(self, x, act_max_scale, act_max)
 
@@ -62,7 +64,7 @@ def patch_wrapperlinear_to_apply_transform(w_transform, inp_transform):
     WrapperLinear._hadamard_patched = True
 
 
-def patch_wrapperwalayer_forward_to_apply_transform(inp_transform):
+def patch_wrapperwalayer_forward_to_apply_transform():
     """
     Globally monkey-patch WrapperWALayer.forward so that it applies
     a activation transform before quantization.
@@ -76,16 +78,13 @@ def patch_wrapperwalayer_forward_to_apply_transform(inp_transform):
     orig_forward = WrapperWALayer.forward
 
     def _forward_patched(self, x):
-        """
-        # If no transform attached, fall back to original behavior
-        if not hasattr(self.orig_layer, transform_attr):
+        transform = getattr(self.orig_layer, INPUT_TRANSFORM_ATTR, None)
+        if transform is None:
             return orig_forward(self, x)
-        """
 
         act_max = self.orig_layer.act_max if hasattr(self.orig_layer, "act_max") else None
 
-        # transform = getattr(self.orig_layer, transform_attr)
-        x = inp_transform(x)
+        x = transform(x)
 
         x, _, _ = self.orig_layer.act_quant_func(
             x,
@@ -165,7 +164,7 @@ def patch_quantlinear(hadamard_type):
             self.input_global_scale = input_global_scale.to(torch.float32).to(device).reshape([1])
 
         # add transform weight
-        transform = getattr(linear, hadamard_type)
+        transform = getattr(linear, WEIGHT_TRANSFORM_ATTR)
         self.register_buffer("hadamard_matrix", transform.weight.to(device))
         return
 

@@ -7,6 +7,10 @@ import tqdm
 from auto_round.experimental.qmodules.base import QModuleBase
 from auto_round.experimental.transform.hadamard_config import HadamardConfig
 from auto_round.experimental.transform.hadamards import build_hadamard_transform
+from auto_round.experimental.transform.patch_modules import (
+    INPUT_TRANSFORM_ATTR,
+    WEIGHT_TRANSFORM_ATTR,
+)
 from auto_round.experimental.utils import is_triton_kernel_available, normalize_hadamard_config
 
 __all__ = ["apply_hadamard_transform"]
@@ -15,6 +19,7 @@ __all__ = ["apply_hadamard_transform"]
 def apply_hadamard_transform(
     model: torch.nn.Module,
     config: str | dict | HadamardConfig | None,
+    module_configs: dict[str, str | dict | HadamardConfig] | None = None,
     location: str = "weight",
     use_tqdm=True,
     desc=None,
@@ -54,24 +59,41 @@ def apply_hadamard_transform(
         ``config.transform_type``.
     """
 
-    config = normalize_hadamard_config(config, scheme)
-    if not isinstance(config, HadamardConfig):
-        config = HadamardConfig(**config)
+    modules_config = []
+    if module_configs is not None:
+        normalized_module_configs = {}
+        for name, sub_config in module_configs.items():
+            normalized = normalize_hadamard_config(sub_config, scheme)
+            normalized_module_configs[name] = normalized if isinstance(normalized, HadamardConfig) else HadamardConfig(**normalized)
+        for name, module in model.named_modules():
+            if name not in normalized_module_configs:
+                continue
+            if not isinstance(module, torch.nn.Linear) and not isinstance(module, QModuleBase):
+                continue
+            modules_config.append((name, module, normalized_module_configs[name]))
+        if not modules_config:
+            return model
+        if desc is None:
+            desc = "Applying selective hadamard transforms"
+    else:
+        config = normalize_hadamard_config(config, scheme)
+        if not isinstance(config, HadamardConfig):
+            config = HadamardConfig(**config)
+        modules_config = [
+            (name, module, config)
+            for name, module in model.named_modules()
+            if isinstance(module, torch.nn.Linear) or isinstance(module, QModuleBase)
+        ]
+        desc = f"Applying {config.hadamard_type} transforms" if desc is None else desc
 
-    modules_config = [
-        (name, module, config)
-        for name, module in model.named_modules()
-        if isinstance(module, torch.nn.Linear) or isinstance(module, QModuleBase)
-    ]
-
-    desc = f"Applying {config.hadamard_type} transforms" if desc is None else desc
     for name, module, config in tqdm.tqdm(modules_config, desc=desc, disable=(not use_tqdm)):
         if "lm_head" in name:
             continue
         _apply_to_module(model, module, config, location, data_type)
 
     # attach config to model for compression/serialization
-    setattr(model, "hadamard_config", config)
+    if module_configs is None:
+        setattr(model, "hadamard_config", config)
 
     return model
 
@@ -97,7 +119,7 @@ def _apply_to_module(
 
         # activation needs transpose
         input_hadamard_transform = build_hadamard_transform(
-            **config.dict(),
+            **config.model_dump(),
             location="input",
             inverse=True,
             device="cpu",
@@ -163,14 +185,14 @@ def _apply_to_module(
         assert hasattr(module, "weight")
 
         weight_hadamard_transform = build_hadamard_transform(
-            **config.dict(),
+            **config.model_dump(),
             location="weight",
             device=module.weight.device,
         )
 
         # need save random hadamard matrix needed when inference
+        module.register_module(WEIGHT_TRANSFORM_ATTR, weight_hadamard_transform)
         if config.hadamard_type == "random_hadamard":
-            module.register_module(config.hadamard_type, weight_hadamard_transform)
             # for saving transform weight
             from auto_round.experimental.transform.patch_modules import patch_quantlinear
 
@@ -184,14 +206,15 @@ def _apply_to_module(
         )
 
         input_hadamard_transform = build_hadamard_transform(
-            **config.dict(),
+            **config.model_dump(),
             location="input",
             inverse=True,
             device=module.weight.device,
         )
+        module.register_module(INPUT_TRANSFORM_ATTR, input_hadamard_transform)
 
-        patch_wrapperlinear_to_apply_transform(weight_hadamard_transform, input_hadamard_transform)
-        patch_wrapperwalayer_forward_to_apply_transform(input_hadamard_transform)
+        patch_wrapperlinear_to_apply_transform()
+        patch_wrapperwalayer_forward_to_apply_transform()
 
     else:
         # TODO: apply transform to output/q/k

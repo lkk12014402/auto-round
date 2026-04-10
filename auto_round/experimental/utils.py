@@ -145,7 +145,8 @@ def normalize_hadamard_config(hadamard_config: str | dict | HadamardConfig | Non
         - None           -> {}
         - dict           -> validated via HadamardConfig
         - HadamardConfig -> validated & converted to dict
-        - str            -> shorthand for `hadamard_type` in HADAMARDS keys
+        - str            -> shorthand for `hadamard_type` in HADAMARDS keys or
+                            selective presets such as "selective"/"heuristic"
 
     Additional behavior:
         - If block_size is not set by user:
@@ -227,6 +228,14 @@ def normalize_hadamard_config(hadamard_config: str | dict | HadamardConfig | Non
                 return HadamardConfig.model_validate(cfg_dict).model_dump()
             except Exception as e:
                 raise ValueError(f"Invalid default hadamard_config after scheme adjustment: {e}") from e
+
+        if key in {"selective", "heuristic", "auto"}:
+            cfg_dict = {"selector": "heuristic"}
+            cfg_dict = _apply_scheme_block_size(cfg_dict, block_size_explicitly_set=False)
+            try:
+                return HadamardConfig.model_validate(cfg_dict).model_dump()
+            except Exception as e:
+                raise ValueError(f"Invalid selective hadamard_config string {key!r}: {e}") from e
 
         if key not in HADAMARDS:
             raise ValueError(f"Invalid hadamard_config string: {key!r}. Expected one of {sorted(HADAMARDS.keys())}.")

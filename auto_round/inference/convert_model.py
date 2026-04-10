@@ -676,19 +676,17 @@ def convert_hf_model(model: nn.Module, target_device: str = "cpu") -> tuple[nn.M
     layer_configs = get_layer_config(model, quantization_config)
     used_backends = _replace_by_quant_layers(model, layer_configs, backend, target_device, packing_format)
 
-    hadamard_config = getattr(quantization_config, "hadamard_config", None)
-    if hadamard_config is not None and hadamard_config:
+    hadamard_layer_configs = {
+        layer_name: config.hadamard_config
+        for layer_name, config in layer_configs.items()
+        if getattr(config, "hadamard_config", None) and getattr(config, "bits", 16) < 16
+    }
+    if hadamard_layer_configs:
         from auto_round.experimental.transform.apply import apply_hadamard_transform
-        from auto_round.experimental.transform.hadamard_config import HadamardConfig
-
-        # apply forward hook
-        act_hadamard_config = HadamardConfig(
-            block_size=hadamard_config["block_size"],
-            hadamard_type=hadamard_config["hadamard_type"],
-        )  # apply to activation
         model = apply_hadamard_transform(
             model,
-            act_hadamard_config,
+            config=None,
+            module_configs=hadamard_layer_configs,
             location="input",
             desc="Register pre forward hook for hadamard transform",
             data_type=quantization_config.data_type,
