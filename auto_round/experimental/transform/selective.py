@@ -197,23 +197,11 @@ def collect_linear_input_stats(
     return {name: moment.finalize() for name, moment in moments.items()}
 
 
-def get_layer_hadamard_configs(layer_config: dict) -> dict[str, dict]:
-    selected_configs = {}
-    for layer_name, cfg in layer_config.items():
-        hadamard_config = cfg.get("hadamard_config")
-        if not hadamard_config or not check_to_quantized(cfg):
-            continue
-        selected_configs[layer_name] = hadamard_config
-    return selected_configs
-
-
-def resolve_hadamard_layer_selection(
+def _collect_candidate_layer_names(
     model: torch.nn.Module,
     layer_config: dict,
     config: HadamardConfig,
-    run_forward: Callable[[], None] | None = None,
-) -> tuple[dict[str, dict], dict[str, dict]]:
-    materialized_config = config.to_transform_dict()
+) -> tuple[dict[str, torch.nn.Module], list[str]]:
     modules_by_name = dict(model.named_modules())
     candidate_names = []
 
@@ -231,6 +219,226 @@ def resolve_hadamard_layer_selection(
             continue
         candidate_names.append(layer_name)
 
+    return modules_by_name, candidate_names
+
+
+def _score_layer(stats: dict[str, float], structure: dict[str, bool | int | str], config: HadamardConfig) -> float:
+    score = 0.0
+    kurtosis = float(stats.get("kurtosis", 0.0))
+    energy_ratio = float(stats.get("energy_ratio", 0.0))
+
+    if kurtosis > config.kurtosis_threshold:
+        score += 1.0
+    if energy_ratio > config.energy_ratio_threshold:
+        score += 1.0
+    if structure["is_expand"]:
+        score += 1.0
+    if structure["has_nonlinearity_after"]:
+        score += 0.5
+    if structure["is_residual_consumer"]:
+        score -= 1.5
+    if structure["is_compress"]:
+        score -= 1.0
+    return score
+
+
+def _build_layer_decision(
+    layer_name: str,
+    stats: dict[str, float],
+    module: torch.nn.Module,
+    modules_by_name: dict[str, torch.nn.Module],
+    config: HadamardConfig,
+) -> dict[str, bool | float | str | int | None]:
+    structure = _build_structure_info(layer_name, module, modules_by_name)
+    role = structure["role"]
+    kurtosis = float(stats.get("kurtosis", 0.0))
+    energy_ratio = float(stats.get("energy_ratio", 0.0))
+    score = _score_layer(stats, structure, config)
+    decision = {
+        "enabled": False,
+        "score": score,
+        "kurtosis": kurtosis,
+        "energy_ratio": energy_ratio,
+        "role": role,
+        "expand": bool(structure["is_expand"]),
+        "compress": bool(structure["is_compress"]),
+        "residual": bool(structure["is_residual_consumer"]),
+        "has_nonlinearity_after": bool(structure["has_nonlinearity_after"]),
+        "head_dim": structure["head_dim"],
+        "reason": "score_below_threshold",
+    }
+
+    if role in {"lm_head", "attn_qkv"}:
+        decision["reason"] = f"hard_skip:{role}"
+    elif role in {"attn_q", "attn_k"}:
+        decision["reason"] = "pending_qk_pair"
+    elif score >= config.score_threshold:
+        decision["enabled"] = True
+        decision["reason"] = "score_threshold"
+
+    return decision
+
+
+def _finalize_qk_pair(q_name: str, k_name: str, decisions: dict[str, dict], config: HadamardConfig):
+    q_head_dim = decisions[q_name]["head_dim"]
+    k_head_dim = decisions[k_name]["head_dim"]
+    if (isinstance(q_head_dim, int) and q_head_dim < config.min_qk_head_dim) or (
+        isinstance(k_head_dim, int) and k_head_dim < config.min_qk_head_dim
+    ):
+        decisions[q_name]["reason"] = "head_dim_too_small"
+        decisions[k_name]["reason"] = "head_dim_too_small"
+        return
+
+    pair_score = (float(decisions[q_name]["score"]) + float(decisions[k_name]["score"])) / 2.0
+    if pair_score >= config.score_threshold:
+        decisions[q_name]["enabled"] = True
+        decisions[k_name]["enabled"] = True
+        decisions[q_name]["reason"] = "paired_qk_score"
+        decisions[k_name]["reason"] = "paired_qk_score"
+    else:
+        decisions[q_name]["reason"] = "paired_qk_score_below_threshold"
+        decisions[k_name]["reason"] = "paired_qk_score_below_threshold"
+
+
+def _compute_layer_decisions(
+    candidate_names: list[str],
+    stats_by_layer: dict[str, dict[str, float]],
+    modules_by_name: dict[str, torch.nn.Module],
+    config: HadamardConfig,
+) -> dict[str, dict]:
+    decisions = {}
+    qk_groups = {}
+
+    for layer_name in candidate_names:
+        module = modules_by_name[layer_name]
+        stats = stats_by_layer.get(layer_name, {})
+        decision = _build_layer_decision(layer_name, stats, module, modules_by_name, config)
+        if decision["role"] in {"attn_q", "attn_k"}:
+            parent_name = layer_name.rpartition(".")[0]
+            qk_groups.setdefault(parent_name, {})[decision["role"]] = layer_name
+        decisions[layer_name] = decision
+
+    for parent_name, group in qk_groups.items():
+        q_name = group.get("attn_q")
+        k_name = group.get("attn_k")
+        if q_name is None or k_name is None:
+            lone_name = q_name or k_name
+            decisions[lone_name]["reason"] = "missing_qk_pair"
+            decisions[lone_name]["enabled"] = False
+            continue
+        _finalize_qk_pair(q_name, k_name, decisions, config)
+
+    return decisions
+
+
+def _apply_layer_decisions(
+    layer_config: dict,
+    decisions: dict[str, dict],
+    materialized_config: dict[str, int | str],
+):
+    for layer_name, cfg in layer_config.items():
+        if decisions.get(layer_name, {}).get("enabled"):
+            cfg["hadamard_config"] = dict(materialized_config)
+        else:
+            cfg["hadamard_config"] = None
+
+
+def _log_layer_decision(layer_name: str, decision: dict):
+    logger.info(
+        "Layer: %s | role=%s | kurtosis=%.3f | ecr=%.4f | expand=%s | residual=%s | "
+        "head_dim=%s | score=%.2f | hadamard=%s (%s)",
+        layer_name,
+        decision["role"],
+        decision["kurtosis"],
+        decision["energy_ratio"],
+        decision["expand"],
+        decision["residual"],
+        decision["head_dim"],
+        decision["score"],
+        "enabled" if decision["enabled"] else "skipped",
+        decision["reason"],
+    )
+
+
+def _build_selection_units(candidate_names: list[str], modules_by_name: dict[str, torch.nn.Module]) -> list[list[str]]:
+    units = []
+    visited = set()
+    role_by_name = {name: _build_structure_info(name, modules_by_name[name], modules_by_name)["role"] for name in candidate_names}
+
+    for layer_name in candidate_names:
+        if layer_name in visited:
+            continue
+
+        role = role_by_name[layer_name]
+        if role in {"attn_q", "attn_k"}:
+            parent_name = layer_name.rpartition(".")[0]
+            q_name = None
+            k_name = None
+            for candidate in candidate_names:
+                if candidate.rpartition(".")[0] != parent_name:
+                    continue
+                if role_by_name[candidate] == "attn_q":
+                    q_name = candidate
+                elif role_by_name[candidate] == "attn_k":
+                    k_name = candidate
+            if q_name is not None and k_name is not None:
+                units.append([q_name, k_name])
+                visited.add(q_name)
+                visited.add(k_name)
+                continue
+
+        units.append([layer_name])
+        visited.add(layer_name)
+
+    return units
+
+
+def _resolve_streaming_hadamard_layer_selection(
+    model: torch.nn.Module,
+    layer_config: dict,
+    config: HadamardConfig,
+    modules_by_name: dict[str, torch.nn.Module],
+    candidate_names: list[str],
+    materialized_config: dict[str, int | str],
+    run_forward: Callable[[], None],
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    logger.warning(
+        "Streaming Hadamard selection is enabled: calibration will be replayed once per layer "
+        "or Q/K pair so decisions can be finalized and logged immediately."
+    )
+    decisions = {}
+    selection_units = _build_selection_units(candidate_names, modules_by_name)
+
+    for unit in selection_units:
+        stats_by_layer = collect_linear_input_stats(model, unit, run_forward)
+        unit_decisions = _compute_layer_decisions(unit, stats_by_layer, modules_by_name, config)
+        decisions.update(unit_decisions)
+        _apply_layer_decisions(layer_config, decisions, materialized_config)
+        for layer_name in unit:
+            _log_layer_decision(layer_name, unit_decisions[layer_name])
+
+    return get_layer_hadamard_configs(layer_config), decisions
+
+
+def get_layer_hadamard_configs(layer_config: dict) -> dict[str, dict]:
+    selected_configs = {}
+    for layer_name, cfg in layer_config.items():
+        hadamard_config = cfg.get("hadamard_config")
+        if not hadamard_config or not check_to_quantized(cfg):
+            continue
+        selected_configs[layer_name] = hadamard_config
+    return selected_configs
+
+
+def resolve_hadamard_layer_selection(
+    model: torch.nn.Module,
+    layer_config: dict,
+    config: HadamardConfig,
+    run_forward: Callable[[], None] | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    materialized_config = config.to_transform_dict()
+    modules_by_name, candidate_names = _collect_candidate_layer_names(model, layer_config, config)
+
     if not candidate_names:
         return {}, {}
 
@@ -244,107 +452,22 @@ def resolve_hadamard_layer_selection(
     if run_forward is None:
         raise ValueError("run_forward must be provided when selector='heuristic'")
 
-    stats_by_layer = collect_linear_input_stats(model, candidate_names, run_forward)
-    decisions = {}
-    qk_groups = {}
-
-    for layer_name in candidate_names:
-        module = modules_by_name[layer_name]
-        stats = stats_by_layer.get(layer_name, {})
-        structure = _build_structure_info(layer_name, module, modules_by_name)
-        role = structure["role"]
-        kurtosis = float(stats.get("kurtosis", 0.0))
-        energy_ratio = float(stats.get("energy_ratio", 0.0))
-        score = 0.0
-
-        if kurtosis > config.kurtosis_threshold:
-            score += 1.0
-        if energy_ratio > config.energy_ratio_threshold:
-            score += 1.0
-        if structure["is_expand"]:
-            score += 1.0
-        if structure["has_nonlinearity_after"]:
-            score += 0.5
-        if structure["is_residual_consumer"]:
-            score -= 1.5
-        if structure["is_compress"]:
-            score -= 1.0
-
-        decision = {
-            "enabled": False,
-            "score": score,
-            "kurtosis": kurtosis,
-            "energy_ratio": energy_ratio,
-            "role": role,
-            "expand": bool(structure["is_expand"]),
-            "compress": bool(structure["is_compress"]),
-            "residual": bool(structure["is_residual_consumer"]),
-            "has_nonlinearity_after": bool(structure["has_nonlinearity_after"]),
-            "head_dim": structure["head_dim"],
-            "reason": "score_below_threshold",
-        }
-
-        if role in {"lm_head", "ffn_down", "attn_out", "attn_v", "attn_qkv"}:
-            decision["reason"] = f"hard_skip:{role}"
-        elif role in {"attn_q", "attn_k"}:
-            parent_name = layer_name.rpartition(".")[0]
-            qk_groups.setdefault(parent_name, {})[role] = layer_name
-            decision["reason"] = "pending_qk_pair"
-        elif score >= config.score_threshold:
-            decision["enabled"] = True
-            decision["reason"] = "score_threshold"
-
-        decisions[layer_name] = decision
-
-    for parent_name, group in qk_groups.items():
-        q_name = group.get("attn_q")
-        k_name = group.get("attn_k")
-        if q_name is None or k_name is None:
-            lone_name = q_name or k_name
-            decisions[lone_name]["reason"] = "missing_qk_pair"
-            decisions[lone_name]["enabled"] = False
-            continue
-
-        q_head_dim = decisions[q_name]["head_dim"]
-        k_head_dim = decisions[k_name]["head_dim"]
-        if (isinstance(q_head_dim, int) and q_head_dim < config.min_qk_head_dim) or (
-            isinstance(k_head_dim, int) and k_head_dim < config.min_qk_head_dim
-        ):
-            decisions[q_name]["reason"] = "head_dim_too_small"
-            decisions[k_name]["reason"] = "head_dim_too_small"
-            continue
-
-        pair_score = (float(decisions[q_name]["score"]) + float(decisions[k_name]["score"])) / 2.0
-        if pair_score >= config.score_threshold:
-            decisions[q_name]["enabled"] = True
-            decisions[k_name]["enabled"] = True
-            decisions[q_name]["reason"] = "paired_qk_score"
-            decisions[k_name]["reason"] = "paired_qk_score"
-        else:
-            decisions[q_name]["reason"] = "paired_qk_score_below_threshold"
-            decisions[k_name]["reason"] = "paired_qk_score_below_threshold"
-
-    for layer_name, cfg in layer_config.items():
-        if decisions.get(layer_name, {}).get("enabled"):
-            cfg["hadamard_config"] = dict(materialized_config)
-        else:
-            cfg["hadamard_config"] = None
-
-    for layer_name in candidate_names:
-        decision = decisions[layer_name]
-        logger.info(
-            "Layer: %s | role=%s | kurtosis=%.3f | ecr=%.4f | expand=%s | residual=%s | "
-            "head_dim=%s | score=%.2f | hadamard=%s (%s)",
-            layer_name,
-            decision["role"],
-            decision["kurtosis"],
-            decision["energy_ratio"],
-            decision["expand"],
-            decision["residual"],
-            decision["head_dim"],
-            decision["score"],
-            "enabled" if decision["enabled"] else "skipped",
-            decision["reason"],
+    if config.decision_timing == "streaming":
+        return _resolve_streaming_hadamard_layer_selection(
+            model,
+            layer_config,
+            config,
+            modules_by_name,
+            candidate_names,
+            materialized_config,
+            run_forward,
         )
+
+    stats_by_layer = collect_linear_input_stats(model, candidate_names, run_forward)
+    decisions = _compute_layer_decisions(candidate_names, stats_by_layer, modules_by_name, config)
+    _apply_layer_decisions(layer_config, decisions, materialized_config)
+
+    for layer_name in candidate_names:
+        _log_layer_decision(layer_name, decisions[layer_name])
 
     return get_layer_hadamard_configs(layer_config), decisions

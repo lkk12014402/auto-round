@@ -237,6 +237,38 @@ def normalize_hadamard_config(hadamard_config: str | dict | HadamardConfig | Non
             except Exception as e:
                 raise ValueError(f"Invalid selective hadamard_config string {key!r}: {e}") from e
 
+        if key in {"selective_streaming", "heuristic_streaming", "auto_streaming"}:
+            cfg_dict = {"selector": "heuristic", "decision_timing": "streaming"}
+            cfg_dict = _apply_scheme_block_size(cfg_dict, block_size_explicitly_set=False)
+            try:
+                return HadamardConfig.model_validate(cfg_dict).model_dump()
+            except Exception as e:
+                raise ValueError(f"Invalid streaming selective hadamard_config string {key!r}: {e}") from e
+
+        if key in {"selective_lowmem", "heuristic_lowmem", "auto_lowmem"}:
+            cfg_dict = {"selector": "heuristic", "selection_execution": "blockwise"}
+            cfg_dict = _apply_scheme_block_size(cfg_dict, block_size_explicitly_set=False)
+            try:
+                return HadamardConfig.model_validate(cfg_dict).model_dump()
+            except Exception as e:
+                raise ValueError(f"Invalid low-memory selective hadamard_config string {key!r}: {e}") from e
+
+        if key in {
+            "selective_lowmem_streaming",
+            "heuristic_lowmem_streaming",
+            "auto_lowmem_streaming",
+        }:
+            cfg_dict = {
+                "selector": "heuristic",
+                "decision_timing": "streaming",
+                "selection_execution": "blockwise",
+            }
+            cfg_dict = _apply_scheme_block_size(cfg_dict, block_size_explicitly_set=False)
+            try:
+                return HadamardConfig.model_validate(cfg_dict).model_dump()
+            except Exception as e:
+                raise ValueError(f"Invalid low-memory streaming hadamard_config string {key!r}: {e}") from e
+
         if key not in HADAMARDS:
             raise ValueError(f"Invalid hadamard_config string: {key!r}. Expected one of {sorted(HADAMARDS.keys())}.")
 

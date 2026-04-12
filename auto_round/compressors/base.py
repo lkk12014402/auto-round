@@ -1941,6 +1941,152 @@ class BaseCompressor(object):
                 self.model = mv_module_from_gpu(self.model)
                 clear_memory(device_list=self.device_list)
 
+    def _prepare_hadamard_block_inputs(self, inputs: dict) -> tuple[list[torch.Tensor], dict]:
+        input_keys = [k for k in inputs if k.startswith("hidden_state")]
+        if len(input_keys) != 1:
+            raise RuntimeError(
+                "hidden_states arg mismatch. Please file an issue at https://github.com/intel/auto-round/issues"
+            )
+        inputs["input_ids"] = inputs.pop(input_keys[0])
+        input_ids = to_device(inputs.pop("input_ids"), self.cache_device)
+        input_others = to_device(inputs, self.cache_device)
+
+        tmp_dtype = self.amp_dtype if self.amp else torch.float32
+        input_ids = [id_.to(tmp_dtype) for id_ in input_ids]
+
+        for key, val in input_others.items():
+            if isinstance(val, torch.Tensor) and val.dtype in (torch.float16, torch.bfloat16):
+                input_others[key] = val.to(tmp_dtype)
+            elif isinstance(val, list):
+                input_others[key] = [to_dtype(v, tmp_dtype) for v in val]
+
+        return input_ids, input_others
+
+    def _resolve_hadamard_layer_selection_low_memory(self, config: HadamardConfig) -> tuple[dict[str, dict], dict[str, dict]]:
+        from auto_round.experimental.transform.selective import resolve_hadamard_layer_selection
+
+        all_blocks = self.quant_block_list or get_block_names(self.model)
+        if not all_blocks:
+            logger.warning(
+                "Could not find blocks for low-memory Hadamard selection; falling back to full-model calibration."
+            )
+            return resolve_hadamard_layer_selection(
+                self.model,
+                self.layer_config,
+                config,
+                run_forward=self._run_hadamard_selection_calibration,
+            )
+
+        logger.info("Using block-wise low-memory Hadamard selection.")
+        all_first_block_names = [block[0] for block in all_blocks]
+        all_inputs = self.try_cache_inter_data_gpucpu(all_first_block_names, self.nsamples, layer_names=[])
+
+        if hasattr(self.model, "hf_device_map") and len(self.model.hf_device_map) > 1:
+            accelerate.hooks.remove_hook_from_submodules(self.model)
+
+        selected_configs = {}
+        decisions = {}
+
+        for block_names in all_blocks:
+            first_block = block_names[0]
+            inputs = all_inputs.pop(first_block)
+            input_ids, input_others = self._prepare_hadamard_block_inputs(inputs)
+
+            for block_name in block_names:
+                block = get_module(self.model, block_name)
+                materialize_model_(block)
+                block.to("cpu")
+                block = convert_module_to_hp_if_necessary(block, dtype=self.amp_dtype, device=self.device)
+
+                if is_auto_device_mapping(self.device_map) and len(self.device_list) > 1:
+                    set_auto_device_map_for_block_with_tuning(
+                        block, self.device_map, input_ids, self.low_gpu_mem_usage, self.batch_size, self.device
+                    )
+                elif len(self.device_list) == 1:
+                    block = block.to(self.device)
+
+                if len(self.device_list) > 1:
+                    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+
+                    for _, module in block.named_modules():
+                        if len(list(module.children())) != 0 or not hasattr(module, "tuning_device"):
+                            continue
+                        hook = AlignDevicesHook(module.tuning_device, io_same_device=True)
+                        add_hook_to_module(module, hook, True)
+
+                prefix = block_name + "."
+                local_layer_config = {
+                    name[len(prefix) :]: copy.deepcopy(cfg)
+                    for name, cfg in self.layer_config.items()
+                    if name.startswith(prefix)
+                }
+
+                if local_layer_config:
+                    def run_block_forward():
+                        self._get_block_outputs(
+                            block,
+                            input_ids,
+                            input_others,
+                            self.batch_size * self.infer_bs_coeff,
+                            self.device,
+                            self.cache_device,
+                            save_output=False,
+                        )
+
+                    local_selected, local_decisions = resolve_hadamard_layer_selection(
+                        block,
+                        local_layer_config,
+                        config,
+                        run_forward=run_block_forward,
+                    )
+
+                    for local_name, local_cfg in local_layer_config.items():
+                        global_name = f"{block_name}.{local_name}"
+                        self.layer_config[global_name]["hadamard_config"] = local_cfg.get("hadamard_config")
+                        if local_cfg.get("hadamard_config"):
+                            selected_configs[global_name] = local_cfg["hadamard_config"]
+
+                    for local_name, decision in local_decisions.items():
+                        decisions[f"{block_name}.{local_name}"] = decision
+
+                input_ids = self._get_block_outputs(
+                    block,
+                    input_ids,
+                    input_others,
+                    self.batch_size * self.infer_bs_coeff,
+                    self.device,
+                    self.cache_device,
+                )
+
+                if len(self.device_list) > 1:
+                    accelerate.hooks.remove_hook_from_submodules(block)
+
+                mv_module_from_gpu(block)
+                if block_name == block_names[-1]:
+                    clear_memory(input_ids, device_list=self.device_list)
+                else:
+                    clear_memory(device_list=self.device_list)
+
+        outside_block_layer_config = {
+            name: copy.deepcopy(cfg) for name, cfg in self.layer_config.items() if not cfg.get("in_blocks", False)
+        }
+        if outside_block_layer_config:
+            logger.warning(
+                "Low-memory Hadamard selection falls back to full-model calibration for layers outside transformer blocks."
+            )
+            outside_selected, outside_decisions = resolve_hadamard_layer_selection(
+                self.model,
+                outside_block_layer_config,
+                config,
+                run_forward=self._run_hadamard_selection_calibration,
+            )
+            for name, cfg in outside_block_layer_config.items():
+                self.layer_config[name]["hadamard_config"] = cfg.get("hadamard_config")
+            selected_configs.update(outside_selected)
+            decisions.update(outside_decisions)
+
+        return selected_configs, decisions
+
     def _prepare_hadamard_transforms(self):
         hadamard_config = getattr(self, "hadamard_config", None)
         if not hadamard_config or getattr(self, "_hadamard_applied", False):
@@ -1949,12 +2095,15 @@ class BaseCompressor(object):
         from auto_round.experimental.transform.apply import apply_hadamard_transform
 
         config = hadamard_config if isinstance(hadamard_config, HadamardConfig) else HadamardConfig(**hadamard_config)
-        selected_configs, decisions = resolve_hadamard_layer_selection(
-            self.model,
-            self.layer_config,
-            config,
-            run_forward=self._run_hadamard_selection_calibration if config.selector == "heuristic" else None,
-        )
+        if config.selector == "heuristic" and config.selection_execution == "blockwise":
+            selected_configs, decisions = self._resolve_hadamard_layer_selection_low_memory(config)
+        else:
+            selected_configs, decisions = resolve_hadamard_layer_selection(
+                self.model,
+                self.layer_config,
+                config,
+                run_forward=self._run_hadamard_selection_calibration if config.selector == "heuristic" else None,
+            )
         self._hadamard_decisions = decisions
 
         # Persist Hadamard decisions purely as per-layer overrides so exported

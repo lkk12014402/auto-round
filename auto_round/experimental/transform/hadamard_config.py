@@ -20,6 +20,10 @@ class HadamardConfig(BaseModel):
 
     selector: Literal["all", "heuristic"] = Field(default="all")
 
+    decision_timing: Literal["batched", "streaming"] = Field(default="batched")
+
+    selection_execution: Literal["full", "blockwise"] = Field(default="full")
+
     kurtosis_threshold: float = Field(default=5.0)
 
     energy_ratio_threshold: float = Field(default=0.05)
