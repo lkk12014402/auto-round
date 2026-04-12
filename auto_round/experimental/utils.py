@@ -16,12 +16,12 @@ from typing import Any
 
 import torch
 
-from auto_round.compressors.utils import is_nv_fp
+from auto_round.compressors.utils import is_nv_fp, is_mx_int
 from auto_round.experimental.transform.hadamard_config import HadamardConfig
 from auto_round.experimental.transform.hadamards import HADAMARDS
 from auto_round.utils import logger
 
-SUPPORTED_QUANTIZATION_SCHEMES = ["MXFP4", "NVFP4"]
+SUPPORTED_QUANTIZATION_SCHEMES = ["MXFP4", "NVFP4", "MXINT4"]
 
 
 def per_tensor_fp8_qdq(
@@ -119,7 +119,7 @@ def is_triton_kernel_available(data_type: str) -> bool:
     """
     Best-effort check for whether Triton kernel path can be used.
     """
-    if is_nv_fp(data_type):
+    if is_nv_fp(data_type) or is_mx_int(data_type):
         return False
     try:
         import triton  # pylint: disable=E0401
@@ -149,11 +149,11 @@ def normalize_hadamard_config(hadamard_config: str | dict | HadamardConfig | Non
 
     Additional behavior:
         - If block_size is not set by user:
-            - MXFP4 -> default block_size to 32
+            - MXFP4/MXINT4 -> default block_size to 32
             - NVFP4 -> default block_size to 16
             - other schemes -> emit a warning
         - If block_size is set but does not match the recommended value:
-            - MXFP4 expects 32
+            - MXFP4/MXINT4 expects 32
             - NVFP4 expects 16
             - emit a warning
     """
@@ -166,9 +166,9 @@ def normalize_hadamard_config(hadamard_config: str | dict | HadamardConfig | Non
         block_size = cfg_dict.get("block_size")
 
         if not block_size_explicitly_set or block_size is None:
-            if normalized_scheme == "MXFP4":
+            if normalized_scheme in ["MXFP4", "MXINT4"]:
                 cfg_dict["block_size"] = 32
-                logger.warning("block_size is not set for scheme 'MXFP4'; defaulting to 32.")
+                logger.warning("block_size is not set for scheme 'MXFP4/MXINT4'; defaulting to 32.")
             elif normalized_scheme == "NVFP4":
                 cfg_dict["block_size"] = 16
                 logger.warning("block_size is not set for scheme 'NVFP4'; defaulting to 16.")
@@ -178,8 +178,8 @@ def normalize_hadamard_config(hadamard_config: str | dict | HadamardConfig | Non
                     "please set block_size explicitly in hadamard_config if needed."
                 )
         else:
-            if normalized_scheme == "MXFP4" and block_size != 32:
-                logger.warning(f"scheme is 'MXFP4' but block_size={block_size}; recommended value is 32.")
+            if normalized_scheme in ["MXFP4", "MXINT4"] and block_size != 32:
+                logger.warning(f"scheme is 'MXFP4/MXINT4' but block_size={block_size}; recommended value is 32.")
             elif normalized_scheme == "NVFP4" and block_size != 16:
                 logger.warning(f"scheme is 'NVFP4' but block_size={block_size}; recommended value is 16.")
 
