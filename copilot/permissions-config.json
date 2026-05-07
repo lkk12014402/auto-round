@@ -40,6 +40,18 @@
           "commandIdentifiers": [
             "xargs"
           ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "chmod"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "bash"
+          ]
         }
       ]
     }

@@ -26,7 +26,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quark.torch import LLMTemplate, ModelQuantizer
 from quark.torch.algorithm.rotation.rotation import RotationProcessor
-from quark.torch.quantization.config.config import load_quant_algo_config_from_file
+from quark.torch.quantization.config.config import RotationConfig, load_quant_algo_config_from_file
 from quark.torch.utils.llm import get_calib_dataloader, get_model, get_tokenizer, prepare_for_moe_quant
 
 
@@ -64,71 +64,91 @@ def extract_metrics(results):
     return metrics
 
 
-def get_rotation_config_dict(r1=True, r2=True, r3=False, r4=False, online_r1=True, rotation_size=128):
-    """Build a Quark rotation algorithm config dict (equivalent to JSON config file)."""
-    config = {
-        "name": "rotation",
-        "backbone": "model",
-        "model_decoder_layers": "model.layers",
-        "v_proj": "self_attn.v_proj",
-        "o_proj": "self_attn.o_proj",
-        "self_attn": "self_attn",
-        "mlp": "mlp",
-        "r1": r1,
-        "r2": r2,
-        "r3": r3,
-        "r4": r4,
-        "trainable": False,
-        "online_r1_rotation": online_r1,
-        "rotation_size": rotation_size,
-        "scaling_layers": {
-            "first_layer": [
-                {
-                    "prev_modules": ["model.embed_tokens"],
-                    "norm_module": "model.layers.layer_id.input_layernorm",
-                    "next_modules": [
-                        "model.layers.layer_id.self_attn.q_proj",
-                        "model.layers.layer_id.self_attn.k_proj",
-                        "model.layers.layer_id.self_attn.v_proj",
-                    ],
-                },
-                {
-                    "prev_modules": ["model.layers.layer_id.self_attn.o_proj"],
-                    "norm_module": "model.layers.layer_id.post_attention_layernorm",
-                    "next_modules": [
-                        "model.layers.layer_id.mlp.up_proj",
-                        "model.layers.layer_id.mlp.gate_proj",
-                    ],
-                },
-            ],
-            "middle_layers": [
-                {
-                    "prev_modules": ["model.layers.pre_layer_id.mlp.down_proj"],
-                    "norm_module": "model.layers.layer_id.input_layernorm",
-                    "next_modules": [
-                        "model.layers.layer_id.self_attn.q_proj",
-                        "model.layers.layer_id.self_attn.k_proj",
-                        "model.layers.layer_id.self_attn.v_proj",
-                    ],
-                },
-                {
-                    "prev_modules": ["model.layers.layer_id.self_attn.o_proj"],
-                    "norm_module": "model.layers.layer_id.post_attention_layernorm",
-                    "next_modules": [
-                        "model.layers.layer_id.mlp.up_proj",
-                        "model.layers.layer_id.mlp.gate_proj",
-                    ],
-                },
-            ],
-            "last_layer": [
-                {
-                    "prev_modules": ["model.layers.layer_id.mlp.down_proj"],
-                    "norm_module": "model.norm",
-                    "next_modules": ["lm_head"],
-                }
-            ],
-        },
+def get_rotation_config(r1=True, r2=True, r3=False, r4=False, online_r1=True, rotation_size=128):
+    """Build a Quark RotationConfig object for the rotation algorithm."""
+    scaling_layers = {
+        "first_layer": [
+            {
+                "prev_modules": ["model.embed_tokens"],
+                "norm_module": "model.layers.layer_id.input_layernorm",
+                "next_modules": [
+                    "model.layers.layer_id.self_attn.q_proj",
+                    "model.layers.layer_id.self_attn.k_proj",
+                    "model.layers.layer_id.self_attn.v_proj",
+                ],
+                "target_modules": [
+                    "model.layers.layer_id.self_attn.q_proj",
+                    "model.layers.layer_id.self_attn.k_proj",
+                    "model.layers.layer_id.self_attn.v_proj",
+                ],
+            },
+            {
+                "prev_modules": ["model.layers.layer_id.self_attn.o_proj"],
+                "norm_module": "model.layers.layer_id.post_attention_layernorm",
+                "next_modules": [
+                    "model.layers.layer_id.mlp.up_proj",
+                    "model.layers.layer_id.mlp.gate_proj",
+                ],
+                "target_modules": [
+                    "model.layers.layer_id.mlp.up_proj",
+                    "model.layers.layer_id.mlp.gate_proj",
+                ],
+            },
+        ],
+        "middle_layers": [
+            {
+                "prev_modules": ["model.layers.pre_layer_id.mlp.down_proj"],
+                "norm_module": "model.layers.layer_id.input_layernorm",
+                "next_modules": [
+                    "model.layers.layer_id.self_attn.q_proj",
+                    "model.layers.layer_id.self_attn.k_proj",
+                    "model.layers.layer_id.self_attn.v_proj",
+                ],
+                "target_modules": [
+                    "model.layers.layer_id.self_attn.q_proj",
+                    "model.layers.layer_id.self_attn.k_proj",
+                    "model.layers.layer_id.self_attn.v_proj",
+                ],
+            },
+            {
+                "prev_modules": ["model.layers.layer_id.self_attn.o_proj"],
+                "norm_module": "model.layers.layer_id.post_attention_layernorm",
+                "next_modules": [
+                    "model.layers.layer_id.mlp.up_proj",
+                    "model.layers.layer_id.mlp.gate_proj",
+                ],
+                "target_modules": [
+                    "model.layers.layer_id.mlp.up_proj",
+                    "model.layers.layer_id.mlp.gate_proj",
+                ],
+            },
+        ],
+        "last_layer": [
+            {
+                "prev_modules": ["model.layers.layer_id.mlp.down_proj"],
+                "norm_module": "model.norm",
+                "next_modules": ["lm_head"],
+                "target_modules": ["lm_head"],
+            }
+        ],
     }
+
+    config = RotationConfig(
+        backbone="model",
+        model_decoder_layers="model.layers",
+        v_proj="self_attn.v_proj",
+        o_proj="self_attn.o_proj",
+        self_attn="self_attn",
+        mlp="mlp",
+        r1=r1,
+        r2=r2,
+        r3=r3,
+        r4=r4,
+        trainable=False,
+        online_r1_rotation=online_r1,
+        rotation_size=rotation_size,
+        scaling_layers=scaling_layers,
+    )
     return config
 
 
@@ -156,8 +176,8 @@ def quantize_with_quark_mxfp4(model, tokenizer, device, with_rotation=False,
 
     # Build quantization config
     if with_rotation:
-        rotation_config = get_rotation_config_dict(r1=r1, r2=r2, r3=r3, r4=r4,
-                                                   rotation_size=rotation_size)
+        rotation_config = get_rotation_config(r1=r1, r2=r2, r3=r3, r4=r4,
+                                              rotation_size=rotation_size)
         algo_configs = {"rotation": rotation_config}
         quant_config = template.get_config(
             scheme="mxfp4",

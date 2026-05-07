@@ -1,5 +1,8 @@
 {
   "commandHistory": [
+    "为什么的quark的日志中，显示R1 Rotation是56，R2 Rotation是28，这个56怎么来的",
+    "运行脚本，有个报错，你看logs下的日志",
+    "将运行脚本写到一个shell文件中",
     "那现在rotation + quantization(rtn, mxfp4)的实现逻辑已经跟quark对齐了？帮我写出对应的测试命令，跑相同的场景，对比精度差异",
     "先实现Phase 1，rotation_size可配置，是只针对R1吗，quark中是如何做的？还是R2,R3,R4都有",
     "我觉得quark的实现是合理，尤其是训练兼容，拿quark是不是也有online r2等？ auto-round里的实现，也应该支持rotation_size，这是我们上边的TODO, 在auto-round里，我们也是要做训练兼容的，比如单独做spinquant训练，再quantization，或者跟auto-round tuning一起训练（这个可能有点难），你有修改的方案吗",
