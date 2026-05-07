@@ -42,6 +42,95 @@ def random_hadamard_matrix(
     return H * D.unsqueeze(1)
 
 
+def is_pow2(n: int) -> bool:
+    """Check if n is a power of 2."""
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def get_hadamard_K(n: int) -> Tuple[torch.Tensor, int]:
+    """Get the Hadamard matrix and block dimension K for a given input size.
+
+    For power-of-2 sizes, K=1 (full Walsh-Hadamard via butterfly).
+    For non-power-of-2 sizes, K is the largest known Hadamard size that
+    divides n such that n/K is a power of 2.
+
+    Returns:
+        (hadamard_K, K): The K×K Hadamard matrix and the value K.
+    """
+    if is_pow2(n):
+        # For power-of-2, we use butterfly decomposition (K=1 means no explicit matrix needed)
+        had = deterministic_hadamard_matrix(n, dtype=torch.float64)
+        return had, 1
+    else:
+        # Find the largest power-of-2 K dividing n
+        K = 1
+        while K * 2 <= n and n % (K * 2) == 0:
+            K *= 2
+        if K > 1:
+            had_K = deterministic_hadamard_matrix(K, dtype=torch.float64)
+            return had_K, K
+        raise ValueError(f"Cannot find suitable Hadamard decomposition for n={n}")
+
+
+def matmul_hadU(X: torch.Tensor, hadamard_K: Optional[torch.Tensor] = None, K: Optional[int] = None) -> torch.Tensor:
+    """Apply normalized Hadamard transform to the last dimension of X.
+
+    Uses the efficient butterfly algorithm for power-of-2 dimensions,
+    combined with an explicit K×K Hadamard matrix for any residual block.
+
+    This is equivalent to X @ H where H is the normalized Hadamard matrix,
+    but computed more efficiently via recursive butterfly operations.
+
+    Based on QuaRot/Quark's implementation.
+
+    Args:
+        X: Input tensor with shape [..., n].
+        hadamard_K: Optional pre-computed K×K Hadamard matrix (unnormalized).
+            If None, computed automatically.
+        K: Block size for the explicit Hadamard step. If None, computed automatically.
+
+    Returns:
+        Transformed tensor of same shape as X.
+    """
+    n = X.shape[-1]
+
+    if hadamard_K is None or K is None:
+        if is_pow2(n):
+            K = 1
+        else:
+            K = 1
+            while K * 2 <= n and n % (K * 2) == 0:
+                K *= 2
+            if K <= 1:
+                raise ValueError(f"Cannot apply Hadamard transform to dimension {n}")
+            hadamard_K = deterministic_hadamard_matrix(K, dtype=X.dtype, device=X.device)
+
+    inp = X.clone().reshape(-1, n, 1)
+    output = inp.clone()
+
+    # Butterfly decomposition (Walsh-Hadamard for the n/K part)
+    while inp.shape[1] > K:
+        inp = inp.view(inp.shape[0], inp.shape[1] // 2, 2, inp.shape[2])
+        output = output.view(inp.shape)
+        output[:, :, 0, :] = inp[:, :, 0, :] + inp[:, :, 1, :]
+        output[:, :, 1, :] = inp[:, :, 0, :] - inp[:, :, 1, :]
+        output = output.view(inp.shape[0], inp.shape[1], -1)
+        (inp, output) = (output, inp)
+    del output
+
+    # Apply the K×K Hadamard block (if K > 1)
+    if K > 1:
+        had = hadamard_K.to(inp.device).to(inp.dtype)
+        # Multiply: had already normalized by 1/sqrt(K) from deterministic_hadamard_matrix
+        # but butterfly is unnormalized, so we need to scale by 1/sqrt(n/K)
+        inp = had.view(1, K, K) @ inp
+
+    # Normalization: butterfly gives factor of sqrt(n/K), combined with had gives sqrt(n)
+    result = inp.view(X.shape) / math.sqrt(n / K if K > 1 else n)
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Delegate to AutoRound's rotation utilities where available.
 # If the AutoRound modules are not present (e.g. during standalone tests),
@@ -71,6 +160,9 @@ __all__ = [
     "untie_word_embeddings_if_needed",
     "deterministic_hadamard_matrix",
     "random_hadamard_matrix",
+    "is_pow2",
+    "get_hadamard_K",
+    "matmul_hadU",
     "create_block_diag_from_head_matrix",
     "apply_hadamard_to_linear",
     "get_model_arch_info",

@@ -1,0 +1,84 @@
+root@60ba961886be:/data/lkk/quarot/auto-round/examples# python test_qwen3_rotation_eval.py --tasks piqa,hellaswag --batch_size 8 --device cuda:0 --levels baseline,r1
+======================================================================
+QuaRot Rotation Evaluation on Qwen3-0.6B
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Device:     cuda:0
+  Dtype:      float16
+  Levels:     ['baseline', 'r1']
+======================================================================
+
+======================================================================
+  Evaluating: BASELINE
+    R1=False, R2=False, R3=False, R4=False
+======================================================================
+  Loading model...
+  Model loaded in 3.3s
+  Running lm_eval...
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+100%|███████████████████████████████████████████████████████████████████████████████████| 10042/10042 [00:04<00:00, 2273.01it/s]
+100%|█████████████████████████████████████████████████████████████████████████████████████| 1838/1838 [00:01<00:00, 1230.46it/s]
+Running loglikelihood requests: 100%|████████████████████████████████████████████████████| 43844/43844 [01:52<00:00, 391.24it/s]
+  Evaluation done in 180.5s
+    hellaswag: acc=0.3756, acc_norm=0.4732
+    piqa: acc=0.6774, acc_norm=0.6763
+
+======================================================================
+  Evaluating: R1
+    R1=True, R2=False, R3=False, R4=False
+======================================================================
+  Loading model...
+  Model loaded in 2.7s
+  Applying rotation...
+  Rotation applied in 0.1s
+  Running lm_eval...
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+100%|███████████████████████████████████████████████████████████████████████████████████| 10042/10042 [00:04<00:00, 2287.94it/s]
+100%|█████████████████████████████████████████████████████████████████████████████████████| 1838/1838 [00:01<00:00, 1234.34it/s]
+Running loglikelihood requests: 100%|████████████████████████████████████████████████████| 43844/43844 [01:48<00:00, 402.51it/s]
+  Evaluation done in 162.5s
+    hellaswag: acc=0.2749, acc_norm=0.3306
+    piqa: acc=0.6219, acc_norm=0.5898
+
+====================================================================================================
+ROTATION LEVEL COMPARISON - Qwen3-0.6B
+====================================================================================================
+
+  hellaswag/acc:
+    Config                    Value        Δ vs Baseline
+    -------------------------------------------------------
+    baseline                  0.3756       (baseline)
+    r1                        0.2749       -0.1007
+
+  hellaswag/acc_norm:
+    Config                    Value        Δ vs Baseline
+    -------------------------------------------------------
+    baseline                  0.4732       (baseline)
+    r1                        0.3306       -0.1426
+
+  piqa/acc:
+    Config                    Value        Δ vs Baseline
+    -------------------------------------------------------
+    baseline                  0.6774       (baseline)
+    r1                        0.6219       -0.0555
+
+  piqa/acc_norm:
+    Config                    Value        Δ vs Baseline
+    -------------------------------------------------------
+    baseline                  0.6763       (baseline)
+    r1                        0.5898       -0.0865
+
+====================================================================================================
+
+======================================================================
+VALIDATION SUMMARY
+======================================================================
+  r1                   max_degradation=+0.1426  ❌ FAIL
+
+  ❌ Some rotation levels show degradation > 2%
+======================================================================

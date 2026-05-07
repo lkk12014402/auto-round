@@ -18,6 +18,7 @@ same pattern as AutoRound's ``rotation.inplace`` package.
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -32,6 +33,7 @@ from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     deterministic_hadamard_matrix,
     fuse_rmsnorm_in_model,
     get_model_arch_info,
+    is_pow2,
     random_hadamard_matrix,
     rotate_in_channels_,
     rotate_out_channels_,
@@ -45,6 +47,8 @@ from auto_round.algorithms.transforms.spinquant.inplace.apply import (
     register_spinquant_hooks,
     remove_spinquant_hooks,
 )
+
+logger = logging.getLogger("auto_round.spinquant")
 
 
 @dataclass
@@ -157,41 +161,55 @@ class SpinQuantPreprocessor:
     # Main entry point
     # ------------------------------------------------------------------
     def preprocess(self, dataloader: Optional[Any] = None) -> nn.Module:
-        print("[SpinQuant] Starting preprocessing...")
+        logger.info("[SpinQuant] Starting preprocessing...")
+        logger.info(
+            f"[SpinQuant] Model architecture info: hidden_size={self.hidden_size}, "
+            f"head_dim={self.head_dim}, num_q_heads={self.num_q_heads}, "
+            f"num_kv_heads={self.num_kv_heads}, intermediate_size={self.intermediate_size}"
+        )
+        logger.info(
+            f"[SpinQuant] Rotation config: R1={self.config.r1}, R2={self.config.r2}, "
+            f"R3={self.config.r3}, R4={self.config.r4}, "
+            f"trainable_rotation={self.config.trainable_rotation}, "
+            f"trainable_smooth={self.config.trainable_smooth}"
+        )
+
+        # Validate dimensions for enabled rotations
+        self._validate_dimensions()
 
         # Step 1: untie embeddings
         if self.config.untie_embeddings:
             if untie_word_embeddings_if_needed(self.model):
-                print("[SpinQuant] Untied input/output embeddings")
+                logger.info("[SpinQuant] Untied input/output embeddings")
 
         # Step 2: fuse RMSNorm gamma into linear weights
         if self.config.fuse_rmsnorm:
-            print("[SpinQuant] Fusing RMSNorm parameters...")
+            logger.info("[SpinQuant] Fusing RMSNorm parameters into linear weights...")
             fuse_rmsnorm_in_model(self.model)
 
         # Step 3: replace RMSNorm with TrainableRMSNorm (SmoothQuant)
         if self.config.trainable_smooth:
-            print("[SpinQuant] Adding trainable smooth values...")
+            logger.info("[SpinQuant] Adding trainable smooth values...")
             self._replace_norms_with_trainable()
 
         # Step 4: initialise rotation matrices
-        print("[SpinQuant] Initialising rotation matrices...")
+        logger.info("[SpinQuant] Initialising rotation matrices...")
         self._init_rotation_matrices()
 
         # Step 5: train if requested
         if self.config.trainable_rotation or self.config.trainable_smooth:
             if dataloader is None:
                 raise ValueError("dataloader required when trainable=True")
-            print(f"[SpinQuant] Training for {self.config.iters} iterations...")
+            logger.info(f"[SpinQuant] Training for {self.config.iters} iterations...")
             self._train_rotations(dataloader)
 
         # Step 6: fuse offline rotations into weights
-        print("[SpinQuant] Fusing offline rotations into weights...")
+        logger.info("[SpinQuant] Fusing offline rotations into weights...")
         self._fuse_offline_rotations()
 
         # Step 7: register online hooks (R3 / R4)
         if self.config.r3 or self.config.r4:
-            print("[SpinQuant] Registering online rotation hooks...")
+            logger.info("[SpinQuant] Registering online rotation hooks...")
             self._hook_handles = register_spinquant_hooks(
                 self.model, self.config,
                 head_dim=self.head_dim,
@@ -201,8 +219,48 @@ class SpinQuantPreprocessor:
         # Step 8: cleanup training artefacts
         self._cleanup()
 
-        print("[SpinQuant] Preprocessing complete!")
+        logger.info("[SpinQuant] Preprocessing complete!")
         return self.model
+
+    def _validate_dimensions(self) -> None:
+        """Validate dimension requirements and disable rotations that can't work."""
+        if self.config.r1 and self.hidden_size > 0 and not is_pow2(self.hidden_size):
+            logger.warning(
+                f"[SpinQuant] R1 requires hidden_size to be a power of 2, "
+                f"but got hidden_size={self.hidden_size}. Disabling R1."
+            )
+            self.config.r1 = False
+
+        if self.config.r2 and self.head_dim > 0 and not is_pow2(self.head_dim):
+            logger.warning(
+                f"[SpinQuant] R2 requires head_dim to be a power of 2, "
+                f"but got head_dim={self.head_dim}. Disabling R2."
+            )
+            self.config.r2 = False
+
+        if self.config.r3 and self.head_dim > 0 and not is_pow2(self.head_dim):
+            logger.warning(
+                f"[SpinQuant] R3 requires head_dim to be a power of 2, "
+                f"but got head_dim={self.head_dim}. Disabling R3."
+            )
+            self.config.r3 = False
+
+        if self.config.r4 and self.intermediate_size > 0:
+            K = 1
+            while K * 2 <= self.intermediate_size and self.intermediate_size % (K * 2) == 0:
+                K *= 2
+            if K <= 1:
+                logger.warning(
+                    f"[SpinQuant] R4 requires intermediate_size divisible by a power of 2 > 1, "
+                    f"but intermediate_size={self.intermediate_size} has no such factor. Disabling R4."
+                )
+                self.config.r4 = False
+            else:
+                logger.info(
+                    f"[SpinQuant] R4 block Hadamard: K={K}, "
+                    f"blocks={self.intermediate_size // K} "
+                    f"(intermediate_size={self.intermediate_size})"
+                )
 
     # ------------------------------------------------------------------
     # Step 3: Trainable RMSNorm
@@ -270,28 +328,33 @@ class SpinQuantPreprocessor:
         if self.config.r1:
             if self.config.trainable_rotation and not self.config.online_r1_rotation:
                 R1 = nn.Parameter(torch.eye(self.hidden_size, device=model_device, dtype=dtype))
+                logger.info(f"[SpinQuant] R1: Trainable rotation matrix [{self.hidden_size}×{self.hidden_size}] (identity init)")
             else:
                 R1 = nn.Parameter(
                     random_hadamard_matrix(self.hidden_size, dtype=dtype, device=model_device),
                     requires_grad=False,
                 )
+                logger.info(f"[SpinQuant] R1: Random Hadamard [{self.hidden_size}×{self.hidden_size}] (fixed, offline fuse)")
             self._register_rotation("spinquant_R1", R1)
 
         # R2_head: head_dim x head_dim
         if self.config.r2 and self.head_dim > 0:
             if self.config.trainable_rotation:
                 R2_head = nn.Parameter(torch.eye(self.head_dim, device=model_device, dtype=dtype))
+                logger.info(f"[SpinQuant] R2: Trainable per-head rotation [{self.head_dim}×{self.head_dim}] (identity init)")
             else:
                 R2_head = nn.Parameter(
                     random_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device),
                     requires_grad=False,
                 )
+                logger.info(f"[SpinQuant] R2: Random Hadamard [{self.head_dim}×{self.head_dim}] per head (fixed, offline fuse)")
             self._register_rotation("spinquant_R2_head", R2_head)
 
         # R3_head: fixed Hadamard (online, not trainable)
         if self.config.r3 and self.head_dim > 0:
             R3 = random_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
             self.model.register_buffer("spinquant_R3_head", R3)
+            logger.info(f"[SpinQuant] R3: Online Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (monkeypatch)")
 
         # R4: intermediate_size Hadamard (online buffer)
         if self.config.r4 and self.intermediate_size > 0:
@@ -303,6 +366,10 @@ class SpinQuantPreprocessor:
                 had_K = deterministic_hadamard_matrix(K, dtype=dtype, device=model_device)
                 self.model.register_buffer("spinquant_R4_had_K", had_K)
                 self.model.register_buffer("spinquant_R4_K", torch.tensor(K, device=model_device))
+                logger.info(
+                    f"[SpinQuant] R4: Block Hadamard K={K}, "
+                    f"{self.intermediate_size // K} blocks on down_proj (offline fuse + online hook)"
+                )
 
     def _register_rotation(self, name: str, param: nn.Parameter) -> None:
         self.model.register_parameter(name, param)
@@ -321,8 +388,18 @@ class SpinQuantPreprocessor:
         ``preprocess()`` API.
         """
         if not (self.rotation_params or self.smooth_params):
-            print("[SpinQuant] No trainable parameters, skipping training")
+            logger.info("[SpinQuant] No trainable parameters, skipping training")
             return
+
+        n_rot = len(self.rotation_params)
+        n_smooth = len(self.smooth_params)
+        total_params = sum(p.numel() for p in self.rotation_params) + sum(p.numel() for p in self.smooth_params)
+        logger.info(
+            f"[SpinQuant] Training: {n_rot} rotation params + {n_smooth} smooth params "
+            f"= {total_params:,} trainable parameters"
+        )
+        for p in self.rotation_params:
+            logger.debug(f"  Trainable rotation: {p.shape} on {p.device}")
 
         # Use model's current device for training
         model_device = next(self.model.parameters()).device
@@ -336,7 +413,7 @@ class SpinQuantPreprocessor:
         )
 
         # Clone original model for KL reference
-        print("[SpinQuant] Cloning original model for KL reference...")
+        logger.info("[SpinQuant] Cloning original model for KL reference...")
         original_model = copy.deepcopy(self.model)
         original_model.eval()
         for p in original_model.parameters():
@@ -376,7 +453,7 @@ class SpinQuantPreprocessor:
             loss_history.append(loss.item())
             if step % 50 == 0:
                 avg = sum(loss_history[-50:]) / len(loss_history[-50:]) if loss_history else 0.0
-                print(f"[SpinQuant] Step {step}/{self.config.iters}, loss={loss.item():.6f} (avg={avg:.6f})")
+                logger.info(f"[SpinQuant] Step {step}/{self.config.iters}, loss={loss.item():.6f} (avg={avg:.6f})")
 
             step += 1
 
@@ -419,11 +496,11 @@ class SpinQuantPreprocessor:
             dev = (torch.matmul(R, R.t()) - I).abs().max().item()
             max_dev = max(max_dev, dev)
             if dev > 1e-4:
-                print(f"  [WARN] {name} orthogonality deviation={dev:.2e}")
+                logger.warning(f"  {name} orthogonality deviation={dev:.2e}")
         if max_dev > 0:
-            print(f"[SpinQuant] Max orthogonality deviation={max_dev:.2e}")
+            logger.info(f"[SpinQuant] Max orthogonality deviation={max_dev:.2e}")
             if max_dev > 1e-3:
-                print("  WARNING: orthogonality constraint significantly violated!")
+                logger.warning("  Orthogonality constraint significantly violated!")
 
     def _get_embed_tokens(self) -> Optional[nn.Module]:
         """Get embedding module, supporting both model.embed_tokens and model.model.embed_tokens."""
@@ -491,6 +568,7 @@ class SpinQuantPreprocessor:
                 embed.weight.data = new_w
 
         # Transformer layers
+        n_layers = 0
         for layer in self._get_layers():
             if not (hasattr(layer, "self_attn") and hasattr(layer, "mlp")):
                 continue
@@ -519,6 +597,9 @@ class SpinQuantPreprocessor:
                 rotate_in_channels_(mlp.up_proj, R_in=R1_inv_local, rotated_modules=self._rotated_modules)
             if hasattr(mlp, "down_proj"):
                 rotate_out_channels_(mlp.down_proj, R_out=R1_local, rotated_modules=self._rotated_modules)
+            n_layers += 1
+
+        logger.info(f"[SpinQuant] R1 fused into {n_layers} layers (embed_tokens, q/k/v/o_proj, gate/up/down_proj, lm_head)")
 
         # LM head: in-channel uses R1_inv (→ W @ R1)
         lm_head = self._get_lm_head()
@@ -546,6 +627,7 @@ class SpinQuantPreprocessor:
         if R2_head is None:
             return
 
+        n_fused = 0
         for layer in self._get_layers():
             if not hasattr(layer, "self_attn"):
                 continue
@@ -558,23 +640,40 @@ class SpinQuantPreprocessor:
             # o_proj: apply per-head rotation on input (each head_dim chunk of columns)
             if hasattr(attn, "o_proj"):
                 apply_hadamard_to_linear(attn.o_proj, had_dim=self.head_dim, output=False)
+            n_fused += 1
+
+        logger.info(f"[SpinQuant] R2 fused into {n_fused} layers (v_proj out + o_proj in, head_dim={self.head_dim})")
 
     def _fuse_r4_rotation(self) -> None:
         """Fuse R4 Hadamard into down_proj's input side.
 
-        Following the reference: apply_exact_had_to_linear(mlp.down_proj, had_dim=-1, output=False)
-        This means full Hadamard on the intermediate_size (input) dimension.
-        The matching online hook applies Hadamard to the activation before down_proj.
+        Applies the same block Hadamard that the online hook uses. The hook
+        computes x.view(-1, M, K) @ H_K.T where K is the largest power-of-2
+        dividing intermediate_size. The offline fusion applies the matching
+        transform to the weight so they cancel: (x@H_block) @ (W@H_block).T = x@W.T.
         """
         if not self.config.r4 or self.intermediate_size <= 0:
             return
 
+        # Compute K: same logic as the hook in inplace/apply.py
+        inter = self.intermediate_size
+        K = 1
+        while K * 2 <= inter and inter % (K * 2) == 0:
+            K *= 2
+
+        if K <= 1:
+            return
+
+        n_fused = 0
         for layer in self._get_layers():
             if not hasattr(layer, "mlp"):
                 continue
             mlp = layer.mlp
             if hasattr(mlp, "down_proj"):
-                apply_hadamard_to_linear(mlp.down_proj, had_dim=-1, output=False)
+                apply_hadamard_to_linear(mlp.down_proj, had_dim=K, output=False)
+                n_fused += 1
+
+        logger.info(f"[SpinQuant] R4 offline fused into {n_fused} down_proj layers (block Hadamard K={K})")
 
     # ------------------------------------------------------------------
     # Step 8: Cleanup
@@ -588,15 +687,8 @@ class SpinQuantPreprocessor:
                 if name not in self.model._buffers:
                     delattr(self.model, name)
 
-        # NOTE: Do NOT remove online hooks here. R3/R4 hooks must persist
-        # for correct inference. Only remove training-related state.
-
-        # Restore monkey-patched attention forward methods
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            for layer in self.model.model.layers:
-                if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "_spinquant_original_forward"):
-                    layer.self_attn.forward = layer.self_attn._spinquant_original_forward
-                    delattr(layer.self_attn, "_spinquant_original_forward")
+        # NOTE: Do NOT remove online hooks/monkeypatches here. R3/R4 hooks
+        # must persist for correct inference. Only remove training-related state.
 
         # Freeze all parameters
         for p in self.model.parameters():
