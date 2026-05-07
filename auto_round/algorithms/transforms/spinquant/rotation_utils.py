@@ -356,12 +356,20 @@ def _fuse_rmsnorm_with_layer_paths(model: nn.Module, layer_paths: list[str]) -> 
 
 
 def untie_word_embeddings_if_needed(model: nn.Module) -> bool:
-    """Untie input and output embeddings if they share storage."""
+    """Untie input and output embeddings if they share storage.
+
+    Also sets ``config.tie_word_embeddings = False`` so that downstream
+    frameworks (e.g. lm_eval's HFLM, HuggingFace Trainer) do not re-tie
+    the weights after we've separated them.
+    """
     if hasattr(model, "model") and hasattr(model.model, "embed_tokens") and hasattr(model, "lm_head"):
         embed = model.model.embed_tokens.weight
         head = model.lm_head.weight
         if embed.data_ptr() == head.data_ptr():
             model.lm_head.weight = nn.Parameter(head.clone())
+            # Prevent frameworks from re-tying the now-separate weights
+            if hasattr(model, "config"):
+                model.config.tie_word_embeddings = False
             return True
     return False
 
