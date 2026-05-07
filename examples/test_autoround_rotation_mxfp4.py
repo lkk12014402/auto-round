@@ -70,10 +70,11 @@ def extract_metrics(results):
     return metrics
 
 
-def apply_rotation(model, r1=True, r2=True, r3=True, r4=True):
+def apply_rotation(model, r1=True, r2=True, r3=True, r4=True, rotation_size=None):
     """Apply SpinQuant/QuaRot rotation to a model (in-place)."""
     config = SpinQuantConfig(
         r1=r1, r2=r2, r3=r3, r4=r4,
+        rotation_size=rotation_size,
         trainable_rotation=False,
         trainable_smooth=False,
         fuse_rmsnorm=True,
@@ -139,6 +140,8 @@ def main():
     parser.add_argument("--enable-r3", action="store_true", dest="r3")
     parser.add_argument("--r4", action="store_false", default=False)
     parser.add_argument("--enable-r4", action="store_true", dest="r4")
+    parser.add_argument("--rotation-size", type=int, default=None,
+                        help="Custom rotation size (must be power of 2). Affects R1 and R4.")
     args = parser.parse_args()
 
     levels_to_test = [l.strip() for l in args.levels.split(",")]
@@ -158,6 +161,8 @@ def main():
     print(f"  Levels:     {levels_to_test}")
     print(f"  Quant:      MXFP4 (RTN, iters=0)")
     print(f"  Rotation:   {rotation_desc} (QuaRot mode, deterministic Hadamard)")
+    if args.rotation_size:
+        print(f"  Rot. size:  {args.rotation_size}")
     print("=" * 70)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
@@ -185,7 +190,7 @@ def main():
                 args.model, dtype=torch.float16, trust_remote_code=True
             ).to(args.device)
             model.eval()
-            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4)
+            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4, rotation_size=args.rotation_size)
             print(f"  Rotation applied ({rotation_desc})")
 
         elif level == "mxfp4_only":
@@ -203,7 +208,7 @@ def main():
                 args.model, dtype=torch.float16, trust_remote_code=True
             ).to(args.device)
             model.eval()
-            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4)
+            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4, rotation_size=args.rotation_size)
             print("  Step 2: Quantizing rotated model with MXFP4...")
             model, _ = quantize_mxfp4(
                 model, tokenizer=tokenizer, device=args.device,

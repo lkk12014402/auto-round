@@ -1,0 +1,20 @@
+// User settings belong in settings.json.
+// This file is managed automatically.
+{
+  "firstLaunchAt": "2026-05-07T07:17:37.223Z",
+  "trustedFolders": [
+    "/workspace"
+  ],
+  "copilotTokens": {
+  },
+  "lastLoggedInUser": {
+    "host": "https://github.com",
+    "login": "lkk12014402"
+  },
+  "loggedInUsers": [
+    {
+      "host": "https://github.com",
+      "login": "lkk12014402"
+    }
+  ]
+}

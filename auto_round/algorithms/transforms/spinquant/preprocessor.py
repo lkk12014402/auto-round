@@ -61,6 +61,13 @@ class SpinQuantConfig:
     r3: bool = True                    # R3: Q/K online rotation
     r4: bool = True                    # R4: MLP activation online rotation
 
+    # Rotation size override (None = use full dimension from model config)
+    # When set, R1 uses rotation_size instead of hidden_size,
+    # and R4 uses rotation_size instead of intermediate_size.
+    # R2 always uses head_dim, R3 does not support custom size.
+    # This follows the same convention as Quark's rotation_size.
+    rotation_size: Optional[int] = None
+
     # Training control
     trainable_rotation: bool = True    # Learn R via Cayley SGD (False = QuaRot fixed Hadamard)
     trainable_smooth: bool = True      # Learn smooth_values via Adam (joint SmoothQuant)
@@ -87,6 +94,14 @@ class SpinQuantConfig:
     def __post_init__(self):
         if self.device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.rotation_size is not None:
+            if self.rotation_size <= 0:
+                raise ValueError(f"rotation_size must be positive, got {self.rotation_size}")
+            if not is_pow2(self.rotation_size):
+                raise ValueError(
+                    f"rotation_size must be a power of 2, got {self.rotation_size}. "
+                    f"Valid values: 16, 32, 64, 128, 256, 512, 1024, ..."
+                )
 
 
 class TrainableRMSNorm(nn.Module):
@@ -147,6 +162,16 @@ class SpinQuantPreprocessor:
         self.num_kv_heads = info.get("num_kv_heads", 0)
         self.intermediate_size = info.get("intermediate_size", 0)
 
+        # Resolve effective rotation sizes based on config.rotation_size
+        # R1: rotation_size or hidden_size
+        self.r1_rotation_size = self.config.rotation_size or self.hidden_size
+        # R2: always head_dim (not affected by rotation_size)
+        self.r2_rotation_size = self.head_dim
+        # R3: always head_dim (not affected by rotation_size, same as Quark)
+        self.r3_rotation_size = self.head_dim
+        # R4: rotation_size or intermediate_size
+        self.r4_rotation_size = self.config.rotation_size or self.intermediate_size
+
         # Training state
         self.rotation_params: list[nn.Parameter] = []
         self.smooth_params: list[nn.Parameter] = []
@@ -167,6 +192,12 @@ class SpinQuantPreprocessor:
             f"head_dim={self.head_dim}, num_q_heads={self.num_q_heads}, "
             f"num_kv_heads={self.num_kv_heads}, intermediate_size={self.intermediate_size}"
         )
+        if self.config.rotation_size is not None:
+            logger.info(
+                f"[SpinQuant] Custom rotation_size={self.config.rotation_size} → "
+                f"R1 size={self.r1_rotation_size}, R4 size={self.r4_rotation_size} "
+                f"(R2/R3 always use head_dim={self.head_dim})"
+            )
         logger.info(
             f"[SpinQuant] Rotation config: R1={self.config.r1}, R2={self.config.r2}, "
             f"R3={self.config.r3}, R4={self.config.r4}, "
@@ -214,6 +245,7 @@ class SpinQuantPreprocessor:
                 self.model, self.config,
                 head_dim=self.head_dim,
                 intermediate_size=self.intermediate_size,
+                r4_rotation_size=self.r4_rotation_size,
             )
 
         # Step 8: cleanup training artefacts
@@ -227,12 +259,20 @@ class SpinQuantPreprocessor:
 
     def _validate_dimensions(self) -> None:
         """Validate dimension requirements and disable rotations that can't work."""
-        if self.config.r1 and self.hidden_size > 0 and not is_pow2(self.hidden_size):
-            logger.warning(
-                f"[SpinQuant] R1 requires hidden_size to be a power of 2, "
-                f"but got hidden_size={self.hidden_size}. Disabling R1."
-            )
-            self.config.r1 = False
+        # R1: check r1_rotation_size divides hidden_size and is power of 2
+        if self.config.r1 and self.r1_rotation_size > 0:
+            if not is_pow2(self.r1_rotation_size):
+                logger.warning(
+                    f"[SpinQuant] R1 rotation_size must be a power of 2, "
+                    f"but got {self.r1_rotation_size}. Disabling R1."
+                )
+                self.config.r1 = False
+            elif self.hidden_size % self.r1_rotation_size != 0:
+                logger.warning(
+                    f"[SpinQuant] R1 rotation_size={self.r1_rotation_size} must divide "
+                    f"hidden_size={self.hidden_size}. Disabling R1."
+                )
+                self.config.r1 = False
 
         if self.config.r2 and self.head_dim > 0 and not is_pow2(self.head_dim):
             logger.warning(
@@ -248,21 +288,35 @@ class SpinQuantPreprocessor:
             )
             self.config.r3 = False
 
-        if self.config.r4 and self.intermediate_size > 0:
+        if self.config.r3 and self.config.rotation_size is not None:
+            logger.warning(
+                f"[SpinQuant] R3 does not support custom rotation_size "
+                f"(always uses head_dim={self.head_dim}). Ignoring rotation_size for R3."
+            )
+
+        if self.config.r4 and self.r4_rotation_size > 0:
+            # For R4: find K = largest pow2 factor of r4_rotation_size
+            inter = self.r4_rotation_size
             K = 1
-            while K * 2 <= self.intermediate_size and self.intermediate_size % (K * 2) == 0:
+            while K * 2 <= inter and inter % (K * 2) == 0:
                 K *= 2
             if K <= 1:
                 logger.warning(
-                    f"[SpinQuant] R4 requires intermediate_size divisible by a power of 2 > 1, "
-                    f"but intermediate_size={self.intermediate_size} has no such factor. Disabling R4."
+                    f"[SpinQuant] R4 requires rotation size divisible by a power of 2 > 1, "
+                    f"but r4_rotation_size={inter} has no such factor. Disabling R4."
+                )
+                self.config.r4 = False
+            elif self.intermediate_size % self.r4_rotation_size != 0:
+                logger.warning(
+                    f"[SpinQuant] R4 rotation_size={self.r4_rotation_size} must divide "
+                    f"intermediate_size={self.intermediate_size}. Disabling R4."
                 )
                 self.config.r4 = False
             else:
                 logger.info(
                     f"[SpinQuant] R4 block Hadamard: K={K}, "
-                    f"blocks={self.intermediate_size // K} "
-                    f"(intermediate_size={self.intermediate_size})"
+                    f"blocks={inter // K} "
+                    f"(r4_rotation_size={inter}, intermediate_size={self.intermediate_size})"
                 )
 
     # ------------------------------------------------------------------
@@ -327,17 +381,24 @@ class SpinQuantPreprocessor:
         model_device = next(self.model.parameters()).device
         dtype = self.config.dtype
 
-        # R1: hidden_size x hidden_size
+        # R1: r1_rotation_size x r1_rotation_size
         if self.config.r1:
+            r1_size = self.r1_rotation_size
             if self.config.trainable_rotation and not self.config.online_r1_rotation:
-                R1 = nn.Parameter(torch.eye(self.hidden_size, device=model_device, dtype=dtype))
-                logger.info(f"[SpinQuant] R1: Trainable rotation matrix [{self.hidden_size}×{self.hidden_size}] (identity init)")
+                R1 = nn.Parameter(torch.eye(r1_size, device=model_device, dtype=dtype))
+                logger.info(f"[SpinQuant] R1: Trainable rotation matrix [{r1_size}×{r1_size}] (identity init)")
             else:
                 R1 = nn.Parameter(
-                    random_hadamard_matrix(self.hidden_size, dtype=dtype, device=model_device),
+                    random_hadamard_matrix(r1_size, dtype=dtype, device=model_device),
                     requires_grad=False,
                 )
-                logger.info(f"[SpinQuant] R1: Random Hadamard [{self.hidden_size}×{self.hidden_size}] (fixed, offline fuse)")
+                if r1_size < self.hidden_size:
+                    logger.info(
+                        f"[SpinQuant] R1: Random Hadamard [{r1_size}×{r1_size}] block rotation "
+                        f"({self.hidden_size // r1_size} blocks, fixed, offline fuse)"
+                    )
+                else:
+                    logger.info(f"[SpinQuant] R1: Random Hadamard [{r1_size}×{r1_size}] (fixed, offline fuse)")
             self._register_rotation("spinquant_R1", R1)
 
         # R2_head: head_dim x head_dim
@@ -359,20 +420,28 @@ class SpinQuantPreprocessor:
             self.model.register_buffer("spinquant_R3_head", R3)
             logger.info(f"[SpinQuant] R3: Online Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (monkeypatch)")
 
-        # R4: intermediate_size Hadamard (online buffer)
-        if self.config.r4 and self.intermediate_size > 0:
-            # Find the largest K that divides intermediate_size
+        # R4: r4_rotation_size Hadamard (online buffer)
+        if self.config.r4 and self.r4_rotation_size > 0:
+            # Find the largest K that divides r4_rotation_size
+            r4_size = self.r4_rotation_size
             K = 1
-            while K * 2 <= self.intermediate_size and self.intermediate_size % (K * 2) == 0:
+            while K * 2 <= r4_size and r4_size % (K * 2) == 0:
                 K *= 2
             if K > 1:
                 had_K = deterministic_hadamard_matrix(K, dtype=dtype, device=model_device)
                 self.model.register_buffer("spinquant_R4_had_K", had_K)
                 self.model.register_buffer("spinquant_R4_K", torch.tensor(K, device=model_device))
-                logger.info(
-                    f"[SpinQuant] R4: Block Hadamard K={K}, "
-                    f"{self.intermediate_size // K} blocks on down_proj (offline fuse + online hook)"
-                )
+                if r4_size < self.intermediate_size:
+                    logger.info(
+                        f"[SpinQuant] R4: Block Hadamard K={K}, "
+                        f"{r4_size // K} blocks within rotation_size={r4_size}, "
+                        f"{self.intermediate_size // r4_size} rotation blocks on down_proj"
+                    )
+                else:
+                    logger.info(
+                        f"[SpinQuant] R4: Block Hadamard K={K}, "
+                        f"{r4_size // K} blocks on down_proj (offline fuse + online hook)"
+                    )
 
     def _register_rotation(self, name: str, param: nn.Parameter) -> None:
         self.model.register_parameter(name, param)
@@ -560,6 +629,7 @@ class SpinQuantPreprocessor:
         if R1 is None or R1.numel() == 0:
             return
         R1_inv = R1.t()
+        r1_size = R1.shape[0]
 
         # Embed tokens (output rotation: W_embed @ R1)
         embed = self._get_embed_tokens()
@@ -567,8 +637,17 @@ class SpinQuantPreprocessor:
             with torch.no_grad():
                 W_f64 = embed.weight.data.to(torch.float64)
                 R_f64 = R1.to(embed.weight.device).to(torch.float64)
-                new_w = torch.matmul(W_f64, R_f64).to(embed.weight.dtype)
-                embed.weight.data = new_w
+                if W_f64.shape[-1] == r1_size:
+                    new_w = torch.matmul(W_f64, R_f64)
+                elif W_f64.shape[-1] % r1_size == 0:
+                    # Block rotation for embedding
+                    w_reshaped = W_f64.reshape(*W_f64.shape[:-1], -1, r1_size)
+                    new_w = (w_reshaped @ R_f64).reshape(W_f64.shape)
+                else:
+                    raise ValueError(
+                        f"embed_tokens dim={W_f64.shape[-1]} not divisible by R1 size={r1_size}"
+                    )
+                embed.weight.data = new_w.to(embed.weight.dtype)
 
         # Transformer layers
         n_layers = 0
@@ -652,16 +731,16 @@ class SpinQuantPreprocessor:
 
         Applies the same block Hadamard that the online hook uses. The hook
         computes x.view(-1, M, K) @ H_K.T where K is the largest power-of-2
-        dividing intermediate_size. The offline fusion applies the matching
+        dividing r4_rotation_size. The offline fusion applies the matching
         transform to the weight so they cancel: (x@H_block) @ (W@H_block).T = x@W.T.
         """
-        if not self.config.r4 or self.intermediate_size <= 0:
+        if not self.config.r4 or self.r4_rotation_size <= 0:
             return
 
         # Compute K: same logic as the hook in inplace/apply.py
-        inter = self.intermediate_size
+        r4_size = self.r4_rotation_size
         K = 1
-        while K * 2 <= inter and inter % (K * 2) == 0:
+        while K * 2 <= r4_size and r4_size % (K * 2) == 0:
             K *= 2
 
         if K <= 1:
@@ -676,7 +755,10 @@ class SpinQuantPreprocessor:
                 apply_hadamard_to_linear(mlp.down_proj, had_dim=K, output=False)
                 n_fused += 1
 
-        logger.info(f"[SpinQuant] R4 offline fused into {n_fused} down_proj layers (block Hadamard K={K})")
+        logger.info(
+            f"[SpinQuant] R4 offline fused into {n_fused} down_proj layers "
+            f"(block Hadamard K={K}, r4_rotation_size={r4_size})"
+        )
 
     # ------------------------------------------------------------------
     # Step 8: Cleanup
@@ -734,7 +816,14 @@ class SpinQuantPreprocessor:
         lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}")
 
         # R1
-        r1_desc = f"Hadamard {self.hidden_size}×{self.hidden_size} (offline fused)" if self.config.r1 else "Disabled"
+        if self.config.r1:
+            r1_size = self.r1_rotation_size
+            if r1_size < self.hidden_size:
+                r1_desc = f"Block Hadamard {r1_size}×{r1_size}, {self.hidden_size // r1_size} blocks (offline fused)"
+            else:
+                r1_desc = f"Hadamard {r1_size}×{r1_size} (offline fused)"
+        else:
+            r1_desc = "Disabled"
         lines.append(f"  {'Residual stream (R1)':<30} {r1_desc:<50} {'✓' if self.config.r1 else '✗'}")
 
         # --- Per-layer table ---
@@ -743,9 +832,10 @@ class SpinQuantPreprocessor:
 
         # Determine R4 K
         r4_K = 0
-        if self.config.r4 and self.intermediate_size > 0:
+        if self.config.r4 and self.r4_rotation_size > 0:
             K = 1
-            while K * 2 <= self.intermediate_size and self.intermediate_size % (K * 2) == 0:
+            r4_size = self.r4_rotation_size
+            while K * 2 <= r4_size and r4_size % (K * 2) == 0:
                 K *= 2
             if K > 1:
                 r4_K = K
@@ -761,7 +851,7 @@ class SpinQuantPreprocessor:
         lines.append(f"  {'-'*35} {'-'*20} {'-'*20} {'-'*22} {'-'*22}")
 
         # embed_tokens
-        r1_embed = f"W@R ({self.hidden_size})" if self.config.r1 else "-"
+        r1_embed = f"W@R ({self.r1_rotation_size})" if self.config.r1 else "-"
         lines.append(f"  {'model.embed_tokens':<35} {r1_embed:<20} {'-':<20} {'-':<22} {'-':<22}")
 
         # Transformer layers
@@ -795,7 +885,7 @@ class SpinQuantPreprocessor:
             # R4: check if hook on down_proj
             r4_status = "-"
             if self.config.r4 and r4_K > 0:
-                n_blocks = self.intermediate_size // r4_K
+                n_blocks = self.r4_rotation_size // r4_K
                 r4_status = f"blockH(K={r4_K},b={n_blocks})"
 
             # Print attention row
@@ -804,7 +894,7 @@ class SpinQuantPreprocessor:
             lines.append(f"  {layer_name + '.mlp':<35} {r1_mlp:<20} {'-':<20} {'-':<22} {r4_status:<22}")
 
         # lm_head
-        r1_lm = f"R⁻¹@W ({self.hidden_size})" if self.config.r1 else "-"
+        r1_lm = f"R⁻¹@W ({self.r1_rotation_size})" if self.config.r1 else "-"
         lines.append(f"  {'model.lm_head':<35} {r1_lm:<20} {'-':<20} {'-':<22} {'-':<22}")
 
         # --- Hook summary ---

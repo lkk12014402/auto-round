@@ -134,6 +134,7 @@ def get_rotation_config_dict(r1=True, r2=True, r3=False, r4=False, online_r1=Tru
 
 def quantize_with_quark_mxfp4(model, tokenizer, device, with_rotation=False,
                                r1=True, r2=True, r3=False, r4=False,
+                               rotation_size=128,
                                num_calib_data=128, seqlen=512):
     """Quantize model using Quark's MXFP4 scheme, optionally with rotation.
 
@@ -143,6 +144,7 @@ def quantize_with_quark_mxfp4(model, tokenizer, device, with_rotation=False,
         device: Device string.
         with_rotation: If True, apply rotation before quantization.
         r1, r2, r3, r4: Which rotations to enable.
+        rotation_size: Rotation size for R1 (default: 128).
         num_calib_data: Number of calibration samples.
         seqlen: Calibration sequence length.
 
@@ -154,7 +156,8 @@ def quantize_with_quark_mxfp4(model, tokenizer, device, with_rotation=False,
 
     # Build quantization config
     if with_rotation:
-        rotation_config = get_rotation_config_dict(r1=r1, r2=r2, r3=r3, r4=r4)
+        rotation_config = get_rotation_config_dict(r1=r1, r2=r2, r3=r3, r4=r4,
+                                                   rotation_size=rotation_size)
         algo_configs = {"rotation": rotation_config}
         quant_config = template.get_config(
             scheme="mxfp4",
@@ -212,6 +215,8 @@ def main():
     parser.add_argument("--enable-r3", action="store_true", dest="r3")
     parser.add_argument("--r4", action="store_false", default=False)
     parser.add_argument("--enable-r4", action="store_true", dest="r4")
+    parser.add_argument("--rotation-size", type=int, default=128,
+                        help="Rotation size for R1 (default: 128, matching Quark default)")
     args = parser.parse_args()
 
     levels_to_test = [l.strip() for l in args.levels.split(",")]
@@ -231,6 +236,7 @@ def main():
     print(f"  Levels:     {levels_to_test}")
     print(f"  Quant:      MXFP4 (W4A4, weight static + activation dynamic)")
     print(f"  Rotation:   {rotation_desc} (Hadamard, no training)")
+    print(f"  Rot. size:  {args.rotation_size}")
     print("=" * 70)
 
     tokenizer = get_tokenizer(args.model, model_type="qwen3", trust_remote_code=False)
@@ -276,6 +282,7 @@ def main():
                 model, tokenizer, args.device,
                 with_rotation=True,
                 r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4,
+                rotation_size=args.rotation_size,
                 num_calib_data=args.num_calib_data,
                 seqlen=args.seqlen,
             )

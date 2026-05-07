@@ -1,0 +1,47 @@
+{
+  "locations": {
+    "/workspace": {
+      "tool_approvals": [
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "pip install"
+          ]
+        },
+        {
+          "kind": "write"
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "timeout"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "pip show"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "nvidia-smi"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "xargs"
+          ]
+        }
+      ]
+    }
+  }
+}

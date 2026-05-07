@@ -35,6 +35,7 @@ def register_spinquant_hooks(
     compute_device: Optional[torch.device] = None,
     head_dim: int = 0,
     intermediate_size: int = 0,
+    r4_rotation_size: int = 0,
 ) -> list[Any]:
     """Register online rotation hooks for SpinQuant R3 (Q/K) and R4 (MLP activation).
 
@@ -52,6 +53,8 @@ def register_spinquant_hooks(
         compute_device: Device for hook computation.
         head_dim: Per-head dimension for R3 rotation. If 0, tries config.head_dim.
         intermediate_size: MLP intermediate dimension for R4. If 0, tries config.intermediate_size.
+        r4_rotation_size: Override R4 rotation size (for custom rotation_size).
+            If 0, falls back to intermediate_size.
 
     Returns:
         A list of hook handles that can be used to remove the hooks later.
@@ -116,16 +119,17 @@ def register_spinquant_hooks(
     # R4: MLP activation rotation (intermediate_size Hadamard)
     # ------------------------------------------------------------------
     if getattr(config, "r4", False) and intermediate_size > 0:
-        inter = intermediate_size
-        # Find the largest power-of-2 K that divides intermediate_size.
+        # Use r4_rotation_size if provided, otherwise fall back to intermediate_size
+        r4_size = r4_rotation_size if r4_rotation_size > 0 else intermediate_size
+        # Find the largest power-of-2 K that divides r4_size.
         K = 1
-        while K * 2 <= inter and inter % (K * 2) == 0:
+        while K * 2 <= r4_size and r4_size % (K * 2) == 0:
             K *= 2
 
         if K <= 1:
             logger.warning(
-                f"[SpinQuant] R4 requires intermediate_size to be divisible by a power of 2 > 1, "
-                f"but intermediate_size={inter} has no such factor. Skipping R4 rotation."
+                f"[SpinQuant] R4 requires rotation size to be divisible by a power of 2 > 1, "
+                f"but r4_rotation_size={r4_size} has no such factor. Skipping R4 rotation."
             )
         else:
             from auto_round.algorithms.transforms.spinquant.rotation_utils import (
@@ -156,8 +160,9 @@ def register_spinquant_hooks(
                     r4_count += 1
 
             logger.info(
-                f"[SpinQuant] R4: Applied block Hadamard(K={K}, blocks={inter // K}) "
+                f"[SpinQuant] R4: Applied block Hadamard(K={K}, blocks={r4_size // K}) "
                 f"pre-hook on {r4_count} down_proj layers"
+                + (f" (r4_rotation_size={r4_size})" if r4_size != intermediate_size else "")
             )
 
     return handles

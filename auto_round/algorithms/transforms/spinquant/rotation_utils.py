@@ -181,8 +181,11 @@ def rotate_in_channels_(
 
         W_new = W @ R.T
 
-    where ``R`` is the input rotation matrix.  Uses ``float64`` intermediate
-    computation to avoid precision loss.
+    When ``R`` is smaller than the last dimension of ``W`` (block rotation),
+    the rotation is applied as a block-diagonal transform: the last dimension
+    is reshaped into ``(-1, rotation_size)``, ``@ R.T`` is applied, and the
+    result is flattened back. This follows the same convention as Quark's
+    ``rotate_with_size``.
 
     Args:
         layer: The ``nn.Linear`` layer whose weight will be rotated.
@@ -202,11 +205,23 @@ def rotate_in_channels_(
     if R is None:
         return
 
-    # Deterministic math: W_new = W @ R.T
-    # Using float64 intermediate to avoid rounding errors.
+    rot_size = R.shape[0]
     W_f64 = W.to(torch.float64)
     R_f64 = R.to(torch.float64)
-    layer.weight.data = (W_f64 @ R_f64.T).to(W.dtype)
+
+    if W.shape[-1] == rot_size:
+        # Full rotation: W_new = W @ R.T
+        layer.weight.data = (W_f64 @ R_f64.T).to(W.dtype)
+    elif W.shape[-1] % rot_size == 0:
+        # Block rotation: reshape → rotate → flatten
+        w_reshaped = W_f64.reshape(*W_f64.shape[:-1], -1, rot_size)
+        w_rotated = w_reshaped @ R_f64.T
+        layer.weight.data = w_rotated.reshape(W.shape).to(W.dtype)
+    else:
+        raise ValueError(
+            f"rotate_in_channels_: rotation_size={rot_size} does not divide "
+            f"weight dim={W.shape[-1]}"
+        )
 
     # input-side rotation does NOT affect bias:
     # y = (W @ R.T) @ (R @ x) + b = W @ x + b
@@ -225,8 +240,10 @@ def rotate_out_channels_(
 
         W_new = R.T @ W
 
-    where ``R`` is the output rotation matrix.  Uses ``float64`` intermediate
-    computation to avoid precision loss.
+    When ``R`` is smaller than the output dimension (block rotation), the
+    first dimension (output channels / rows) is reshaped into
+    ``(-1, rotation_size)``, transposed to apply ``@ R.T``, and reshaped back.
+    This follows the same convention as Quark's ``rotate_with_size``.
 
     Args:
         layer: The ``nn.Linear`` layer whose weight will be rotated.
@@ -244,14 +261,43 @@ def rotate_out_channels_(
     if R is None:
         return
 
-    # Deterministic math: W_new = R.T @ W
+    rot_size = R.shape[0]
     W_f64 = W.to(torch.float64)
     R_f64 = R.to(torch.float64)
-    layer.weight.data = (R_f64.T @ W_f64).to(W.dtype)
 
-    # Rotate bias if present:  y = (R^T @ W) @ x + R^T @ b
+    # output rotation: we need to rotate rows (output dim) of W
+    # For block rotation, use W.T so rotation acts on the last dim,
+    # then transpose back (same as Quark's approach)
+    out_dim = W.shape[0]
+    if out_dim == rot_size:
+        # Full rotation: W_new = R.T @ W
+        layer.weight.data = (R_f64.T @ W_f64).to(W.dtype)
+    elif out_dim % rot_size == 0:
+        # Block rotation on output dim: transpose, block rotate, transpose back
+        WT = W_f64.T  # [in_features, out_features]
+        wt_reshaped = WT.reshape(*WT.shape[:-1], -1, rot_size)
+        wt_rotated = wt_reshaped @ R_f64
+        layer.weight.data = wt_rotated.reshape(WT.shape).T.contiguous().to(W.dtype)
+    else:
+        raise ValueError(
+            f"rotate_out_channels_: rotation_size={rot_size} does not divide "
+            f"output dim={out_dim}"
+        )
+
+    # Rotate bias if present
     if layer.bias is not None:
-        layer.bias.data = (R_f64.T @ layer.bias.data.to(torch.float64)).to(layer.bias.dtype)
+        bias_f64 = layer.bias.data.to(torch.float64)
+        if bias_f64.shape[0] == rot_size:
+            layer.bias.data = (R_f64.T @ bias_f64).to(layer.bias.dtype)
+        elif bias_f64.shape[0] % rot_size == 0:
+            b_reshaped = bias_f64.reshape(-1, rot_size)
+            b_rotated = (b_reshaped @ R_f64).reshape(-1)
+            layer.bias.data = b_rotated.to(layer.bias.dtype)
+        else:
+            raise ValueError(
+                f"rotate_out_channels_: rotation_size={rot_size} does not divide "
+                f"bias dim={bias_f64.shape[0]}"
+            )
 
 
 def fuse_rmsnorm_in_model(model: nn.Module) -> None:

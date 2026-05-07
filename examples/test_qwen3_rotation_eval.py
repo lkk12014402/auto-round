@@ -33,13 +33,14 @@ from auto_round.algorithms.transforms.spinquant import (
 )
 
 
-def apply_rotation(model, tokenizer, r1=True, r2=True, r3=True, r4=True, device="cuda:0"):
+def apply_rotation(model, tokenizer, r1=True, r2=True, r3=True, r4=True, device="cuda:0", rotation_size=None):
     """Apply SpinQuant/QuaRot rotation to a model (in-place)."""
     config = SpinQuantConfig(
         r1=r1,
         r2=r2,
         r3=r3,
         r4=r4,
+        rotation_size=rotation_size,
         trainable_rotation=False,  # Fixed Hadamard (QuaRot mode)
         trainable_smooth=False,
         fuse_rmsnorm=True,
@@ -217,6 +218,10 @@ def main():
         "--dtype", type=str, default="float16", choices=["float16", "bfloat16", "float32"],
         help="Model dtype"
     )
+    parser.add_argument(
+        "--rotation-size", type=int, default=None,
+        help="Custom rotation size (must be power of 2). Affects R1 and R4."
+    )
     args = parser.parse_args()
 
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
@@ -243,6 +248,8 @@ def main():
     print(f"  Device:     {args.device}")
     print(f"  Dtype:      {args.dtype}")
     print(f"  Levels:     {levels_to_test}")
+    if args.rotation_size:
+        print(f"  Rot. size:  {args.rotation_size}")
     print("=" * 70)
 
     # Load tokenizer (shared across all evaluations)
@@ -283,6 +290,7 @@ def main():
                 r1=rot_cfg["r1"], r2=rot_cfg["r2"],
                 r3=rot_cfg["r3"], r4=rot_cfg["r4"],
                 device=args.device,
+                rotation_size=args.rotation_size,
             )
             rot_time = time.time() - t0
             print(f"  Rotation applied in {rot_time:.1f}s")
