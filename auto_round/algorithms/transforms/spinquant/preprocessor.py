@@ -219,6 +219,9 @@ class SpinQuantPreprocessor:
         # Step 8: cleanup training artefacts
         self._cleanup()
 
+        # Print per-layer transformation summary table
+        self._print_transformation_summary()
+
         logger.info("[SpinQuant] Preprocessing complete!")
         return self.model
 
@@ -708,6 +711,125 @@ class SpinQuantPreprocessor:
             if isinstance(tensor, (nn.Parameter, torch.Tensor)):
                 return tensor.data if isinstance(tensor, nn.Parameter) else tensor
         return None
+
+    def _print_transformation_summary(self) -> None:
+        """Print a per-layer table summarizing all applied transformations and hooks."""
+        lines = []
+        lines.append("")
+        lines.append("=" * 100)
+        lines.append("SpinQuant Transformation Summary")
+        lines.append("=" * 100)
+
+        # --- Global transforms ---
+        lines.append("")
+        lines.append("Global Transforms:")
+        lines.append(f"  {'Component':<30} {'Transform':<50} {'Status'}")
+        lines.append(f"  {'-'*30} {'-'*50} {'-'*10}")
+
+        # Untie embeddings
+        tied = getattr(self.model.config, "tie_word_embeddings", False) if hasattr(self.model, "config") else "unknown"
+        lines.append(f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} {'✓ untied' if not tied else '✗ still tied'}")
+
+        # RMSNorm fusion
+        lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}")
+
+        # R1
+        r1_desc = f"Hadamard {self.hidden_size}×{self.hidden_size} (offline fused)" if self.config.r1 else "Disabled"
+        lines.append(f"  {'Residual stream (R1)':<30} {r1_desc:<50} {'✓' if self.config.r1 else '✗'}")
+
+        # --- Per-layer table ---
+        lines.append("")
+        lines.append("Per-Layer Transforms:")
+
+        # Determine R4 K
+        r4_K = 0
+        if self.config.r4 and self.intermediate_size > 0:
+            K = 1
+            while K * 2 <= self.intermediate_size and self.intermediate_size % (K * 2) == 0:
+                K *= 2
+            if K > 1:
+                r4_K = K
+
+        # Table header
+        col_layer = "Layer"
+        col_r1 = "R1 (weight fuse)"
+        col_r2 = "R2 (weight fuse)"
+        col_r3 = "R3 (online hook)"
+        col_r4 = "R4 (online hook)"
+        header = f"  {col_layer:<35} {col_r1:<20} {col_r2:<20} {col_r3:<22} {col_r4:<22}"
+        lines.append(header)
+        lines.append(f"  {'-'*35} {'-'*20} {'-'*20} {'-'*22} {'-'*22}")
+
+        # embed_tokens
+        r1_embed = f"W@R ({self.hidden_size})" if self.config.r1 else "-"
+        lines.append(f"  {'model.embed_tokens':<35} {r1_embed:<20} {'-':<20} {'-':<22} {'-':<22}")
+
+        # Transformer layers
+        layers = list(self._get_layers())
+        n_layers = sum(1 for l in layers if hasattr(l, "self_attn") and hasattr(l, "mlp"))
+
+        for i, layer in enumerate(layers):
+            if not (hasattr(layer, "self_attn") and hasattr(layer, "mlp")):
+                continue
+
+            # Only show first 2 and last layer to keep output concise
+            if n_layers > 5 and 2 <= i < n_layers - 1:
+                if i == 2:
+                    lines.append(f"  {'  ... (same pattern for all layers)':<35}")
+                continue
+
+            layer_name = f"layers.{i}"
+
+            # R1 for this layer: affects q/k/v/o_proj, gate/up/down_proj
+            r1_attn = f"q/k/v:R⁻¹@W o:W@R" if self.config.r1 else "-"
+            r1_mlp = f"g/u:R⁻¹@W d:W@R" if self.config.r1 else "-"
+
+            # R2 for this layer: affects v_proj out, o_proj in
+            r2_status = f"H({self.head_dim}) v↔o" if self.config.r2 else "-"
+
+            # R3: check if monkeypatch applied (look for wrapper in self_attn)
+            r3_status = "-"
+            if self.config.r3 and self.head_dim > 0 and is_pow2(self.head_dim):
+                r3_status = f"H({self.head_dim}) Q,K post-RoPE"
+
+            # R4: check if hook on down_proj
+            r4_status = "-"
+            if self.config.r4 and r4_K > 0:
+                n_blocks = self.intermediate_size // r4_K
+                r4_status = f"blockH(K={r4_K},b={n_blocks})"
+
+            # Print attention row
+            lines.append(f"  {layer_name + '.self_attn':<35} {r1_attn:<20} {r2_status:<20} {r3_status:<22} {'-':<22}")
+            # Print MLP row
+            lines.append(f"  {layer_name + '.mlp':<35} {r1_mlp:<20} {'-':<20} {'-':<22} {r4_status:<22}")
+
+        # lm_head
+        r1_lm = f"R⁻¹@W ({self.hidden_size})" if self.config.r1 else "-"
+        lines.append(f"  {'model.lm_head':<35} {r1_lm:<20} {'-':<20} {'-':<22} {'-':<22}")
+
+        # --- Hook summary ---
+        lines.append("")
+        lines.append("Registered Hooks:")
+        r3_hooks = sum(1 for h in self._hook_handles if isinstance(h, tuple) and h[0] == "r3_monkeypatch")
+        r4_hooks = sum(1 for h in self._hook_handles if not (isinstance(h, tuple) and h[0] == "r3_monkeypatch"))
+        lines.append(f"  R3 monkeypatch (apply_rotary_pos_emb → QKRotationWrapper):  {r3_hooks} attention layers")
+        lines.append(f"  R4 forward_pre_hook (block Hadamard on down_proj input):    {r4_hooks} MLP layers")
+
+        # --- Summary totals ---
+        lines.append("")
+        lines.append("Totals:")
+        lines.append(f"  Transformer layers:   {n_layers}")
+        lines.append(f"  Offline-fused params: embed_tokens" +
+                     (f", {n_layers}×(q/k/v/o_proj, gate/up/down_proj), lm_head" if self.config.r1 else "") +
+                     (f" + {n_layers}×(v_proj↔o_proj)" if self.config.r2 else "") +
+                     (f" + {n_layers}×(down_proj)" if self.config.r4 and r4_K > 0 else ""))
+        lines.append(f"  Online hooks:         {r3_hooks + r4_hooks} total ({r3_hooks} R3 + {r4_hooks} R4)")
+        lines.append(f"  Inference overhead:   R3={'O(seq×heads×d_head×log₂d_head) per layer' if r3_hooks > 0 else 'none'}")
+        lines.append(f"                        R4={'O(seq×inter×log₂K) per layer' if r4_hooks > 0 else 'none'}")
+        lines.append("=" * 100)
+
+        # Log as a single multi-line message
+        logger.info("\n".join(lines))
 
 
 def remove_spinquant_hooks_from_model(model: nn.Module) -> None:

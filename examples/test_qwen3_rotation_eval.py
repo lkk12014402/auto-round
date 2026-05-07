@@ -13,10 +13,15 @@ Usage:
 
 import argparse
 import copy
+import logging
 import sys
 import time
 
 sys.path.insert(0, "/data/lkk/quarot/auto-round")
+
+# Enable SpinQuant logging so the transformation summary table is visible
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.getLogger("auto_round.spinquant").setLevel(logging.INFO)
 
 import torch
 import torch.nn as nn
