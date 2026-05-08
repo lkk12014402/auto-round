@@ -1,0 +1,233 @@
+[SpinQuant] Starting preprocessing...
+[SpinQuant] Model architecture info: hidden_size=1024, head_dim=128, num_q_heads=16, num_kv_heads=8, intermediate_size=3072
+[SpinQuant] Custom rotation_size=128 → R1 size=128, R4 size=128 (R2/R3 always use head_dim=128)
+[SpinQuant] Rotation config: R1=True, R2=True, R3=True, R4=True, online_r1=True, trainable_rotation=False, trainable_smooth=False
+[SpinQuant] R3 does not support custom rotation_size (always uses head_dim=128). Ignoring rotation_size for R3.
+[SpinQuant] R4 block Hadamard: K=128, blocks=1 (r4_rotation_size=128, intermediate_size=3072)
+[SpinQuant] Online R1: skipping untie embeddings (embed_tokens unchanged)
+[SpinQuant] Online R1: skipping RMSNorm fusion (not needed)
+[SpinQuant] Initialising rotation matrices...
+[SpinQuant] R1: Random Hadamard [128×128] block rotation (8 blocks, fixed, offline fuse)
+[SpinQuant] R2: Random Hadamard [128×128] per head (fixed, offline fuse)
+[SpinQuant] R3: Online Hadamard [128×128] after RoPE (monkeypatch)
+[SpinQuant] R4: Block Hadamard K=128, 1 blocks within rotation_size=128, 24 rotation blocks on down_proj
+[SpinQuant] Applying online R1 rotation (weight + wrapper)...
+[SpinQuant] Online R1: rotated 140 target modules, wrapped 140 with InputRotationWrapperHadamard (rotation_size=128, lm_head/embed_tokens/o_proj/down_proj unchanged)
+[SpinQuant] R2 fused into 28 layers (v_proj out + o_proj in, head_dim=128)
+[SpinQuant] R4 offline fused into 28 down_proj layers (block Hadamard K=128, r4_rotation_size=128)
+[SpinQuant] Registering online rotation hooks...
+[SpinQuant] R3: Applied Hadamard(head_dim=128) after RoPE on 28 attention layers
+[SpinQuant] R4: Applied InputRotationWrapperHadamard(rotation_size=128, K=128) on 28 down_proj layers (r4_rotation_size=128)
+
+====================================================================================================
+SpinQuant Transformation Summary
+====================================================================================================
+
+Global Transforms:
+  Component                      Transform                                          Status
+  ------------------------------ -------------------------------------------------- ----------
+  embed_tokens / lm_head         Untie word embeddings (skipped: online R1)         - n/a
+  All RMSNorm layers             Fuse gamma (skipped: online R1)                    - n/a
+  Residual stream (R1)           Block Hadamard 128×128, 8 blocks (online)          ✓
+
+Per-Layer Transforms:
+  Layer                               R1 (online)          R2 (weight fuse)     R3 (online hook)       R4 (online hook)      
+  ----------------------------------- -------------------- -------------------- ---------------------- ----------------------
+  model.embed_tokens                  -                    -                    -                      -                     
+  layers.0.self_attn                  q/k/v:W@H+hook       H(128) v↔o           H(128) Q,K post-RoPE   -                     
+  layers.0.mlp                        g/u:W@H+hook         -                    -                      blockH(K=128,b=1)     
+  layers.1.self_attn                  q/k/v:W@H+hook       H(128) v↔o           H(128) Q,K post-RoPE   -                     
+  layers.1.mlp                        g/u:W@H+hook         -                    -                      blockH(K=128,b=1)     
+    ... (same pattern for all layers)
+  layers.27.self_attn                 q/k/v:W@H+hook       H(128) v↔o           H(128) Q,K post-RoPE   -                     
+  layers.27.mlp                       g/u:W@H+hook         -                    -                      blockH(K=128,b=1)     
+  model.lm_head                       -                    -                    -                      -                     
+
+Registered Hooks:
+  R1 online hooks (Hadamard on target module input):          28 modules
+  R3 monkeypatch (apply_rotary_pos_emb → QKRotationWrapper):  28 attention layers
+  R4 forward_pre_hook (block Hadamard on down_proj input):    0 MLP layers
+
+Totals:
+  Transformer layers:   28
+  Online R1 targets:    28×(q/k/v_proj, gate/up_proj) = 28 modules
+  Offline-fused params: 28×(v_proj↔o_proj), 28×(down_proj)
+  Online hooks:         56 total (28 R1 + 28 R3 + 0 R4)
+  Inference overhead:   R1=O(seq×hidden×log₂H) per module
+                        R3=O(seq×heads×d_head×log₂d_head) per layer
+                        R4=none
+====================================================================================================
+[SpinQuant] Preprocessing complete!
+[38;20m2026-05-08 10:13:26 INFO config.py L50: `enable_opt_rtn` is turned on, set `--disable_opt_rtn` for higher speed at the cost of accuracy.[0m
+[38;20m2026-05-08 10:13:26 INFO entry.py L491: Using LLM mode (new architecture).[0m
+[33;1m2026-05-08 10:13:26 WARNING base.py L193: unrecognized keys ['enable_alg_ext', 'QuantizationConfig', 'dataset', 'iters', 'processor', 'image_processor', 'template', 'extra_data_dir', 'guidance_scale', 'num_inference_steps', 'generator_seed'] were passed. Please check them. If you use old api, just ignore this warning.[0m
+[38;20m2026-05-08 10:13:26 INFO base.py L48: ModelContext context initialized.[0m
+[38;20m2026-05-08 10:13:26 INFO model.py L122: using torch.float16 for quantization tuning[0m
+[38;20m2026-05-08 10:13:27 INFO base.py L48: CompressContext context initialized.[0m
+[33;1m2026-05-08 10:13:27 WARNING base.py L657: force to use bf16 for quantization tuning when enabling activation quantization[0m
+[33;1m2026-05-08 10:13:27 WARNING device.py L963: cuda in `device_map` dose not match any modules, please have a check[0m
+[38;20m2026-05-08 10:13:27 INFO zero_shot.py L136: RTN mode detected (iters=0): force blockwise quantization to avoid layer-wise full-model materialization.[0m
+======================================================================
+Auto-Round: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Device:     cuda:6
+  Levels:     ['rotation_mxfp4']
+  Quant:      MXFP4 (RTN, iters=0)
+  Rotation:   R1+R2+R3+R4 (online R1, QuaRot mode)
+  Rot. size:  128
+======================================================================
+
+======================================================================
+  Evaluating: rotation_mxfp4
+======================================================================
+  Step 1: Loading model and applying rotation (R1+R2+R3+R4)...
+  Step 2: Quantizing rotated model with MXFP4...
+  0%|          | 0/28 [00:00<?, ?it/s]Quantizing model.layers.0:   0%|          | 0/28 [00:00<?, ?it/s][38;20m2026-05-08 10:13:27 INFO offload.py L703: OffloadManager (compressor): tempdir = /data/lkk/quarot/auto-round/examples/ar_work_space/offload/compressor__ljne_bp[0m
+[38;20m2026-05-08 10:13:29 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.0:   4%|▎         | 1/28 [00:01<00:51,  1.91s/it]Quantizing model.layers.1:   4%|▎         | 1/28 [00:01<00:51,  1.91s/it][38;20m2026-05-08 10:13:29 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.1:   7%|▋         | 2/28 [00:02<00:28,  1.11s/it]Quantizing model.layers.2:   7%|▋         | 2/28 [00:02<00:28,  1.11s/it][38;20m2026-05-08 10:13:30 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.2:  11%|█         | 3/28 [00:02<00:21,  1.19it/s]Quantizing model.layers.3:  11%|█         | 3/28 [00:02<00:21,  1.19it/s][38;20m2026-05-08 10:13:32 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.3:  14%|█▍        | 4/28 [00:05<00:31,  1.32s/it]Quantizing model.layers.4:  14%|█▍        | 4/28 [00:05<00:31,  1.32s/it][38;20m2026-05-08 10:13:33 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.4:  18%|█▊        | 5/28 [00:05<00:24,  1.04s/it]Quantizing model.layers.5:  18%|█▊        | 5/28 [00:05<00:24,  1.04s/it][38;20m2026-05-08 10:13:33 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.5:  21%|██▏       | 6/28 [00:06<00:19,  1.16it/s]Quantizing model.layers.6:  21%|██▏       | 6/28 [00:06<00:19,  1.16it/s][38;20m2026-05-08 10:13:35 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.6:  25%|██▌       | 7/28 [00:08<00:26,  1.24s/it]Quantizing model.layers.7:  25%|██▌       | 7/28 [00:08<00:26,  1.24s/it][38;20m2026-05-08 10:13:36 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.7:  29%|██▊       | 8/28 [00:08<00:20,  1.01s/it]Quantizing model.layers.8:  29%|██▊       | 8/28 [00:08<00:20,  1.01s/it][38;20m2026-05-08 10:13:36 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.8:  32%|███▏      | 9/28 [00:09<00:16,  1.17it/s]Quantizing model.layers.9:  32%|███▏      | 9/28 [00:09<00:16,  1.17it/s][38;20m2026-05-08 10:13:38 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.9:  36%|███▌      | 10/28 [00:11<00:22,  1.23s/it]Quantizing model.layers.10:  36%|███▌      | 10/28 [00:11<00:22,  1.23s/it][38;20m2026-05-08 10:13:39 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.10:  39%|███▉      | 11/28 [00:11<00:17,  1.01s/it]Quantizing model.layers.11:  39%|███▉      | 11/28 [00:11<00:17,  1.01s/it][38;20m2026-05-08 10:13:39 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.11:  43%|████▎     | 12/28 [00:12<00:13,  1.16it/s]Quantizing model.layers.12:  43%|████▎     | 12/28 [00:12<00:13,  1.16it/s][38;20m2026-05-08 10:13:41 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.12:  46%|████▋     | 13/28 [00:14<00:18,  1.21s/it]Quantizing model.layers.13:  46%|████▋     | 13/28 [00:14<00:18,  1.21s/it][38;20m2026-05-08 10:13:42 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.13:  50%|█████     | 14/28 [00:14<00:14,  1.01s/it]Quantizing model.layers.14:  50%|█████     | 14/28 [00:14<00:14,  1.01s/it][38;20m2026-05-08 10:13:42 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.14:  54%|█████▎    | 15/28 [00:15<00:11,  1.17it/s]Quantizing model.layers.15:  54%|█████▎    | 15/28 [00:15<00:11,  1.17it/s][38;20m2026-05-08 10:13:44 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.15:  57%|█████▋    | 16/28 [00:17<00:14,  1.22s/it]Quantizing model.layers.16:  57%|█████▋    | 16/28 [00:17<00:14,  1.22s/it][38;20m2026-05-08 10:13:45 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.16:  61%|██████    | 17/28 [00:17<00:11,  1.02s/it]Quantizing model.layers.17:  61%|██████    | 17/28 [00:17<00:11,  1.02s/it][38;20m2026-05-08 10:13:45 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.17:  64%|██████▍   | 18/28 [00:18<00:08,  1.16it/s]Quantizing model.layers.18:  64%|██████▍   | 18/28 [00:18<00:08,  1.16it/s][38;20m2026-05-08 10:13:47 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.18:  68%|██████▊   | 19/28 [00:20<00:11,  1.24s/it]Quantizing model.layers.19:  68%|██████▊   | 19/28 [00:20<00:11,  1.24s/it][38;20m2026-05-08 10:13:48 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.19:  71%|███████▏  | 20/28 [00:21<00:08,  1.03s/it]Quantizing model.layers.20:  71%|███████▏  | 20/28 [00:21<00:08,  1.03s/it][38;20m2026-05-08 10:13:49 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.20:  75%|███████▌  | 21/28 [00:21<00:06,  1.14it/s]Quantizing model.layers.21:  75%|███████▌  | 21/28 [00:21<00:06,  1.14it/s][38;20m2026-05-08 10:13:51 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.21:  79%|███████▊  | 22/28 [00:23<00:07,  1.27s/it]Quantizing model.layers.22:  79%|███████▊  | 22/28 [00:23<00:07,  1.27s/it][38;20m2026-05-08 10:13:51 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.22:  82%|████████▏ | 23/28 [00:24<00:05,  1.05s/it]Quantizing model.layers.23:  82%|████████▏ | 23/28 [00:24<00:05,  1.05s/it][38;20m2026-05-08 10:13:52 INFO device.py L1802: 'peak_ram': 1.39GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.23:  86%|████████▌ | 24/28 [00:24<00:03,  1.12it/s]Quantizing model.layers.24:  86%|████████▌ | 24/28 [00:24<00:03,  1.12it/s][38;20m2026-05-08 10:13:54 INFO device.py L1802: 'peak_ram': 1.39GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.24:  89%|████████▉ | 25/28 [00:26<00:03,  1.25s/it]Quantizing model.layers.25:  89%|████████▉ | 25/28 [00:26<00:03,  1.25s/it][38;20m2026-05-08 10:13:54 INFO device.py L1802: 'peak_ram': 1.39GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.25:  93%|█████████▎| 26/28 [00:27<00:02,  1.04s/it]Quantizing model.layers.26:  93%|█████████▎| 26/28 [00:27<00:02,  1.04s/it][38;20m2026-05-08 10:13:55 INFO device.py L1802: 'peak_ram': 1.39GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.26:  96%|█████████▋| 27/28 [00:28<00:00,  1.12it/s]Quantizing model.layers.27:  96%|█████████▋| 27/28 [00:28<00:00,  1.12it/s][38;20m2026-05-08 10:13:57 INFO device.py L1802: 'peak_ram': 1.39GB, 'peak_vram': 1.52GB[0m
+Quantizing model.layers.27: 100%|██████████| 28/28 [00:30<00:00,  1.26s/it]Quantizing model.layers.27: 100%|██████████| 28/28 [00:30<00:00,  1.10s/it]
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+Using pre-initialized model
+Selected tasks:
+Task: hellaswag (hellaswag/hellaswag.yaml)
+Task: piqa (piqa/piqa.yaml)
+Building contexts for hellaswag on rank 0...
+  Setup completed in 34.0s
+  Running lm_eval...
+  0%|          | 0/10042 [00:00<?, ?it/s]  2%|▏         | 238/10042 [00:00<00:04, 2371.45it/s]  5%|▍         | 476/10042 [00:00<00:04, 2368.87it/s]  7%|▋         | 713/10042 [00:00<00:03, 2366.62it/s]  9%|▉         | 950/10042 [00:00<00:03, 2363.35it/s] 12%|█▏        | 1188/10042 [00:00<00:03, 2369.32it/s] 14%|█▍        | 1425/10042 [00:00<00:03, 2362.46it/s] 17%|█▋        | 1663/10042 [00:00<00:03, 2367.78it/s] 19%|█▉        | 1902/10042 [00:00<00:03, 2372.38it/s] 21%|██▏       | 2140/10042 [00:00<00:03, 2374.62it/s] 24%|██▎       | 2379/10042 [00:01<00:03, 2378.56it/s] 26%|██▌       | 2618/10042 [00:01<00:03, 2380.51it/s] 28%|██▊       | 2857/10042 [00:01<00:03, 2379.90it/s] 31%|███       | 3096/10042 [00:01<00:02, 2381.92it/s] 33%|███▎      | 3336/10042 [00:01<00:02, 2386.08it/s] 36%|███▌      | 3575/10042 [00:01<00:02, 2385.23it/s] 38%|███▊      | 3814/10042 [00:01<00:02, 2383.43it/s] 40%|████      | 4053/10042 [00:01<00:02, 2382.32it/s] 43%|████▎     | 4292/10042 [00:01<00:02, 2383.10it/s] 45%|████▌     | 4531/10042 [00:01<00:02, 2382.24it/s] 48%|████▊     | 4771/10042 [00:02<00:02, 2386.22it/s] 50%|████▉     | 5010/10042 [00:02<00:02, 2380.01it/s] 52%|█████▏    | 5249/10042 [00:02<00:02, 2379.92it/s] 55%|█████▍    | 5487/10042 [00:02<00:01, 2379.29it/s] 57%|█████▋    | 5725/10042 [00:02<00:01, 2378.02it/s] 59%|█████▉    | 5964/10042 [00:02<00:01, 2380.00it/s] 62%|██████▏   | 6203/10042 [00:02<00:01, 2376.59it/s] 64%|██████▍   | 6441/10042 [00:02<00:01, 2376.62it/s] 67%|██████▋   | 6679/10042 [00:02<00:01, 2371.76it/s] 69%|██████▉   | 6917/10042 [00:02<00:01, 2372.08it/s] 71%|███████▏  | 7155/10042 [00:03<00:01, 2371.05it/s] 74%|███████▎  | 7394/10042 [00:03<00:01, 2375.37it/s] 76%|███████▌  | 7636/10042 [00:03<00:01, 2386.31it/s] 78%|███████▊  | 7878/10042 [00:03<00:00, 2393.99it/s] 81%|████████  | 8120/10042 [00:03<00:00, 2401.01it/s] 83%|████████▎ | 8362/10042 [00:03<00:00, 2404.66it/s] 86%|████████▌ | 8603/10042 [00:03<00:00, 2395.90it/s] 88%|████████▊ | 8843/10042 [00:03<00:00, 2390.41it/s] 90%|█████████ | 9083/10042 [00:03<00:00, 2387.55it/s] 93%|█████████▎| 9322/10042 [00:03<00:00, 2378.04it/s] 95%|█████████▌| 9560/10042 [00:04<00:00, 2375.39it/s] 98%|█████████▊| 9798/10042 [00:04<00:00, 2367.67it/s]100%|█████████▉| 10035/10042 [00:04<00:00, 2367.22it/s]100%|██████████| 10042/10042 [00:04<00:00, 2377.82it/s]
+Building contexts for piqa on rank 0...
+  0%|          | 0/1838 [00:00<?, ?it/s]  7%|▋         | 122/1838 [00:00<00:01, 1218.48it/s] 13%|█▎        | 244/1838 [00:00<00:01, 1214.15it/s] 20%|█▉        | 366/1838 [00:00<00:01, 1207.23it/s] 26%|██▋       | 487/1838 [00:00<00:01, 1201.39it/s] 33%|███▎      | 608/1838 [00:00<00:01, 1197.34it/s] 40%|███▉      | 728/1838 [00:00<00:01, 1000.89it/s] 46%|████▌     | 848/1838 [00:00<00:00, 1056.14it/s] 53%|█████▎    | 968/1838 [00:00<00:00, 1097.27it/s] 59%|█████▉    | 1089/1838 [00:00<00:00, 1128.78it/s] 66%|██████▌   | 1205/1838 [00:01<00:00, 984.09it/s]  71%|███████   | 1309/1838 [00:01<00:00, 841.46it/s] 78%|███████▊  | 1428/1838 [00:01<00:00, 925.35it/s] 84%|████████▍ | 1548/1838 [00:01<00:00, 994.65it/s] 91%|█████████ | 1666/1838 [00:01<00:00, 1043.53it/s] 97%|█████████▋| 1786/1838 [00:01<00:00, 1084.99it/s]100%|██████████| 1838/1838 [00:01<00:00, 1059.34it/s]
+Running loglikelihood requests
+Running loglikelihood requests:   0%|          | 0/43844 [00:00<?, ?it/s]Traceback (most recent call last):
+  File "/data/lkk/quarot/auto-round/examples/test_autoround_rotation_mxfp4.py", line 304, in <module>
+    main()
+  File "/data/lkk/quarot/auto-round/examples/test_autoround_rotation_mxfp4.py", line 237, in main
+    results = evaluate_model(
+              ^^^^^^^^^^^^^^^
+  File "/data/lkk/quarot/auto-round/examples/test_autoround_rotation_mxfp4.py", line 51, in evaluate_model
+    results = simple_evaluate(
+              ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/utils.py", line 498, in _wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/evaluator.py", line 366, in simple_evaluate
+    results = evaluate(
+              ^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/utils.py", line 498, in _wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/evaluator.py", line 595, in evaluate
+    resps = getattr(lm, reqtype)(cloned_reqs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/api/model.py", line 452, in loglikelihood
+    return self._loglikelihood_tokens(new_reqs, disable_tqdm=disable_tqdm)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/models/huggingface.py", line 1304, in _loglikelihood_tokens
+    self._model_call(batched_inps, **call_kwargs),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/lm_eval/models/huggingface.py", line 971, in _model_call
+    return self.model(inps).logits
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/utils/generic.py", line 918, in wrapper
+    output = func(self, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/models/qwen3/modeling_qwen3.py", line 480, in forward
+    outputs: BaseModelOutputWithPast = self.model(
+                                       ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/utils/generic.py", line 1072, in wrapper
+    outputs = func(self, *args, **kwargs)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/models/qwen3/modeling_qwen3.py", line 410, in forward
+    hidden_states = decoder_layer(
+                    ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/modeling_layers.py", line 94, in __call__
+    return super().__call__(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/models/qwen3/modeling_qwen3.py", line 260, in forward
+    hidden_states, _ = self.self_attn(
+                       ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/models/qwen3/modeling_qwen3.py", line 200, in forward
+    query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/lkk/quarot/auto-round/auto_round/algorithms/transforms/spinquant/rotation_utils.py", line 308, in forward
+    return self.original_module(x)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/lkk/quarot/auto-round/auto_round/wrapper.py", line 607, in forward
+    return self.orig_layer.forward(x)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/linear.py", line 134, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: size mismatch, got input (1944), mat (1944x1024), vec (0)
+Running loglikelihood requests:   0%|          | 0/43844 [00:01<?, ?it/s]

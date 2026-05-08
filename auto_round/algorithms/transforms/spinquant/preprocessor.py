@@ -29,7 +29,6 @@ import torch.nn.functional as F
 
 from auto_round.algorithms.transforms.spinquant.cayley_optimizer import AdamAndSGDG
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
-    InputRotationWrapperHadamard,
     apply_hadamard_to_linear,
     create_block_diag_from_head_matrix,
     deterministic_hadamard_matrix,
@@ -55,9 +54,9 @@ from auto_round.algorithms.transforms.spinquant.inplace.apply import (
 logger = logging.getLogger("auto_round.spinquant")
 
 
-# NOTE: The old _make_online_r1_hook() function has been removed.
-# Online R1 now uses InputRotationWrapperHadamard (nn.Module) instead of
-# register_forward_pre_hook, enabling proper model save/load.
+# NOTE: Online R1 uses forward_pre_hook on target modules. Hooks are
+# compatible with auto-round's WrapperLinear (which runs orig_layer hooks)
+# and WrapperWALayer (which steals and runs them at inference).
 
 
 @dataclass
@@ -640,24 +639,24 @@ class SpinQuantPreprocessor:
     # Step 6a: Online R1 rotation (matching Quark's default behavior)
     # ------------------------------------------------------------------
     def _apply_online_r1(self) -> None:
-        """Apply online R1 rotation: rotate target module weights and wrap
-        them with ``InputRotationWrapperHadamard`` so the matching activation
-        rotation is applied at runtime.
+        """Apply online R1 rotation: rotate target module weights and register
+        ``forward_pre_hook`` s so the matching activation rotation is applied at
+        runtime.
 
         This matches Quark's ``apply_online_r1()`` behavior:
         - Target modules (q/k/v_proj, gate/up_proj) get ``W_new = matmul_hadU(W)``
           on their input channels (last dim of weight matrix)
-        - The module is replaced in the model tree with an
-          ``InputRotationWrapperHadamard`` that applies the same Hadamard to
-          activations at runtime
+        - A ``forward_pre_hook`` on each target module applies the same Hadamard
+          to activations at runtime
         - The two transforms cancel out: ``H(x) @ (W @ H).T = x @ W.T``
         - prev_modules (embed_tokens, o_proj, down_proj) are NOT modified
         - RMSNorm gamma is NOT fused
         - lm_head is NOT modified (last_layer skipped, matching Quark)
 
-        Unlike the old hook-based approach, the wrapper is a proper nn.Module
-        that is serialised by ``save_pretrained`` / ``state_dict``, enabling
-        model save/load with online R1 rotation.
+        Hooks are compatible with auto-round's quantization pipeline:
+        WrapperLinear.forward runs ``orig_layer._forward_pre_hooks`` before
+        the linear computation, and WrapperWALayer steals & runs them at
+        inference time.
         """
         r1_size = self.r1_rotation_size
 
@@ -667,7 +666,7 @@ class SpinQuantPreprocessor:
         hadamard_K = hadamard_K.to(model_device)
 
         n_rotated = 0
-        n_wrapped = 0
+        n_hooked = 0
 
         for layer in self._get_layers():
             if not (hasattr(layer, "self_attn") and hasattr(layer, "mlp")):
@@ -713,21 +712,46 @@ class SpinQuantPreprocessor:
                     )
                 n_rotated += 1
 
-                # Replace module with InputRotationWrapperHadamard
-                wrapper = InputRotationWrapperHadamard(
-                    original_module=module,
-                    rotation_size=r1_size,
-                    hadamard_K=had_K_local,
-                    K=K,
+                # Register forward_pre_hook for online activation rotation
+                hook = self._make_online_r1_hook(
+                    r1_size, in_features, had_K_local, K
                 )
-                setattr(parent, attr_name, wrapper)
-                n_wrapped += 1
+                module.register_forward_pre_hook(hook)
+                n_hooked += 1
 
         logger.info(
             f"[SpinQuant] Online R1: rotated {n_rotated} target modules, "
-            f"wrapped {n_wrapped} with InputRotationWrapperHadamard "
+            f"registered {n_hooked} activation hooks "
             f"(rotation_size={r1_size}, lm_head/embed_tokens/o_proj/down_proj unchanged)"
         )
+
+    @staticmethod
+    def _make_online_r1_hook(r1_size, in_features, hadamard_K, K):
+        """Create a forward_pre_hook that applies Hadamard rotation to input."""
+        if r1_size == in_features:
+            # Full rotation via butterfly
+            def hook(module, args):
+                x = args[0]
+                x = matmul_hadU(x, hadamard_K=hadamard_K.to(x.device), K=K)
+                return (x,) + args[1:]
+        else:
+            # Block rotation
+            R_block = hadamard_K.to(torch.float64)
+            if R_block.shape[0] != r1_size:
+                had_1, _ = get_hadamard_K(r1_size // K)
+                R_block = torch.kron(hadamard_K.to(torch.float64), had_1.to(torch.float64))
+            R_block_f32 = R_block.float()
+
+            def hook(module, args):
+                x = args[0]
+                dtype = x.dtype
+                shape = x.shape
+                R = R_block_f32.to(x.device, dtype=x.dtype)
+                x = x.reshape(*shape[:-1], -1, r1_size)
+                x = (x @ R).reshape(shape).to(dtype)
+                return (x,) + args[1:]
+
+        return hook
 
     # ------------------------------------------------------------------
     # Step 6b: Fuse offline rotations

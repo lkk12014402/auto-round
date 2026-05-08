@@ -178,6 +178,10 @@ __all__ = [
 # a proper nn.Module, it is serialised by ``save_pretrained`` / ``state_dict``
 # and automatically reconstructed on ``load_state_dict``.
 #
+# The wrapper takes ownership of the original Linear's weight and bias
+# parameters (they are NOT stored as a submodule).  This prevents auto-round's
+# quantization pipeline from discovering and double-wrapping the inner Linear.
+#
 # Matches Quark's ``InputRotationWrapperHadamard`` semantics.
 # ---------------------------------------------------------------------------
 
@@ -194,12 +198,15 @@ class InputRotationWrapperHadamard(nn.Module):
     The wrapper stores the Hadamard matrix as a buffer (``hadamard_K``), so it
     is saved alongside the model weights and automatically restored on load.
 
-    It also rewrites ``state_dict()`` keys to drop the ``.original_module.``
-    prefix, keeping weight names compatible with the original (un-wrapped)
-    model.  This follows the same convention as Quark.
+    Weight and bias are owned directly by this module (not via a submodule),
+    so ``state_dict()`` produces compatible key names (``q_proj.weight``, not
+    ``q_proj.original_module.weight``).  This also ensures that auto-round's
+    quantization pipeline treats this module as a leaf and doesn't try to wrap
+    the inner Linear separately.
 
     Args:
         original_module: The ``nn.Linear`` layer (with already-rotated weights).
+            Its weight and bias are *moved* into this wrapper.
         rotation_size: Size of the block rotation (= in_features for full rotation).
         hadamard_K: Pre-computed Hadamard matrix from ``get_hadamard_K()``.
             If None, computed automatically from ``rotation_size``.
@@ -221,19 +228,27 @@ class InputRotationWrapperHadamard(nn.Module):
                 f"got {type(original_module).__name__}"
             )
 
-        self.original_module = original_module
         self._rotation_size = rotation_size
+        self._in_features = original_module.in_features
+        self._out_features = original_module.out_features
 
-        in_features = original_module.in_features
+        # Take ownership of weight and bias from the original module.
+        # The original module is NOT stored as a submodule — this prevents
+        # auto-round from discovering it via named_modules() and wrapping it.
+        self.weight = original_module.weight      # nn.Parameter, auto-registered
+        if original_module.bias is not None:
+            self.bias = original_module.bias       # nn.Parameter
+        else:
+            self.register_parameter("bias", None)
 
-        if in_features == rotation_size:
+        if self._in_features == rotation_size:
             self._use_butterfly = True
-        elif in_features % rotation_size == 0:
+        elif self._in_features % rotation_size == 0:
             self._use_butterfly = False
         else:
             raise ValueError(
                 f"rotation_size={rotation_size} not compatible with "
-                f"in_features={in_features}"
+                f"in_features={self._in_features}"
             )
 
         # Compute / store Hadamard matrix
@@ -241,8 +256,7 @@ class InputRotationWrapperHadamard(nn.Module):
             hadamard_K, K = get_hadamard_K(rotation_size)
 
         self._K = K
-        device = original_module.weight.device
-        dtype = original_module.weight.dtype
+        device = self.weight.device
 
         # Store hadamard_K as buffer (serialised with model)
         self.register_buffer(
@@ -264,33 +278,17 @@ class InputRotationWrapperHadamard(nn.Module):
                 rot_mat.to(device=device, dtype=torch.float32),
             )
 
-    # --- Proxy properties to original_module ---
-
-    @property
-    def weight(self) -> torch.Tensor:
-        return self.original_module.weight
-
-    @weight.setter
-    def weight(self, value: torch.Tensor) -> None:
-        self.original_module.weight = value
-
-    @property
-    def bias(self) -> Optional[torch.Tensor]:
-        return self.original_module.bias
-
-    @bias.setter
-    def bias(self, value: Optional[torch.Tensor]) -> None:
-        self.original_module.bias = value
+    # --- Properties for compatibility with nn.Linear consumers ---
 
     @property
     def in_features(self) -> int:
-        return self.original_module.in_features
+        return self._in_features
 
     @property
     def out_features(self) -> int:
-        return self.original_module.out_features
+        return self._out_features
 
-    # --- Forward: rotate input, then call original ---
+    # --- Forward: rotate input, then F.linear ---
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._use_butterfly:
@@ -305,58 +303,14 @@ class InputRotationWrapperHadamard(nn.Module):
             R = self.rotation_matrix.to(x.device, dtype=x.dtype)
             x = x.reshape(*shape[:-1], -1, self._rotation_size)
             x = (x @ R).reshape(shape).to(dtype)
-        return self.original_module(x)
-
-    # --- state_dict: strip original_module. prefix ---
-
-    def state_dict(self, *args, destination=None, prefix='', keep_vars=False):
-        # Collect into a temporary dict using the base class implementation,
-        # then copy to destination with "original_module." stripped from keys.
-        from collections import OrderedDict
-        temp = OrderedDict()
-        nn.Module.state_dict(self, destination=temp, prefix=prefix, keep_vars=keep_vars)
-
-        if destination is None:
-            destination = OrderedDict()
-
-        om_token = "original_module."
-        for k, v in temp.items():
-            new_k = k.replace(om_token, "", 1) if om_token in k else k
-            destination[new_k] = v
-
-        return destination
-
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-    ):
-        # Remap keys: the saved state_dict has no "original_module." prefix,
-        # but the actual parameter lives under self.original_module.
-        # e.g. "layer.weight" → "layer.original_module.weight"
-        om_prefix = prefix + "original_module."
-        keys_to_remap = []
-        for k in list(state_dict.keys()):
-            if k.startswith(prefix) and not k.startswith(om_prefix):
-                suffix = k[len(prefix):]
-                # Skip buffers that belong to the wrapper itself (e.g. hadamard_K)
-                if suffix in ("hadamard_K", "rotation_matrix"):
-                    continue
-                # Everything else (weight, bias) belongs to original_module
-                new_key = om_prefix + suffix
-                keys_to_remap.append((k, new_key))
-
-        for old_key, new_key in keys_to_remap:
-            state_dict[new_key] = state_dict.pop(old_key)
-
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-        )
+        return nn.functional.linear(x, self.weight, self.bias)
 
     def __repr__(self) -> str:
         return (
             f"InputRotationWrapperHadamard(\n"
+            f"  in_features={self._in_features}, out_features={self._out_features},\n"
             f"  rotation_size={self._rotation_size}, "
             f"butterfly={self._use_butterfly}, K={self._K}\n"
-            f"  (original_module): {self.original_module}\n"
             f")"
         )
 
@@ -635,14 +589,12 @@ def apply_hadamard_to_linear(
             to input channels (columns).
     """
     # Support both nn.Linear and InputRotationWrapperHadamard
-    target = module
-    if isinstance(module, InputRotationWrapperHadamard):
-        target = module.original_module
-    assert isinstance(target, nn.Linear), f"module must be nn.Linear, got {type(target).__name__}"
-    in_features = target.in_features
-    out_features = target.out_features
+    assert isinstance(module, (nn.Linear, InputRotationWrapperHadamard)), \
+        f"module must be nn.Linear or InputRotationWrapperHadamard, got {type(module).__name__}"
+    in_features = module.in_features
+    out_features = module.out_features
 
-    W = target.weight.data
+    W = module.weight.data
     dtype = W.dtype
     device = W.device
     W = W.to(torch.float64)
@@ -683,18 +635,18 @@ def apply_hadamard_to_linear(
             W_reshaped = torch.einsum('ijk,lk->ijl', W_reshaped, H)
             W = W_reshaped.reshape(out_features, in_features)
 
-    target.weight.data = W.to(dtype)
+    module.weight.data = W.to(dtype)
 
     # Handle bias for output-side rotation
-    if output and target.bias is not None:
-        b = target.bias.data.to(torch.float64)
+    if output and module.bias is not None:
+        b = module.bias.data.to(torch.float64)
         if had_dim == -1:
             b = H @ b
         else:
             b_reshaped = b.view(n_chunks, had_dim)
             b_reshaped = torch.einsum('ij,kj->ki', H, b_reshaped)
             b = b_reshaped.view(-1)
-        target.bias.data = b.to(target.bias.dtype)
+        module.bias.data = b.to(module.bias.dtype)
 
 
 def get_model_arch_info(model: nn.Module) -> dict:

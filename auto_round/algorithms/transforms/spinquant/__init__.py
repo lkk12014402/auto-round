@@ -88,7 +88,7 @@ __all__ = [
     "apply_spinquant_in_place",
     "register_spinquant_hooks",
     "remove_spinquant_hooks",
-    # -- Input rotation wrapper (save/load support) --
+    # -- Input rotation wrapper (utility, used for rotation-only save/load) --
     "InputRotationWrapperHadamard",
     # -- Legacy helpers --
     "SpinQuantTrainingHook",

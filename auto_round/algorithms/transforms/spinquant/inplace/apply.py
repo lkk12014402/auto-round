@@ -22,7 +22,6 @@ import torch
 import torch.nn as nn
 
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
-    InputRotationWrapperHadamard,
     is_pow2,
     matmul_hadU,
 )
@@ -140,30 +139,44 @@ def register_spinquant_hooks(
             had_K, _ = get_hadamard_K(r4_size)
             had_K = had_K.to(device=compute_device, dtype=torch.float32)
 
+            # Build the hook function for R4
+            if is_pow2(r4_size):
+                # Full butterfly Hadamard
+                def _make_r4_hook(had_mat, k_val, rot_size):
+                    def hook(module, args):
+                        x = args[0]
+                        x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                        return (x,) + args[1:]
+                    return hook
+            else:
+                # Block Hadamard for non-power-of-2 sizes
+                R_block = had_K.to(torch.float64)
+                if R_block.shape[0] != r4_size:
+                    had_1, _ = get_hadamard_K(r4_size // K)
+                    R_block = torch.kron(had_K.to(torch.float64), had_1.to(torch.float64))
+                R_block_f32 = R_block.float().to(compute_device)
+
+                def _make_r4_hook(had_mat, k_val, rot_size):
+                    def hook(module, args):
+                        x = args[0]
+                        dtype = x.dtype
+                        shape = x.shape
+                        R = R_block_f32.to(x.device, dtype=x.dtype)
+                        x = x.reshape(*shape[:-1], -1, rot_size)
+                        x = (x @ R).reshape(shape).to(dtype)
+                        return (x,) + args[1:]
+                    return hook
+
             r4_count = 0
             for name, module in list(model.named_modules()):
                 if "down_proj" in name and isinstance(module, nn.Linear):
-                    # Find parent module and attribute name
-                    parts = name.rsplit(".", 1)
-                    if len(parts) == 2:
-                        parent_name, attr_name = parts
-                        parent = dict(model.named_modules())[parent_name]
-                    else:
-                        parent = model
-                        attr_name = name
-
-                    wrapper = InputRotationWrapperHadamard(
-                        original_module=module,
-                        rotation_size=r4_size,
-                        hadamard_K=had_K,
-                        K=K,
-                    )
-                    setattr(parent, attr_name, wrapper)
-                    handles.append(("r4_wrapper", name, parent, attr_name))
+                    hook = _make_r4_hook(had_K, K, r4_size)
+                    handle = module.register_forward_pre_hook(hook)
+                    handles.append(handle)
                     r4_count += 1
 
             logger.info(
-                f"[SpinQuant] R4: Applied InputRotationWrapperHadamard(rotation_size={r4_size}, K={K}) "
+                f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, K={K}) "
                 f"on {r4_count} down_proj layers"
                 + (f" (r4_rotation_size={r4_size})" if r4_size != intermediate_size else "")
             )
@@ -172,7 +185,7 @@ def register_spinquant_hooks(
 
 
 def remove_spinquant_hooks(handles: list[Any]) -> None:
-    """Safely remove all SpinQuant hook handles, R3 monkeypatches, and R4 wrappers."""
+    """Safely remove all SpinQuant hook handles and R3 monkeypatches."""
     for h in handles:
         try:
             if isinstance(h, tuple) and h[0] == "r3_monkeypatch":
@@ -191,13 +204,8 @@ def remove_spinquant_hooks(handles: list[Any]) -> None:
                 if hasattr(module, "_spinquant_original_forward"):
                     module.forward = module._spinquant_original_forward
                     delattr(module, "_spinquant_original_forward")
-            elif isinstance(h, tuple) and h[0] == "r4_wrapper":
-                # Unwrap InputRotationWrapperHadamard → original_module
-                _, name, parent, attr_name = h
-                wrapper = getattr(parent, attr_name, None)
-                if isinstance(wrapper, InputRotationWrapperHadamard):
-                    setattr(parent, attr_name, wrapper.original_module)
             else:
+                # Standard hook handle (R4 forward_pre_hook, etc.)
                 h.remove()
         except Exception:
             pass
