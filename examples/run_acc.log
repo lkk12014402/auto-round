@@ -1,0 +1,656 @@
+root@60ba961886be:/data/lkk/quarot/auto-round# bash examples/run_comparison_tests.sh --scenario 1
+
+
+
+
+======================================================================
+ Quark vs Auto-Round Comparison Tests
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Log dir:    examples/logs
+  Scenarios:  1
+  Timestamp:  20260508_040638
+  Dry-run:    false
+======================================================================
+
+╔══════════════════════════════════════════════════════════════════╗
+║  Scenario 1: MXFP4 + R1+R2, rotation_size=128                 ║
+╚══════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────
+│ [Scenario 1a] Quark: MXFP4 + R1+R2 (rotation_size=128)
+│ Log: examples/logs/20260508_040638_s1a_quark_mxfp4_r128.log
+│ CMD: python examples/test_quark_rotation_mxfp4.py --model Qwen/Qwen3-0.6B --device cuda:0 --tasks piqa,hellaswag --batch_size 8 --levels baseline_fp16,mxfp4_only,rotation_mxfp4 --rotation-size 128
+└──────────────────────────────────────────────────────────────────
+
+
+[QUARK-INFO]: C++ kernel compilation check start.
+
+[QUARK-INFO]: C++ kernel build directory: /root/.cache/torch_extensions/py312_cu128/kernel_ext. First-time compilation may take a few minutes... Building for architectures TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 9.0 10.0 12.0+PTX'.
+
+[QUARK-INFO]: C++ kernel compilation is already complete. Ending the C++ kernel compilation check. Total time: 0.4335 seconds
+`torch_dtype` is deprecated! Use `dtype` instead!
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+======================================================================
+Quark: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Device:     cuda:0
+  Levels:     ['baseline_fp16', 'mxfp4_only', 'rotation_mxfp4']
+  Quant:      MXFP4 (W4A4, weight static + activation dynamic)
+  Rotation:   R1+R2 (Hadamard, no training)
+  Rot. size:  128
+======================================================================
+Initializing tokenizer from Qwen/Qwen3-0.6B
+
+======================================================================
+  Evaluating: baseline_fp16
+======================================================================
+  Loading FP16 baseline model...
+  Setup completed in 2.4s
+  Running lm_eval...
+100%|██████████| 10042/10042 [00:04<00:00, 2130.90it/s]
+100%|██████████| 1838/1838 [00:01<00:00, 1122.67it/s]
+Running loglikelihood requests: 100%|██████████| 43844/43844 [01:42<00:00, 428.56it/s]
+
+
+
+
+
+[QUARK-WARNING]: quark.torch.config.config.Config is deprecated and will be removed in a future release. Please use quark.torch.config.config.QConfig instead.
+Repo card metadata block was not found. Setting CardData to empty.
+
+[QUARK-INFO]: Configuration checking start.
+
+[QUARK-INFO]: Configuration checking end. The configuration is effective. This is weight quantization and activation dynamic quantization.
+
+[QUARK-INFO]:
+
+============== QuantizeModel GPU Memory Profiling==============
+|        Total Allocated Memory:         |       1.12GB       |
+|         Total Reserved Memory:         |       1.13GB       |
+|           Total Free Memory:           |      42.91GB       |
+===============================================================
+
+
+
+[QUARK-INFO]: Quantizing with the quantization configuration:
+Config(
+    global_quant_config=QLayerConfig(
+        input_tensors=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=True,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        output_tensors=None,
+        weight=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=False,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        bias=None,
+        target_device=None,
+    ),
+    exclude=['lm_head'],
+    algo_config=None,
+    log_severity_level=1,
+    version="0.11.1+210bbb7",
+    layer_type_quant_config={},
+    layer_quant_config={},
+    kv_cache_quant_config={},
+    kv_cache_group=['*k_proj', '*v_proj'],
+    min_kv_scale=0.0,
+    kv_cache_post_rope=False,
+    softmax_quant_spec=None,
+    quant_mode=QuantizationMode.eager_mode,
+)
+
+[QUARK-INFO]: In-place OPs replacement start.
+
+[QUARK-INFO]: Module exclusion from quantization summary:
+|      Exclude pattern       | Number of modules excluded |
+|          lm_head           |             1              |
+
+    hellaswag: acc_norm = 0.4732
+    piqa: acc_norm = 0.6763
+  Evaluation done in 173.8s
+
+======================================================================
+  Evaluating: mxfp4_only
+======================================================================
+  Loading model and applying MXFP4 quantization (no rotation)...
+[INFO-Warning] For AWQ benchmark, batch_size should be 59. Changing batch_size to 59.
+100%|██████████| 427/427 [00:00<00:00, 12056.25it/s]
+
+[QUARK-INFO]: Module replacement for quantization summary:
+|            Original module             |  Number original   |  Number replaced   |
+|                 Conv2d                 |         0          |         0          |
+|                 Linear                 |        197         |        196         |
+|            ConvTranspose2d             |         0          |         0          |
+|               Embedding                |         1          |         0          |
+|              EmbeddingBag              |         0          |         0          |
+|            Qwen3ForCausalLM            |         1          |         0          |
+|               Qwen3Model               |         1          |         0          |
+|               ModuleList               |         1          |         0          |
+|           Qwen3DecoderLayer            |         28         |         0          |
+|             Qwen3Attention             |         28         |         0          |
+|              Qwen3RMSNorm              |        113         |         0          |
+|                Qwen3MLP                |         28         |         0          |
+|             SiLUActivation             |         28         |         0          |
+|          Qwen3RotaryEmbedding          |         1          |         0          |
+
+
+[QUARK-INFO]: In-place OPs replacement end.
+
+[QUARK-INFO]: Weight calibration start.
+Calibrating all params: 100%|██████████| 1211/1211 [00:00<00:00, 8429.58it/s]
+
+[QUARK-INFO]: Weight calibration end.
+
+[QUARK-INFO]: Model quantization has been completed.
+
+[QUARK-INFO]:
+
+====== QuantizeModel GPU Memory Profiling After Forward ======
+|        Current Total Allocated:        |       1.25GB       |
+|        Current Total Reserved:         |       1.26GB       |
+|            Peak Allocated:             |       1.25GB       |
+|             Peak Reserved:             |       1.26GB       |
+|       Total Allocated Increment:       |       0.13GB       |
+|       Total Reserved Increment:        |       0.13GB       |
+==============================================================
+
+
+
+[QUARK-INFO]: Freeze model start.
+
+[QUARK-INFO]: Freezing quantizers for quantized modules...
+Freezing quantized modules: 100%|██████████| 1211/1211 [00:02<00:00, 442.16it/s]
+
+[QUARK-INFO]: Freeze model end.
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+  Setup completed in 16.1s
+  Running lm_eval...
+100%|██████████| 10042/10042 [00:04<00:00, 2368.03it/s]
+100%|██████████| 1838/1838 [00:01<00:00, 1190.93it/s]
+Running loglikelihood requests: 100%|██████████| 43844/43844 [02:12<00:00, 331.15it/s]
+
+[QUARK-WARNING]: quark.torch.config.config.Config is deprecated and will be removed in a future release. Please use quark.torch.config.config.QConfig instead.
+Repo card metadata block was not found. Setting CardData to empty.
+
+[QUARK-INFO]: Configuration checking start.
+
+[QUARK-INFO]: Configuration checking end. The configuration is effective. This is weight quantization and activation dynamic quantization.
+
+[QUARK-INFO]:
+
+============== QuantizeModel GPU Memory Profiling==============
+|        Total Allocated Memory:         |       1.12GB       |
+|         Total Reserved Memory:         |       1.13GB       |
+|           Total Free Memory:           |      42.91GB       |
+===============================================================
+
+
+
+[QUARK-INFO]: Quantizing with the quantization configuration:
+Config(
+    global_quant_config=QLayerConfig(
+        input_tensors=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=True,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        output_tensors=None,
+        weight=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=False,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        bias=None,
+        target_device=None,
+    ),
+    exclude=['lm_head'],
+    algo_config=[
+        RotationConfig(
+            scaling_layers={'first_layer': [{'prev_modules': ['model.embed_tokens'], 'norm_module': 'model.layers.layer_id.input_layernorm', 'next_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj'], 'target_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj']}, {'prev_modules': ['model.layers.layer_id.self_attn.o_proj'], 'norm_module': 'model.layers.layer_id.post_attention_layernorm', 'next_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj'], 'target_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj']}], 'middle_layers': [{'prev_modules': ['model.layers.pre_layer_id.mlp.down_proj'], 'norm_module': 'model.layers.layer_id.input_layernorm', 'next_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj'], 'target_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj']}, {'prev_modules': ['model.layers.layer_id.self_attn.o_proj'], 'norm_module': 'model.layers.layer_id.post_attention_layernorm', 'next_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj'], 'target_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj']}], 'last_layer': [{'prev_modules': ['model.layers.layer_id.mlp.down_proj'], 'norm_module': 'model.norm', 'next_modules': ['lm_head'], 'target_modules': ['lm_head']}]},
+            name="rotation",
+            r1=True,
+            r2=True,
+            r3=False,
+            r4=False,
+            rotation_size=128,
+            random=None,
+            random_r1=False,
+            random_r2=False,
+            backbone="model",
+            model_decoder_layers="model.layers",
+            v_proj="self_attn.v_proj",
+            o_proj="self_attn.o_proj",
+            self_attn="self_attn",
+            mlp="mlp",
+            online_r1_rotation=True,
+            online_config=OnlineRotationConfig(
+                shared_parallel=False,
+                online_rotation_layers=None,
+            ),
+            trainable=False,
+            train_smooth=None,
+            smooth_positions=None,
+        ),
+    ],
+    log_severity_level=1,
+    version="0.11.1+210bbb7",
+    layer_type_quant_config={},
+    layer_quant_config={},
+    kv_cache_quant_config={},
+    kv_cache_group=['*k_proj', '*v_proj'],
+    min_kv_scale=0.0,
+    kv_cache_post_rope=False,
+    softmax_quant_spec=None,
+    quant_mode=QuantizationMode.eager_mode,
+)
+
+[QUARK-INFO]: In-place OPs replacement start.
+
+[QUARK-INFO]: Module exclusion from quantization summary:
+|      Exclude pattern       | Number of modules excluded |
+|          lm_head           |             1              |
+
+    hellaswag: acc_norm = 0.4059
+    piqa: acc_norm = 0.6170
+  Evaluation done in 188.6s
+
+======================================================================
+  Evaluating: rotation_mxfp4
+======================================================================
+  Loading model and applying rotation (R1+R2) + MXFP4...
+[INFO-Warning] For AWQ benchmark, batch_size should be 59. Changing batch_size to 59.
+100%|██████████| 427/427 [00:00<00:00, 10156.74it/s]
+
+[QUARK-INFO]: Module replacement for quantization summary:
+|            Original module             |  Number original   |  Number replaced   |
+|                 Conv2d                 |         0          |         0          |
+|                 Linear                 |        197         |        196         |
+|            ConvTranspose2d             |         0          |         0          |
+|               Embedding                |         1          |         0          |
+|              EmbeddingBag              |         0          |         0          |
+|            Qwen3ForCausalLM            |         1          |         0          |
+|               Qwen3Model               |         1          |         0          |
+|               ModuleList               |         1          |         0          |
+|           Qwen3DecoderLayer            |         28         |         0          |
+|             Qwen3Attention             |         28         |         0          |
+|              Qwen3RMSNorm              |        113         |         0          |
+|                Qwen3MLP                |         28         |         0          |
+|             SiLUActivation             |         28         |         0          |
+|          Qwen3RotaryEmbedding          |         1          |         0          |
+
+
+[QUARK-INFO]: In-place OPs replacement end.
+
+[QUARK-INFO]: Advanced algorithm start.
+
+[QUARK-INFO]: Applying rotation processing/algorithm...
+R1 Rotation: 100%|██████████| 56/56 [00:00<00:00, 376.15it/s]
+R2 Rotation: 100%|██████████| 28/28 [00:00<00:00, 7232.89it/s]
+
+[QUARK-INFO]: Advanced algorithm end.
+
+[QUARK-INFO]: Weight calibration start.
+Calibrating all params: 100%|██████████| 1491/1491 [00:00<00:00, 14613.62it/s]
+
+[QUARK-INFO]: Weight calibration end.
+
+[QUARK-INFO]: Model quantization has been completed.
+
+[QUARK-INFO]:
+
+====== QuantizeModel GPU Memory Profiling After Forward ======
+|        Current Total Allocated:        |       1.54GB       |
+|        Current Total Reserved:         |       1.85GB       |
+|            Peak Allocated:             |       1.70GB       |
+|             Peak Reserved:             |       1.85GB       |
+|       Total Allocated Increment:       |       0.58GB       |
+|       Total Reserved Increment:        |       0.72GB       |
+==============================================================
+
+
+
+[QUARK-INFO]: Freeze model start.
+
+[QUARK-INFO]: Freezing quantizers for quantized modules...
+Freezing quantized modules: 100%|██████████| 1491/1491 [00:00<00:00, 40524.28it/s]
+
+[QUARK-INFO]: Freeze model end.
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+  Setup completed in 12.8s
+  Running lm_eval...
+100%|██████████| 10042/10042 [00:04<00:00, 2148.39it/s]
+100%|██████████| 1838/1838 [00:01<00:00, 1199.56it/s]
+Running loglikelihood requests: 100%|██████████| 43844/43844 [04:40<00:00, 156.17it/s]
+    hellaswag: acc_norm = 0.4046
+    piqa: acc_norm = 0.6115
+  Evaluation done in 335.5s
+
+==========================================================================================
+COMPARISON TABLE — Quark Rotation + MXFP4
+==========================================================================================
+Task            | baseline_fp16   | mxfp4_only      | rotation_mxfp4
+---------------------------------------------------------------------
+hellaswag       | 0.4732          | 0.4059          | 0.4046
+piqa            | 0.6763          | 0.6170          | 0.6115
+
+Δ vs baseline_fp16:
+  hellaswag:   mxfp4_only: -0.0673,   rotation_mxfp4: -0.0686
+  piqa:   mxfp4_only: -0.0593,   rotation_mxfp4: -0.0647
+==========================================================================================
+
+  ✓ Done. Log saved to examples/logs/20260508_040638_s1a_quark_mxfp4_r128.log
+
+┌──────────────────────────────────────────────────────────────────
+│ [Scenario 1b] Auto-Round: MXFP4 + R1+R2 (rotation_size=128)
+│ Log: examples/logs/20260508_040638_s1b_autoround_mxfp4_r128.log
+│ CMD: python examples/test_autoround_rotation_mxfp4.py --model Qwen/Qwen3-0.6B --device cuda:0 --tasks piqa,hellaswag --batch_size 8 --levels baseline_fp16,mxfp4_only,rotation_mxfp4 --rotation-size 128
+└──────────────────────────────────────────────────────────────────
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+Using pre-initialized model
+Selected tasks:
+Task: hellaswag (hellaswag/hellaswag.yaml)
+Task: piqa (piqa/piqa.yaml)
+Building contexts for hellaswag on rank 0...
+======================================================================
+Auto-Round: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Device:     cuda:0
+  Levels:     ['baseline_fp16', 'mxfp4_only', 'rotation_mxfp4']
+  Quant:      MXFP4 (RTN, iters=0)
+  Rotation:   R1+R2 (QuaRot mode, deterministic Hadamard)
+  Rot. size:  128
+======================================================================
+
+======================================================================
+  Evaluating: baseline_fp16
+======================================================================
+  Loading FP16 baseline model...
+  Setup completed in 2.1s
+  Running lm_eval...
+100%|██████████| 10042/10042 [00:04<00:00, 2332.38it/s]
+Building contexts for piqa on rank 0...
+100%|██████████| 1838/1838 [00:01<00:00, 1235.66it/s]
+Running loglikelihood requests
+Running loglikelihood requests: 100%|██████████| 43844/43844 [01:34<00:00, 461.86it/s]
+2026-05-08 04:22:25 INFO config.py L50: `enable_opt_rtn` is turned on, set `--disable_opt_rtn` for higher speed at the cost of accuracy.
+2026-05-08 04:22:26 INFO entry.py L491: Using LLM mode (new architecture).
+2026-05-08 04:22:27 WARNING base.py L193: unrecognized keys ['enable_alg_ext', 'QuantizationConfig', 'dataset', 'iters', 'processor', 'image_processor', 'template', 'extra_data_dir', 'guidance_scale', 'num_inference_steps', 'generator_seed'] were passed. Please check them. If you use old api, just ignore this warning.
+2026-05-08 04:22:27 INFO base.py L48: ModelContext context initialized.
+2026-05-08 04:22:33 INFO model.py L122: using torch.bfloat16 for quantization tuning
+2026-05-08 04:22:33 INFO base.py L48: CompressContext context initialized.
+2026-05-08 04:22:33 WARNING device.py L963: cuda in `device_map` dose not match any modules, please have a check
+2026-05-08 04:22:33 INFO zero_shot.py L136: RTN mode detected (iters=0): force blockwise quantization to avoid layer-wise full-model materialization.
+    hellaswag: acc_norm = 0.4732
+    piqa: acc_norm = 0.6763
+  Evaluation done in 163.9s
+
+======================================================================
+  Evaluating: mxfp4_only
+======================================================================
+  Quantizing with MXFP4 (no rotation)...
+404 Client Error. (Request ID: Root=1-69fd634c-5fa03b4b73fbae4327219243;cc850f6e-6b51-4a30-8712-d3426cf67f24)
+
+Entry Not Found for url: https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/model_index.json.
+404 Client Error. (Request ID: Root=1-69fd634d-670e971311f643c97c96d61e;217f7679-3749-4ca5-bbc8-cae1e343c92c)
+
+Entry Not Found for url: https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/model_index.json.
+404 Client Error. (Request ID: Root=1-69fd634e-1ea85e2327aa8ff445df9291;305e31d2-9c5d-4ad1-bcdd-9dea8445b5e0)
+
+Entry Not Found for url: https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/model_index.json.
+Quantizing model.layers.0:   0%|          | 0/28 [00:00<?, ?it/s]2026-05-08 04:22:33 INFO offload.py L703: OffloadManager (compressor): tempdir = /data/lkk/quarot/auto-round/ar_work_space/offload/compressor_r5d1xl6_
+2026-05-08 04:22:35 INFO device.py L1802: 'peak_ram': 2.07GB, 'peak_vram': 0.19GB
+Quantizing model.layers.1:   4%|▎         | 1/28 [00:01<00:38,  1.44s/it]2026-05-08 04:22:35 INFO device.py L1802: 'peak_ram': 2.11GB, 'peak_vram': 0.19GB
+Quantizing model.layers.2:   7%|▋         | 2/28 [00:02<00:24,  1.08it/s]2026-05-08 04:22:36 INFO device.py L1802: 'peak_ram': 2.14GB, 'peak_vram': 0.19GB
+Quantizing model.layers.3:  11%|█         | 3/28 [00:02<00:18,  1.34it/s]2026-05-08 04:22:37 INFO device.py L1802: 'peak_ram': 2.17GB, 'peak_vram': 0.19GB
+Quantizing model.layers.4:  14%|█▍        | 4/28 [00:03<00:24,  1.01s/it]2026-05-08 04:22:38 INFO device.py L1802: 'peak_ram': 2.2GB, 'peak_vram': 0.19GB
+Quantizing model.layers.5:  18%|█▊        | 5/28 [00:04<00:19,  1.18it/s]2026-05-08 04:22:38 INFO device.py L1802: 'peak_ram': 2.23GB, 'peak_vram': 0.19GB
+Quantizing model.layers.6:  21%|██▏       | 6/28 [00:05<00:16,  1.35it/s]2026-05-08 04:22:40 INFO device.py L1802: 'peak_ram': 2.26GB, 'peak_vram': 0.19GB
+Quantizing model.layers.7:  25%|██▌       | 7/28 [00:06<00:20,  1.03it/s]2026-05-08 04:22:40 INFO device.py L1802: 'peak_ram': 2.29GB, 'peak_vram': 0.19GB
+Quantizing model.layers.8:  29%|██▊       | 8/28 [00:07<00:16,  1.19it/s]2026-05-08 04:22:41 INFO device.py L1802: 'peak_ram': 2.32GB, 'peak_vram': 0.19GB
+Quantizing model.layers.9:  32%|███▏      | 9/28 [00:07<00:14,  1.34it/s]2026-05-08 04:22:42 INFO device.py L1802: 'peak_ram': 2.34GB, 'peak_vram': 0.19GB
+Quantizing model.layers.10:  36%|███▌      | 10/28 [00:09<00:17,  1.05it/s]2026-05-08 04:22:43 INFO device.py L1802: 'peak_ram': 2.37GB, 'peak_vram': 0.19GB
+Quantizing model.layers.11:  39%|███▉      | 11/28 [00:09<00:14,  1.21it/s]2026-05-08 04:22:43 INFO device.py L1802: 'peak_ram': 2.4GB, 'peak_vram': 0.19GB
+Quantizing model.layers.12:  43%|████▎     | 12/28 [00:10<00:11,  1.36it/s]2026-05-08 04:22:45 INFO device.py L1802: 'peak_ram': 2.43GB, 'peak_vram': 0.19GB
+Quantizing model.layers.13:  46%|████▋     | 13/28 [00:11<00:14,  1.04it/s]2026-05-08 04:22:46 INFO device.py L1802: 'peak_ram': 2.46GB, 'peak_vram': 0.19GB
+Quantizing model.layers.14:  50%|█████     | 14/28 [00:12<00:11,  1.19it/s]2026-05-08 04:22:46 INFO device.py L1802: 'peak_ram': 2.5GB, 'peak_vram': 0.19GB
+Quantizing model.layers.15:  54%|█████▎    | 15/28 [00:12<00:09,  1.34it/s]2026-05-08 04:22:47 INFO device.py L1802: 'peak_ram': 2.53GB, 'peak_vram': 0.19GB
+Quantizing model.layers.16:  57%|█████▋    | 16/28 [00:14<00:11,  1.05it/s]2026-05-08 04:22:48 INFO device.py L1802: 'peak_ram': 2.55GB, 'peak_vram': 0.19GB
+Quantizing model.layers.17:  61%|██████    | 17/28 [00:14<00:09,  1.21it/s]2026-05-08 04:22:49 INFO device.py L1802: 'peak_ram': 2.58GB, 'peak_vram': 0.19GB
+Quantizing model.layers.18:  64%|██████▍   | 18/28 [00:15<00:07,  1.33it/s]2026-05-08 04:22:50 INFO device.py L1802: 'peak_ram': 2.61GB, 'peak_vram': 0.19GB
+Quantizing model.layers.19:  68%|██████▊   | 19/28 [00:16<00:08,  1.06it/s]2026-05-08 04:22:51 INFO device.py L1802: 'peak_ram': 2.64GB, 'peak_vram': 0.19GB
+Quantizing model.layers.20:  71%|███████▏  | 20/28 [00:17<00:06,  1.20it/s]2026-05-08 04:22:51 INFO device.py L1802: 'peak_ram': 2.67GB, 'peak_vram': 0.19GB
+Quantizing model.layers.21:  75%|███████▌  | 21/28 [00:17<00:05,  1.35it/s]2026-05-08 04:22:53 INFO device.py L1802: 'peak_ram': 2.7GB, 'peak_vram': 0.19GB
+Quantizing model.layers.22:  79%|███████▊  | 22/28 [00:19<00:05,  1.05it/s]2026-05-08 04:22:53 INFO device.py L1802: 'peak_ram': 2.73GB, 'peak_vram': 0.19GB
+Quantizing model.layers.23:  82%|████████▏ | 23/28 [00:19<00:04,  1.20it/s]2026-05-08 04:22:54 INFO device.py L1802: 'peak_ram': 2.76GB, 'peak_vram': 0.19GB
+Quantizing model.layers.24:  86%|████████▌ | 24/28 [00:20<00:02,  1.33it/s]2026-05-08 04:22:55 INFO device.py L1802: 'peak_ram': 2.79GB, 'peak_vram': 0.19GB
+Quantizing model.layers.25:  89%|████████▉ | 25/28 [00:21<00:02,  1.05it/s]2026-05-08 04:22:56 INFO device.py L1802: 'peak_ram': 2.83GB, 'peak_vram': 0.19GB
+Quantizing model.layers.26:  93%|█████████▎| 26/28 [00:22<00:01,  1.19it/s]2026-05-08 04:22:56 INFO device.py L1802: 'peak_ram': 2.86GB, 'peak_vram': 0.19GB
+Quantizing model.layers.27:  96%|█████████▋| 27/28 [00:22<00:00,  1.34it/s]2026-05-08 04:22:58 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 0.19GB
+Quantizing model.layers.27: 100%|██████████| 28/28 [00:25<00:00,  1.12it/s]
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+Using pre-initialized model
+Selected tasks:
+Task: hellaswag (hellaswag/hellaswag.yaml)
+Task: piqa (piqa/piqa.yaml)
+Building contexts for hellaswag on rank 0...
+  Setup completed in 33.8s
+  Running lm_eval...
+100%|██████████| 10042/10042 [00:04<00:00, 2385.43it/s]
+Building contexts for piqa on rank 0...
+100%|██████████| 1838/1838 [00:01<00:00, 1217.91it/s]
+Running loglikelihood requests
+Running loglikelihood requests: 100%|██████████| 43844/43844 [09:22<00:00, 77.97it/s]
+[SpinQuant] Starting preprocessing...
+[SpinQuant] Model architecture info: hidden_size=1024, head_dim=128, num_q_heads=16, num_kv_heads=8, intermediate_size=3072
+[SpinQuant] Custom rotation_size=128 → R1 size=128, R4 size=128 (R2/R3 always use head_dim=128)
+[SpinQuant] Rotation config: R1=True, R2=True, R3=False, R4=False, trainable_rotation=False, trainable_smooth=False
+[SpinQuant] Untied input/output embeddings
+[SpinQuant] Fusing RMSNorm parameters into linear weights...
+[SpinQuant] Initialising rotation matrices...
+[SpinQuant] R1: Random Hadamard [128×128] block rotation (8 blocks, fixed, offline fuse)
+[SpinQuant] R2: Random Hadamard [128×128] per head (fixed, offline fuse)
+[SpinQuant] Fusing offline rotations into weights...
+[SpinQuant] R1 fused into 28 layers (embed_tokens, q/k/v/o_proj, gate/up/down_proj, lm_head)
+[SpinQuant] R2 fused into 28 layers (v_proj out + o_proj in, head_dim=128)
+
+====================================================================================================
+SpinQuant Transformation Summary
+====================================================================================================
+
+Global Transforms:
+  Component                      Transform                                          Status
+  ------------------------------ -------------------------------------------------- ----------
+  embed_tokens / lm_head         Untie word embeddings                              ✓ untied
+  All RMSNorm layers             Fuse gamma into linear weights                     ✓ fused
+  Residual stream (R1)           Block Hadamard 128×128, 8 blocks (offline fused)   ✓
+
+Per-Layer Transforms:
+  Layer                               R1 (weight fuse)     R2 (weight fuse)     R3 (online hook)       R4 (online hook)
+  ----------------------------------- -------------------- -------------------- ---------------------- ----------------------
+  model.embed_tokens                  W@R (128)            -                    -                      -
+  layers.0.self_attn                  q/k/v:R⁻¹@W o:W@R    H(128) v↔o           -                      -
+  layers.0.mlp                        g/u:R⁻¹@W d:W@R      -                    -                      -
+  layers.1.self_attn                  q/k/v:R⁻¹@W o:W@R    H(128) v↔o           -                      -
+  layers.1.mlp                        g/u:R⁻¹@W d:W@R      -                    -                      -
+    ... (same pattern for all layers)
+  layers.27.self_attn                 q/k/v:R⁻¹@W o:W@R    H(128) v↔o           -                      -
+  layers.27.mlp                       g/u:R⁻¹@W d:W@R      -                    -                      -
+  model.lm_head                       R⁻¹@W (128)          -                    -                      -
+
+Registered Hooks:
+  R3 monkeypatch (apply_rotary_pos_emb → QKRotationWrapper):  0 attention layers
+  R4 forward_pre_hook (block Hadamard on down_proj input):    0 MLP layers
+
+Totals:
+  Transformer layers:   28
+  Offline-fused params: embed_tokens, 28×(q/k/v/o_proj, gate/up/down_proj), lm_head + 28×(v_proj↔o_proj)
+  Online hooks:         0 total (0 R3 + 0 R4)
+  Inference overhead:   R3=none
+                        R4=none
+====================================================================================================
+[SpinQuant] Preprocessing complete!
+2026-05-08 04:33:25 INFO config.py L50: `enable_opt_rtn` is turned on, set `--disable_opt_rtn` for higher speed at the cost of accuracy.
+2026-05-08 04:33:25 INFO entry.py L491: Using LLM mode (new architecture).
+2026-05-08 04:33:25 WARNING base.py L193: unrecognized keys ['enable_alg_ext', 'QuantizationConfig', 'dataset', 'iters', 'processor', 'image_processor', 'template', 'extra_data_dir', 'guidance_scale', 'num_inference_steps', 'generator_seed'] were passed. Please check them. If you use old api, just ignore this warning.
+2026-05-08 04:33:25 INFO base.py L48: ModelContext context initialized.
+2026-05-08 04:33:25 INFO model.py L122: using torch.float16 for quantization tuning
+2026-05-08 04:33:26 INFO base.py L48: CompressContext context initialized.
+2026-05-08 04:33:26 WARNING base.py L657: force to use bf16 for quantization tuning when enabling activation quantization
+2026-05-08 04:33:26 WARNING device.py L963: cuda in `device_map` dose not match any modules, please have a check
+2026-05-08 04:33:26 INFO zero_shot.py L136: RTN mode detected (iters=0): force blockwise quantization to avoid layer-wise full-model materialization.
+    hellaswag: acc_norm = 0.4054
+    piqa: acc_norm = 0.6104
+  Evaluation done in 617.3s
+
+======================================================================
+  Evaluating: rotation_mxfp4
+======================================================================
+  Step 1: Loading model and applying rotation (R1+R2)...
+  Step 2: Quantizing rotated model with MXFP4...
+Quantizing model.layers.0:   0%|          | 0/28 [00:00<?, ?it/s]2026-05-08 04:33:26 INFO offload.py L703: OffloadManager (compressor): tempdir = /data/lkk/quarot/auto-round/ar_work_space/offload/compressor_l08hce4q
+2026-05-08 04:33:27 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.1:   4%|▎         | 1/28 [00:00<00:15,  1.74it/s]2026-05-08 04:33:28 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.2:   7%|▋         | 2/28 [00:01<00:14,  1.84it/s]2026-05-08 04:33:29 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.3:  11%|█         | 3/28 [00:02<00:23,  1.08it/s]2026-05-08 04:33:29 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.4:  14%|█▍        | 4/28 [00:02<00:18,  1.31it/s]2026-05-08 04:33:30 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.5:  18%|█▊        | 5/28 [00:03<00:15,  1.48it/s]2026-05-08 04:33:31 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.6:  21%|██▏       | 6/28 [00:05<00:21,  1.04it/s]2026-05-08 04:33:32 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.7:  25%|██▌       | 7/28 [00:05<00:17,  1.22it/s]2026-05-08 04:33:33 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.8:  29%|██▊       | 8/28 [00:06<00:14,  1.38it/s]2026-05-08 04:33:34 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.9:  32%|███▏      | 9/28 [00:07<00:18,  1.05it/s]2026-05-08 04:33:35 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.10:  36%|███▌      | 10/28 [00:08<00:14,  1.22it/s]2026-05-08 04:33:35 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.11:  39%|███▉      | 11/28 [00:08<00:12,  1.37it/s]2026-05-08 04:33:37 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.12:  43%|████▎     | 12/28 [00:10<00:15,  1.05it/s]2026-05-08 04:33:37 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.13:  46%|████▋     | 13/28 [00:10<00:12,  1.21it/s]2026-05-08 04:33:38 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.14:  50%|█████     | 14/28 [00:11<00:10,  1.36it/s]2026-05-08 04:33:39 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.15:  54%|█████▎    | 15/28 [00:12<00:12,  1.04it/s]2026-05-08 04:33:40 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.16:  57%|█████▋    | 16/28 [00:13<00:09,  1.21it/s]2026-05-08 04:33:40 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.17:  61%|██████    | 17/28 [00:13<00:08,  1.35it/s]2026-05-08 04:33:42 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.18:  64%|██████▍   | 18/28 [00:15<00:09,  1.05it/s]2026-05-08 04:33:42 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.19:  68%|██████▊   | 19/28 [00:15<00:07,  1.20it/s]2026-05-08 04:33:43 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.20:  71%|███████▏  | 20/28 [00:16<00:05,  1.35it/s]2026-05-08 04:33:44 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.21:  75%|███████▌  | 21/28 [00:17<00:06,  1.05it/s]2026-05-08 04:33:45 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.22:  79%|███████▊  | 22/28 [00:18<00:04,  1.21it/s]2026-05-08 04:33:45 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.23:  82%|████████▏ | 23/28 [00:18<00:03,  1.36it/s]2026-05-08 04:33:47 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.24:  86%|████████▌ | 24/28 [00:20<00:03,  1.05it/s]2026-05-08 04:33:47 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.25:  89%|████████▉ | 25/28 [00:20<00:02,  1.20it/s]2026-05-08 04:33:48 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.26:  93%|█████████▎| 26/28 [00:21<00:01,  1.34it/s]2026-05-08 04:33:49 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.27:  96%|█████████▋| 27/28 [00:22<00:00,  1.06it/s]2026-05-08 04:33:50 INFO device.py L1802: 'peak_ram': 2.89GB, 'peak_vram': 7.54GB
+Quantizing model.layers.27: 100%|██████████| 28/28 [00:24<00:00,  1.16it/s]
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+Using pre-initialized model
+Selected tasks:
+Task: hellaswag (hellaswag/hellaswag.yaml)
+Task: piqa (piqa/piqa.yaml)
+Building contexts for hellaswag on rank 0...
+  Setup completed in 35.2s
+  Running lm_eval...
+100%|██████████| 10042/10042 [00:04<00:00, 2409.22it/s]
+Building contexts for piqa on rank 0...
+100%|██████████| 1838/1838 [00:01<00:00, 1223.20it/s]
+Running loglikelihood requests
+Running loglikelihood requests:  21%|██        | 9062/43844 [01:57<06:38, 87.38it/s]
+
+Running loglikelihood requests:  21%|██        | 9079/43844 [01:57<08:15, 70.22it/s]
+Running loglikelihood requests:  21%|██        | 9087/43844 [01:57<08:00, 72.37it/s]
+Running loglikelihood requests:  91%|█████████ | 39683/43844 [08:27<00:53, 78.35it/s]
+Running loglikelihood requests: 100%|██████████| 43844/43844 [09:20<00:00, 78.23it/s]
+    hellaswag: acc_norm = 0.3307
+    piqa: acc_norm = 0.5354
+  Evaluation done in 628.8s
+
+==========================================================================================
+COMPARISON TABLE — Auto-Round Rotation + MXFP4
+==========================================================================================
+Task            | baseline_fp16   | mxfp4_only      | rotation_mxfp4
+---------------------------------------------------------------------
+hellaswag       | 0.4732          | 0.4054          | 0.3307
+piqa            | 0.6763          | 0.6104          | 0.5354
+
+Δ vs baseline_fp16:
+  hellaswag:   mxfp4_only: -0.0678,   rotation_mxfp4: -0.1425
+  piqa:   mxfp4_only: -0.0658,   rotation_mxfp4: -0.1409
+==========================================================================================
+
+  ✓ Done. Log saved to examples/logs/20260508_040638_s1b_autoround_mxfp4_r128.log
+
+======================================================================
+ All requested scenarios completed!
+ Logs saved to: examples/logs/20260508_040638_*.log
+
+ To compare results, search for 'COMPARISON TABLE' in each log:
+   grep -A 20 'COMPARISON TABLE' examples/logs/20260508_040638_*.log
+======================================================================

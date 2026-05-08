@@ -70,15 +70,15 @@ def extract_metrics(results):
     return metrics
 
 
-def apply_rotation(model, r1=True, r2=True, r3=True, r4=True, rotation_size=None):
+def apply_rotation(model, r1=True, r2=True, r3=True, r4=True, rotation_size=None,
+                   online_r1=True):
     """Apply SpinQuant/QuaRot rotation to a model (in-place)."""
     config = SpinQuantConfig(
         r1=r1, r2=r2, r3=r3, r4=r4,
         rotation_size=rotation_size,
+        online_r1_rotation=online_r1,
         trainable_rotation=False,
         trainable_smooth=False,
-        fuse_rmsnorm=True,
-        untie_embeddings=True,
     )
     preprocessor = SpinQuantPreprocessor(model, config)
     preprocessor.preprocess(dataloader=None)
@@ -145,6 +145,10 @@ def main():
     parser.add_argument("--enable-r4", action="store_true", dest="r4")
     parser.add_argument("--rotation-size", type=int, default=None,
                         help="Custom rotation size (must be power of 2). Affects R1 and R4.")
+    parser.add_argument("--online-r1", action="store_true", default=True,
+                        help="Use online R1 rotation (default, matches Quark)")
+    parser.add_argument("--offline-r1", action="store_false", dest="online_r1",
+                        help="Use offline R1 rotation (fuse into all weights)")
     args = parser.parse_args()
 
     levels_to_test = [l.strip() for l in args.levels.split(",")]
@@ -163,7 +167,7 @@ def main():
     print(f"  Device:     {args.device}")
     print(f"  Levels:     {levels_to_test}")
     print(f"  Quant:      MXFP4 (RTN, iters=0)")
-    print(f"  Rotation:   {rotation_desc} (QuaRot mode, deterministic Hadamard)")
+    print(f"  Rotation:   {rotation_desc} ({'online' if args.online_r1 else 'offline'} R1, QuaRot mode)")
     if args.rotation_size:
         print(f"  Rot. size:  {args.rotation_size}")
     print("=" * 70)
@@ -193,7 +197,8 @@ def main():
                 args.model, dtype=torch.float16, trust_remote_code=True
             ).to(args.device)
             model.eval()
-            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4, rotation_size=args.rotation_size)
+            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4,
+                          rotation_size=args.rotation_size, online_r1=args.online_r1)
             print(f"  Rotation applied ({rotation_desc})")
 
         elif level == "mxfp4_only":
@@ -211,7 +216,8 @@ def main():
                 args.model, dtype=torch.float16, trust_remote_code=True
             ).to(args.device)
             model.eval()
-            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4, rotation_size=args.rotation_size)
+            apply_rotation(model, r1=args.r1, r2=args.r2, r3=args.r3, r4=args.r4,
+                          rotation_size=args.rotation_size, online_r1=args.online_r1)
             print("  Step 2: Quantizing rotated model with MXFP4...")
             model, _ = quantize_mxfp4(
                 model, tokenizer=tokenizer, device=args.device,

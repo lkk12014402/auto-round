@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -32,8 +33,10 @@ from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     create_block_diag_from_head_matrix,
     deterministic_hadamard_matrix,
     fuse_rmsnorm_in_model,
+    get_hadamard_K,
     get_model_arch_info,
     is_pow2,
+    matmul_hadU,
     random_hadamard_matrix,
     rotate_in_channels_,
     rotate_out_channels_,
@@ -49,6 +52,49 @@ from auto_round.algorithms.transforms.spinquant.inplace.apply import (
 )
 
 logger = logging.getLogger("auto_round.spinquant")
+
+
+def _make_online_r1_hook(hadamard_K, K, rotation_size, in_features):
+    """Create a forward_pre_hook closure for online R1 activation rotation.
+
+    The hook applies the same Hadamard transform to the input that was applied
+    to the module's weight.  Since ``y = H(x) @ (W @ H).T = x @ W.T``, the
+    transform cancels out for the full-precision path, but it reshapes both
+    the weight and activation distributions for better quantization.
+
+    Matches Quark's ``HadamardTransform.forward()`` logic.
+    """
+    # Snapshot tensors into the closure
+    had_K = hadamard_K.clone()
+    k = K
+
+    if rotation_size == in_features:
+        # Full dimension: use butterfly matmul_hadU
+        def hook(module, args):
+            x = args[0]
+            x_rotated = matmul_hadU(x, hadamard_K=had_K.to(x.device), K=k)
+            return (x_rotated,) + args[1:]
+    else:
+        # Block rotation: reshape → matmul by normalized Hadamard → reshape
+        # NOTE: get_hadamard_K() already returns a normalized (orthogonal) matrix
+        # (H / sqrt(N)), so we do NOT divide by sqrt(rotation_size) again.
+        rot_mat = had_K.to(torch.float64)
+        if rot_mat.shape[0] != rotation_size:
+            had_1, _ = get_hadamard_K(rotation_size // k)
+            rot_mat = torch.kron(had_K.to(torch.float64), had_1.to(torch.float64))
+        rot_mat = rot_mat.float()
+
+        def hook(module, args):
+            x = args[0]
+            dtype = x.dtype
+            shape = x.shape
+            # Reshape: [..., in_features] -> [..., n_blocks, rotation_size]
+            x_reshaped = x.reshape(*shape[:-1], -1, rotation_size)
+            R = rot_mat.to(x.device, dtype=x.dtype)
+            x_rotated = (x_reshaped @ R).reshape(shape).to(dtype)
+            return (x_rotated,) + args[1:]
+
+    return hook
 
 
 @dataclass
@@ -71,7 +117,7 @@ class SpinQuantConfig:
     # Training control
     trainable_rotation: bool = True    # Learn R via Cayley SGD (False = QuaRot fixed Hadamard)
     trainable_smooth: bool = True      # Learn smooth_values via Adam (joint SmoothQuant)
-    online_r1_rotation: bool = False   # Keep R1 online (rarely used)
+    online_r1_rotation: bool = True    # Online R1: rotate target weights + hook (Quark default)
 
     # Training hyperparameters
     iters: int = 200                   # Training iterations
@@ -201,6 +247,7 @@ class SpinQuantPreprocessor:
         logger.info(
             f"[SpinQuant] Rotation config: R1={self.config.r1}, R2={self.config.r2}, "
             f"R3={self.config.r3}, R4={self.config.r4}, "
+            f"online_r1={self.config.online_r1_rotation}, "
             f"trainable_rotation={self.config.trainable_rotation}, "
             f"trainable_smooth={self.config.trainable_smooth}"
         )
@@ -208,15 +255,21 @@ class SpinQuantPreprocessor:
         # Validate dimensions for enabled rotations
         self._validate_dimensions()
 
-        # Step 1: untie embeddings
-        if self.config.untie_embeddings:
+        # Step 1: untie embeddings (only needed for offline R1 — it rotates embed_tokens)
+        if self.config.untie_embeddings and not self.config.online_r1_rotation:
             if untie_word_embeddings_if_needed(self.model):
                 logger.info("[SpinQuant] Untied input/output embeddings")
+        elif self.config.online_r1_rotation:
+            logger.info("[SpinQuant] Online R1: skipping untie embeddings (embed_tokens unchanged)")
 
         # Step 2: fuse RMSNorm gamma into linear weights
-        if self.config.fuse_rmsnorm:
+        # Online R1 does NOT fuse RMSNorm (matching Quark's behavior):
+        # the rotation is local per-module, so gamma doesn't need to commute.
+        if self.config.fuse_rmsnorm and not self.config.online_r1_rotation:
             logger.info("[SpinQuant] Fusing RMSNorm parameters into linear weights...")
             fuse_rmsnorm_in_model(self.model)
+        elif self.config.online_r1_rotation:
+            logger.info("[SpinQuant] Online R1: skipping RMSNorm fusion (not needed)")
 
         # Step 3: replace RMSNorm with TrainableRMSNorm (SmoothQuant)
         if self.config.trainable_smooth:
@@ -234,9 +287,16 @@ class SpinQuantPreprocessor:
             logger.info(f"[SpinQuant] Training for {self.config.iters} iterations...")
             self._train_rotations(dataloader)
 
-        # Step 6: fuse offline rotations into weights
-        logger.info("[SpinQuant] Fusing offline rotations into weights...")
-        self._fuse_offline_rotations()
+        # Step 6: apply R1 rotation
+        if self.config.r1 and self.config.online_r1_rotation:
+            logger.info("[SpinQuant] Applying online R1 rotation (weight + activation hooks)...")
+            self._apply_online_r1()
+            # Still fuse R2 and R4 offline
+            self._fuse_r2_rotation()
+            self._fuse_r4_rotation()
+        else:
+            logger.info("[SpinQuant] Fusing offline rotations into weights...")
+            self._fuse_offline_rotations()
 
         # Step 7: register online hooks (R3 / R4)
         if self.config.r3 or self.config.r4:
@@ -614,7 +674,96 @@ class SpinQuantPreprocessor:
         return getattr(self.model, "lm_head", None)
 
     # ------------------------------------------------------------------
-    # Step 6: Fuse offline rotations
+    # Step 6a: Online R1 rotation (matching Quark's default behavior)
+    # ------------------------------------------------------------------
+    def _apply_online_r1(self) -> None:
+        """Apply online R1 rotation: rotate target module weights and register
+        activation hooks that apply the same transform to inputs.
+
+        This matches Quark's ``apply_online_r1()`` behavior:
+        - Target modules (q/k/v_proj, gate/up_proj) get ``W_new = matmul_hadU(W)``
+          on their input channels (last dim of weight matrix)
+        - A forward_pre_hook applies the same Hadamard to activations at runtime
+        - The two transforms cancel out: ``H(x) @ (W @ H).T = x @ W.T``
+        - prev_modules (embed_tokens, o_proj, down_proj) are NOT modified
+        - RMSNorm gamma is NOT fused
+        - lm_head is NOT modified (last_layer skipped, matching Quark)
+
+        The benefit for quantization: weights see a more uniform distribution
+        (Hadamard mixing), while the residual stream stays in its original
+        representation, so modules like o_proj and down_proj are quantized
+        on their original weight distribution.
+        """
+        r1_size = self.r1_rotation_size
+
+        # Pre-compute the Hadamard matrix for the rotation
+        hadamard_K, K = get_hadamard_K(r1_size)
+        model_device = next(self.model.parameters()).device
+        hadamard_K = hadamard_K.to(model_device)
+
+        n_rotated = 0
+        n_hooks = 0
+
+        for layer in self._get_layers():
+            if not (hasattr(layer, "self_attn") and hasattr(layer, "mlp")):
+                continue
+
+            layer_device = next(layer.parameters()).device
+            had_K_local = hadamard_K.to(layer_device)
+
+            attn = layer.self_attn
+            mlp = layer.mlp
+
+            # Target modules: q_proj, k_proj, v_proj, gate_proj, up_proj
+            target_modules = []
+            for proj_name in ("q_proj", "k_proj", "v_proj"):
+                if hasattr(attn, proj_name):
+                    target_modules.append(getattr(attn, proj_name))
+            for proj_name in ("gate_proj", "up_proj"):
+                if hasattr(mlp, proj_name):
+                    target_modules.append(getattr(mlp, proj_name))
+
+            for module in target_modules:
+                dtype = module.weight.data.dtype
+                in_features = module.weight.shape[-1]
+
+                if r1_size == in_features:
+                    # Full rotation via matmul_hadU (butterfly algorithm)
+                    module.weight.data = matmul_hadU(
+                        module.weight.data, hadamard_K=had_K_local, K=K
+                    ).to(dtype)
+                elif in_features % r1_size == 0:
+                    # Block rotation: get_hadamard_K already returns normalized
+                    # (orthogonal) matrix — no extra division needed.
+                    R_block = had_K_local.to(torch.float64)
+                    if R_block.shape[0] != r1_size:
+                        had_1, _ = get_hadamard_K(r1_size // K)
+                        R_block = torch.kron(had_K_local.to(torch.float64), had_1.to(layer_device, torch.float64))
+                    rotate_in_channels_(module, R_in=R_block)
+                else:
+                    raise ValueError(
+                        f"Online R1: in_features={in_features} not compatible "
+                        f"with r1_rotation_size={r1_size}"
+                    )
+                n_rotated += 1
+
+                # Register forward_pre_hook for activation rotation
+                handle = module.register_forward_pre_hook(
+                    _make_online_r1_hook(had_K_local, K, r1_size, in_features)
+                )
+                self._hook_handles.append(handle)
+                n_hooks += 1
+
+            n_rotated  # count per layer
+
+        logger.info(
+            f"[SpinQuant] Online R1: rotated {n_rotated} target modules, "
+            f"registered {n_hooks} activation hooks "
+            f"(rotation_size={r1_size}, lm_head/embed_tokens/o_proj/down_proj unchanged)"
+        )
+
+    # ------------------------------------------------------------------
+    # Step 6b: Fuse offline rotations
     # ------------------------------------------------------------------
     def _fuse_offline_rotations(self) -> None:
         self._rotated_modules.clear()
@@ -810,18 +959,25 @@ class SpinQuantPreprocessor:
 
         # Untie embeddings
         tied = getattr(self.model.config, "tie_word_embeddings", False) if hasattr(self.model, "config") else "unknown"
-        lines.append(f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} {'✓ untied' if not tied else '✗ still tied'}")
+        if self.config.online_r1_rotation:
+            lines.append(f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings (skipped: online R1)':<50} {'- n/a'}")
+        else:
+            lines.append(f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} {'✓ untied' if not tied else '✗ still tied'}")
 
         # RMSNorm fusion
-        lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}")
+        if self.config.online_r1_rotation:
+            lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma (skipped: online R1)':<50} {'- n/a'}")
+        else:
+            lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}")
 
         # R1
         if self.config.r1:
             r1_size = self.r1_rotation_size
+            mode = "online" if self.config.online_r1_rotation else "offline"
             if r1_size < self.hidden_size:
-                r1_desc = f"Block Hadamard {r1_size}×{r1_size}, {self.hidden_size // r1_size} blocks (offline fused)"
+                r1_desc = f"Block Hadamard {r1_size}×{r1_size}, {self.hidden_size // r1_size} blocks ({mode})"
             else:
-                r1_desc = f"Hadamard {r1_size}×{r1_size} (offline fused)"
+                r1_desc = f"Hadamard {r1_size}×{r1_size} ({mode})"
         else:
             r1_desc = "Disabled"
         lines.append(f"  {'Residual stream (R1)':<30} {r1_desc:<50} {'✓' if self.config.r1 else '✗'}")
@@ -842,7 +998,7 @@ class SpinQuantPreprocessor:
 
         # Table header
         col_layer = "Layer"
-        col_r1 = "R1 (weight fuse)"
+        col_r1 = "R1 (online)" if self.config.online_r1_rotation else "R1 (weight fuse)"
         col_r2 = "R2 (weight fuse)"
         col_r3 = "R3 (online hook)"
         col_r4 = "R4 (online hook)"
@@ -850,8 +1006,13 @@ class SpinQuantPreprocessor:
         lines.append(header)
         lines.append(f"  {'-'*35} {'-'*20} {'-'*20} {'-'*22} {'-'*22}")
 
+        online_r1 = self.config.online_r1_rotation
+
         # embed_tokens
-        r1_embed = f"W@R ({self.r1_rotation_size})" if self.config.r1 else "-"
+        if online_r1:
+            r1_embed = "-" if self.config.r1 else "-"  # online R1 doesn't touch embed
+        else:
+            r1_embed = f"W@R ({self.r1_rotation_size})" if self.config.r1 else "-"
         lines.append(f"  {'model.embed_tokens':<35} {r1_embed:<20} {'-':<20} {'-':<22} {'-':<22}")
 
         # Transformer layers
@@ -870,9 +1031,15 @@ class SpinQuantPreprocessor:
 
             layer_name = f"layers.{i}"
 
-            # R1 for this layer: affects q/k/v/o_proj, gate/up/down_proj
-            r1_attn = f"q/k/v:R⁻¹@W o:W@R" if self.config.r1 else "-"
-            r1_mlp = f"g/u:R⁻¹@W d:W@R" if self.config.r1 else "-"
+            if online_r1 and self.config.r1:
+                r1_attn = "q/k/v:W@H+hook"
+                r1_mlp = "g/u:W@H+hook"
+            elif self.config.r1:
+                r1_attn = "q/k/v:R⁻¹@W o:W@R"
+                r1_mlp = "g/u:R⁻¹@W d:W@R"
+            else:
+                r1_attn = "-"
+                r1_mlp = "-"
 
             # R2 for this layer: affects v_proj out, o_proj in
             r2_status = f"H({self.head_dim}) v↔o" if self.config.r2 else "-"
@@ -894,14 +1061,37 @@ class SpinQuantPreprocessor:
             lines.append(f"  {layer_name + '.mlp':<35} {r1_mlp:<20} {'-':<20} {'-':<22} {r4_status:<22}")
 
         # lm_head
-        r1_lm = f"R⁻¹@W ({self.r1_rotation_size})" if self.config.r1 else "-"
+        if online_r1:
+            r1_lm = "-" if self.config.r1 else "-"  # online R1 doesn't touch lm_head
+        else:
+            r1_lm = f"R⁻¹@W ({self.r1_rotation_size})" if self.config.r1 else "-"
         lines.append(f"  {'model.lm_head':<35} {r1_lm:<20} {'-':<20} {'-':<22} {'-':<22}")
 
         # --- Hook summary ---
         lines.append("")
         lines.append("Registered Hooks:")
         r3_hooks = sum(1 for h in self._hook_handles if isinstance(h, tuple) and h[0] == "r3_monkeypatch")
-        r4_hooks = sum(1 for h in self._hook_handles if not (isinstance(h, tuple) and h[0] == "r3_monkeypatch"))
+        # For online R1, hooks are torch.utils.hooks.RemovableHook objects, not tuples
+        r1_hooks = 0
+        r4_hooks = 0
+        for h in self._hook_handles:
+            if isinstance(h, tuple) and h[0] == "r3_monkeypatch":
+                continue
+            elif isinstance(h, tuple):
+                r4_hooks += 1
+            else:
+                # RemovableHook from register_forward_pre_hook (R1 online or R4)
+                if online_r1 and self.config.r1:
+                    r1_hooks += 1
+                else:
+                    r4_hooks += 1
+        if online_r1 and self.config.r1:
+            # Count more precisely: R1 hooks = 5 per layer (q/k/v + gate/up)
+            r1_hooks = sum(1 for h in self._hook_handles
+                          if not (isinstance(h, tuple) and h[0] == "r3_monkeypatch"))
+            # R4 hooks registered separately via register_spinquant_hooks
+            r4_hooks = 0
+        lines.append(f"  R1 online hooks (Hadamard on target module input):          {r1_hooks} modules")
         lines.append(f"  R3 monkeypatch (apply_rotary_pos_emb → QKRotationWrapper):  {r3_hooks} attention layers")
         lines.append(f"  R4 forward_pre_hook (block Hadamard on down_proj input):    {r4_hooks} MLP layers")
 
@@ -909,12 +1099,22 @@ class SpinQuantPreprocessor:
         lines.append("")
         lines.append("Totals:")
         lines.append(f"  Transformer layers:   {n_layers}")
-        lines.append(f"  Offline-fused params: embed_tokens" +
-                     (f", {n_layers}×(q/k/v/o_proj, gate/up/down_proj), lm_head" if self.config.r1 else "") +
-                     (f" + {n_layers}×(v_proj↔o_proj)" if self.config.r2 else "") +
-                     (f" + {n_layers}×(down_proj)" if self.config.r4 and r4_K > 0 else ""))
-        lines.append(f"  Online hooks:         {r3_hooks + r4_hooks} total ({r3_hooks} R3 + {r4_hooks} R4)")
-        lines.append(f"  Inference overhead:   R3={'O(seq×heads×d_head×log₂d_head) per layer' if r3_hooks > 0 else 'none'}")
+        if online_r1 and self.config.r1:
+            lines.append(f"  Online R1 targets:    {n_layers}×(q/k/v_proj, gate/up_proj) = {r1_hooks} modules")
+            fused_parts = []
+        else:
+            fused_parts = ["embed_tokens"]
+            if self.config.r1:
+                fused_parts.append(f"{n_layers}×(q/k/v/o_proj, gate/up/down_proj), lm_head")
+        if self.config.r2:
+            fused_parts.append(f"{n_layers}×(v_proj↔o_proj)")
+        if self.config.r4 and r4_K > 0:
+            fused_parts.append(f"{n_layers}×(down_proj)")
+        lines.append(f"  Offline-fused params: {', '.join(fused_parts) if fused_parts else 'none'}")
+        total_hooks = r1_hooks + r3_hooks + r4_hooks
+        lines.append(f"  Online hooks:         {total_hooks} total ({r1_hooks} R1 + {r3_hooks} R3 + {r4_hooks} R4)")
+        lines.append(f"  Inference overhead:   R1={'O(seq×hidden×log₂H) per module' if r1_hooks > 0 else 'none'}")
+        lines.append(f"                        R3={'O(seq×heads×d_head×log₂d_head) per layer' if r3_hooks > 0 else 'none'}")
         lines.append(f"                        R4={'O(seq×inter×log₂K) per layer' if r4_hooks > 0 else 'none'}")
         lines.append("=" * 100)
 

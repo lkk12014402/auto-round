@@ -116,7 +116,7 @@ echo "======================================================================"
 # Scenario 1: MXFP4 — Quark default (R1+R2, rotation_size=128)
 #
 # Quark 默认: rotation_size=128, online_r1=True
-# Auto-Round: rotation_size=128, offline fuse (数学等价)
+# Auto-Round: rotation_size=128, online_r1=True (matching Quark)
 # 量化: MXFP4 (W4A4)
 # =============================================================================
 if should_run 1; then

@@ -33,7 +33,8 @@ from auto_round.algorithms.transforms.spinquant import (
 )
 
 
-def apply_rotation(model, tokenizer, r1=True, r2=True, r3=True, r4=True, device="cuda:0", rotation_size=None):
+def apply_rotation(model, tokenizer, r1=True, r2=True, r3=True, r4=True, device="cuda:0",
+                   rotation_size=None, online_r1=True):
     """Apply SpinQuant/QuaRot rotation to a model (in-place)."""
     config = SpinQuantConfig(
         r1=r1,
@@ -41,10 +42,9 @@ def apply_rotation(model, tokenizer, r1=True, r2=True, r3=True, r4=True, device=
         r3=r3,
         r4=r4,
         rotation_size=rotation_size,
+        online_r1_rotation=online_r1,
         trainable_rotation=False,  # Fixed Hadamard (QuaRot mode)
         trainable_smooth=False,
-        fuse_rmsnorm=True,
-        untie_embeddings=True,
     )
     preprocessor = SpinQuantPreprocessor(model, config)
     preprocessor.preprocess(dataloader=None)
