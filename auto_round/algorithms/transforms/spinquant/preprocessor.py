@@ -189,6 +189,8 @@ class SpinQuantPreprocessor:
 
         # Hook handles (managed by inplace sub-package)
         self._hook_handles: list[Any] = []
+        # R1 online hook handles (managed by _apply_online_r1)
+        self._r1_hook_handles: list[Any] = []
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -716,7 +718,8 @@ class SpinQuantPreprocessor:
                 hook = self._make_online_r1_hook(
                     r1_size, in_features, had_K_local, K
                 )
-                module.register_forward_pre_hook(hook)
+                handle = module.register_forward_pre_hook(hook)
+                self._r1_hook_handles.append(handle)
                 n_hooked += 1
 
         logger.info(
@@ -1061,27 +1064,14 @@ class SpinQuantPreprocessor:
         # --- Hook summary ---
         lines.append("")
         lines.append("Registered Hooks:")
+
+        # R1 online hooks are stored in self._r1_hook_handles
+        r1_hooks = len(self._r1_hook_handles)
+
+        # R3/R4 hooks are stored in self._hook_handles (from register_spinquant_hooks)
         r3_hooks = sum(1 for h in self._hook_handles if isinstance(h, tuple) and h[0] == "r3_monkeypatch")
-        # For online R1, hooks are torch.utils.hooks.RemovableHook objects, not tuples
-        r1_hooks = 0
-        r4_hooks = 0
-        for h in self._hook_handles:
-            if isinstance(h, tuple) and h[0] == "r3_monkeypatch":
-                continue
-            elif isinstance(h, tuple):
-                r4_hooks += 1
-            else:
-                # RemovableHook from register_forward_pre_hook (R1 online or R4)
-                if online_r1 and self.config.r1:
-                    r1_hooks += 1
-                else:
-                    r4_hooks += 1
-        if online_r1 and self.config.r1:
-            # Count more precisely: R1 hooks = 5 per layer (q/k/v + gate/up)
-            r1_hooks = sum(1 for h in self._hook_handles
-                          if not (isinstance(h, tuple) and h[0] == "r3_monkeypatch"))
-            # R4 hooks registered separately via register_spinquant_hooks
-            r4_hooks = 0
+        r4_hooks = sum(1 for h in self._hook_handles if not (isinstance(h, tuple) and h[0] == "r3_monkeypatch"))
+
         lines.append(f"  R1 online hooks (Hadamard on target module input):          {r1_hooks} modules")
         lines.append(f"  R3 monkeypatch (apply_rotary_pos_emb → QKRotationWrapper):  {r3_hooks} attention layers")
         lines.append(f"  R4 forward_pre_hook (block Hadamard on down_proj input):    {r4_hooks} MLP layers")
