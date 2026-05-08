@@ -99,7 +99,7 @@ def quantize_mxfp4(model_or_name, tokenizer=None, device="cuda:0", nsamples=128,
         Quantized model and tokenizer.
     """
     kwargs = dict(
-        scheme="MXFP4",
+        scheme="MXFP4_RCEIL",
         iters=0,  # RTN mode — no optimization iterations
         nsamples=nsamples,
         seqlen=seqlen,
@@ -114,6 +114,9 @@ def quantize_mxfp4(model_or_name, tokenizer=None, device="cuda:0", nsamples=128,
     ar.quantize()
     model = ar.model
     model.eval()
+    # Ensure all parameters are back on the target device after quantization
+    # (auto-round's offload mechanism may leave some params on CPU)
+    model.to(device)
     return model, ar.tokenizer
 
 

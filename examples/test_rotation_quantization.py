@@ -102,6 +102,7 @@ def quantize_rtn_w4a16(model_name, device, nsamples=128, seqlen=512):
     # Get the quantized model
     model = ar.model
     model.eval()
+    model.to(device)
     return model, ar.tokenizer
 
 
@@ -122,6 +123,7 @@ def quantize_rotated_model_rtn_w4a16(model, tokenizer, device, nsamples=128, seq
     ar.quantize()
     model = ar.model
     model.eval()
+    model.to(device)
     return model
 
 
