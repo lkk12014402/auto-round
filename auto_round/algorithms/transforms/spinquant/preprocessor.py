@@ -29,6 +29,7 @@ import torch.nn.functional as F
 
 from auto_round.algorithms.transforms.spinquant.cayley_optimizer import AdamAndSGDG
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
+    InputRotationWrapperHadamard,
     apply_hadamard_to_linear,
     create_block_diag_from_head_matrix,
     deterministic_hadamard_matrix,
@@ -54,47 +55,9 @@ from auto_round.algorithms.transforms.spinquant.inplace.apply import (
 logger = logging.getLogger("auto_round.spinquant")
 
 
-def _make_online_r1_hook(hadamard_K, K, rotation_size, in_features):
-    """Create a forward_pre_hook closure for online R1 activation rotation.
-
-    The hook applies the same Hadamard transform to the input that was applied
-    to the module's weight.  Since ``y = H(x) @ (W @ H).T = x @ W.T``, the
-    transform cancels out for the full-precision path, but it reshapes both
-    the weight and activation distributions for better quantization.
-
-    Matches Quark's ``HadamardTransform.forward()`` logic.
-    """
-    # Snapshot tensors into the closure
-    had_K = hadamard_K.clone()
-    k = K
-
-    if rotation_size == in_features:
-        # Full dimension: use butterfly matmul_hadU
-        def hook(module, args):
-            x = args[0]
-            x_rotated = matmul_hadU(x, hadamard_K=had_K.to(x.device), K=k)
-            return (x_rotated,) + args[1:]
-    else:
-        # Block rotation: reshape → matmul by normalized Hadamard → reshape
-        # NOTE: get_hadamard_K() already returns a normalized (orthogonal) matrix
-        # (H / sqrt(N)), so we do NOT divide by sqrt(rotation_size) again.
-        rot_mat = had_K.to(torch.float64)
-        if rot_mat.shape[0] != rotation_size:
-            had_1, _ = get_hadamard_K(rotation_size // k)
-            rot_mat = torch.kron(had_K.to(torch.float64), had_1.to(torch.float64))
-        rot_mat = rot_mat.float()
-
-        def hook(module, args):
-            x = args[0]
-            dtype = x.dtype
-            shape = x.shape
-            # Reshape: [..., in_features] -> [..., n_blocks, rotation_size]
-            x_reshaped = x.reshape(*shape[:-1], -1, rotation_size)
-            R = rot_mat.to(x.device, dtype=x.dtype)
-            x_rotated = (x_reshaped @ R).reshape(shape).to(dtype)
-            return (x_rotated,) + args[1:]
-
-    return hook
+# NOTE: The old _make_online_r1_hook() function has been removed.
+# Online R1 now uses InputRotationWrapperHadamard (nn.Module) instead of
+# register_forward_pre_hook, enabling proper model save/load.
 
 
 @dataclass
@@ -289,7 +252,7 @@ class SpinQuantPreprocessor:
 
         # Step 6: apply R1 rotation
         if self.config.r1 and self.config.online_r1_rotation:
-            logger.info("[SpinQuant] Applying online R1 rotation (weight + activation hooks)...")
+            logger.info("[SpinQuant] Applying online R1 rotation (weight + wrapper)...")
             self._apply_online_r1()
             # Still fuse R2 and R4 offline
             self._fuse_r2_rotation()
@@ -677,22 +640,24 @@ class SpinQuantPreprocessor:
     # Step 6a: Online R1 rotation (matching Quark's default behavior)
     # ------------------------------------------------------------------
     def _apply_online_r1(self) -> None:
-        """Apply online R1 rotation: rotate target module weights and register
-        activation hooks that apply the same transform to inputs.
+        """Apply online R1 rotation: rotate target module weights and wrap
+        them with ``InputRotationWrapperHadamard`` so the matching activation
+        rotation is applied at runtime.
 
         This matches Quark's ``apply_online_r1()`` behavior:
         - Target modules (q/k/v_proj, gate/up_proj) get ``W_new = matmul_hadU(W)``
           on their input channels (last dim of weight matrix)
-        - A forward_pre_hook applies the same Hadamard to activations at runtime
+        - The module is replaced in the model tree with an
+          ``InputRotationWrapperHadamard`` that applies the same Hadamard to
+          activations at runtime
         - The two transforms cancel out: ``H(x) @ (W @ H).T = x @ W.T``
         - prev_modules (embed_tokens, o_proj, down_proj) are NOT modified
         - RMSNorm gamma is NOT fused
         - lm_head is NOT modified (last_layer skipped, matching Quark)
 
-        The benefit for quantization: weights see a more uniform distribution
-        (Hadamard mixing), while the residual stream stays in its original
-        representation, so modules like o_proj and down_proj are quantized
-        on their original weight distribution.
+        Unlike the old hook-based approach, the wrapper is a proper nn.Module
+        that is serialised by ``save_pretrained`` / ``state_dict``, enabling
+        model save/load with online R1 rotation.
         """
         r1_size = self.r1_rotation_size
 
@@ -702,7 +667,7 @@ class SpinQuantPreprocessor:
         hadamard_K = hadamard_K.to(model_device)
 
         n_rotated = 0
-        n_hooks = 0
+        n_wrapped = 0
 
         for layer in self._get_layers():
             if not (hasattr(layer, "self_attn") and hasattr(layer, "mlp")):
@@ -714,16 +679,17 @@ class SpinQuantPreprocessor:
             attn = layer.self_attn
             mlp = layer.mlp
 
-            # Target modules: q_proj, k_proj, v_proj, gate_proj, up_proj
-            target_modules = []
+            # Target modules: (parent_module, attr_name)
+            target_specs = []
             for proj_name in ("q_proj", "k_proj", "v_proj"):
                 if hasattr(attn, proj_name):
-                    target_modules.append(getattr(attn, proj_name))
+                    target_specs.append((attn, proj_name))
             for proj_name in ("gate_proj", "up_proj"):
                 if hasattr(mlp, proj_name):
-                    target_modules.append(getattr(mlp, proj_name))
+                    target_specs.append((mlp, proj_name))
 
-            for module in target_modules:
+            for parent, attr_name in target_specs:
+                module = getattr(parent, attr_name)
                 dtype = module.weight.data.dtype
                 in_features = module.weight.shape[-1]
 
@@ -747,18 +713,19 @@ class SpinQuantPreprocessor:
                     )
                 n_rotated += 1
 
-                # Register forward_pre_hook for activation rotation
-                handle = module.register_forward_pre_hook(
-                    _make_online_r1_hook(had_K_local, K, r1_size, in_features)
+                # Replace module with InputRotationWrapperHadamard
+                wrapper = InputRotationWrapperHadamard(
+                    original_module=module,
+                    rotation_size=r1_size,
+                    hadamard_K=had_K_local,
+                    K=K,
                 )
-                self._hook_handles.append(handle)
-                n_hooks += 1
-
-            n_rotated  # count per layer
+                setattr(parent, attr_name, wrapper)
+                n_wrapped += 1
 
         logger.info(
             f"[SpinQuant] Online R1: rotated {n_rotated} target modules, "
-            f"registered {n_hooks} activation hooks "
+            f"wrapped {n_wrapped} with InputRotationWrapperHadamard "
             f"(rotation_size={r1_size}, lm_head/embed_tokens/o_proj/down_proj unchanged)"
         )
 

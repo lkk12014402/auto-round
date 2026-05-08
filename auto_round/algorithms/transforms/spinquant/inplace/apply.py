@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
+    InputRotationWrapperHadamard,
     is_pow2,
     matmul_hadU,
 )
@@ -134,34 +135,36 @@ def register_spinquant_hooks(
         else:
             from auto_round.algorithms.transforms.spinquant.rotation_utils import (
                 deterministic_hadamard_matrix,
+                get_hadamard_K,
             )
-            had_K = deterministic_hadamard_matrix(K, dtype=torch.float32, device=compute_device)
-
-            def _make_r4_hook(had: torch.Tensor, K_val: int):
-                def hook(module: nn.Module, input: Any) -> Any:
-                    act = input[0] if isinstance(input, tuple) else input
-                    orig_shape = act.shape
-                    N = orig_shape[-1]
-                    M = N // K_val
-                    x = act.reshape(-1, M, K_val).to(torch.float64)
-                    H = had.to(x.device).to(torch.float64)
-                    x = torch.matmul(x, H.t()).to(act.dtype)
-                    result = x.reshape(orig_shape)
-                    if isinstance(input, tuple):
-                        return (result,) + input[1:]
-                    return result
-                return hook
+            had_K, _ = get_hadamard_K(r4_size)
+            had_K = had_K.to(device=compute_device, dtype=torch.float32)
 
             r4_count = 0
-            for name, module in model.named_modules():
+            for name, module in list(model.named_modules()):
                 if "down_proj" in name and isinstance(module, nn.Linear):
-                    h = module.register_forward_pre_hook(_make_r4_hook(had_K, K))
-                    handles.append(h)
+                    # Find parent module and attribute name
+                    parts = name.rsplit(".", 1)
+                    if len(parts) == 2:
+                        parent_name, attr_name = parts
+                        parent = dict(model.named_modules())[parent_name]
+                    else:
+                        parent = model
+                        attr_name = name
+
+                    wrapper = InputRotationWrapperHadamard(
+                        original_module=module,
+                        rotation_size=r4_size,
+                        hadamard_K=had_K,
+                        K=K,
+                    )
+                    setattr(parent, attr_name, wrapper)
+                    handles.append(("r4_wrapper", name, parent, attr_name))
                     r4_count += 1
 
             logger.info(
-                f"[SpinQuant] R4: Applied block Hadamard(K={K}, blocks={r4_size // K}) "
-                f"pre-hook on {r4_count} down_proj layers"
+                f"[SpinQuant] R4: Applied InputRotationWrapperHadamard(rotation_size={r4_size}, K={K}) "
+                f"on {r4_count} down_proj layers"
                 + (f" (r4_rotation_size={r4_size})" if r4_size != intermediate_size else "")
             )
 
@@ -169,7 +172,7 @@ def register_spinquant_hooks(
 
 
 def remove_spinquant_hooks(handles: list[Any]) -> None:
-    """Safely remove all SpinQuant hook handles and R3 monkeypatches."""
+    """Safely remove all SpinQuant hook handles, R3 monkeypatches, and R4 wrappers."""
     for h in handles:
         try:
             if isinstance(h, tuple) and h[0] == "r3_monkeypatch":
@@ -188,6 +191,12 @@ def remove_spinquant_hooks(handles: list[Any]) -> None:
                 if hasattr(module, "_spinquant_original_forward"):
                     module.forward = module._spinquant_original_forward
                     delattr(module, "_spinquant_original_forward")
+            elif isinstance(h, tuple) and h[0] == "r4_wrapper":
+                # Unwrap InputRotationWrapperHadamard → original_module
+                _, name, parent, attr_name = h
+                wrapper = getattr(parent, attr_name, None)
+                if isinstance(wrapper, InputRotationWrapperHadamard):
+                    setattr(parent, attr_name, wrapper.original_module)
             else:
                 h.remove()
         except Exception:

@@ -166,7 +166,199 @@ __all__ = [
     "create_block_diag_from_head_matrix",
     "apply_hadamard_to_linear",
     "get_model_arch_info",
+    "InputRotationWrapperHadamard",
 ]
+
+
+# ---------------------------------------------------------------------------
+# InputRotationWrapperHadamard — nn.Module wrapper for online rotation.
+#
+# Replaces a Linear layer with a wrapper that applies Hadamard rotation to
+# the input activation before the linear forward pass.  Since the wrapper is
+# a proper nn.Module, it is serialised by ``save_pretrained`` / ``state_dict``
+# and automatically reconstructed on ``load_state_dict``.
+#
+# Matches Quark's ``InputRotationWrapperHadamard`` semantics.
+# ---------------------------------------------------------------------------
+
+class InputRotationWrapperHadamard(nn.Module):
+    """nn.Module wrapper that applies Hadamard rotation to input before Linear.
+
+    When online R1 rotation is used, target modules (q/k/v/gate/up_proj) have
+    their weights pre-rotated as ``W' = W @ R``.  This wrapper applies the
+    matching rotation ``x' = x @ R`` to the activation at runtime so that the
+    full-precision result is preserved::
+
+        y = (x @ R) @ (W @ R).T = x @ R @ R.T @ W.T = x @ W.T
+
+    The wrapper stores the Hadamard matrix as a buffer (``hadamard_K``), so it
+    is saved alongside the model weights and automatically restored on load.
+
+    It also rewrites ``state_dict()`` keys to drop the ``.original_module.``
+    prefix, keeping weight names compatible with the original (un-wrapped)
+    model.  This follows the same convention as Quark.
+
+    Args:
+        original_module: The ``nn.Linear`` layer (with already-rotated weights).
+        rotation_size: Size of the block rotation (= in_features for full rotation).
+        hadamard_K: Pre-computed Hadamard matrix from ``get_hadamard_K()``.
+            If None, computed automatically from ``rotation_size``.
+        K: Hadamard block dimension (1 for power-of-2 sizes).
+    """
+
+    def __init__(
+        self,
+        original_module: nn.Linear,
+        rotation_size: int,
+        hadamard_K: Optional[torch.Tensor] = None,
+        K: Optional[int] = None,
+    ):
+        super().__init__()
+
+        if not isinstance(original_module, nn.Linear):
+            raise ValueError(
+                f"InputRotationWrapperHadamard only supports nn.Linear, "
+                f"got {type(original_module).__name__}"
+            )
+
+        self.original_module = original_module
+        self._rotation_size = rotation_size
+
+        in_features = original_module.in_features
+
+        if in_features == rotation_size:
+            self._use_butterfly = True
+        elif in_features % rotation_size == 0:
+            self._use_butterfly = False
+        else:
+            raise ValueError(
+                f"rotation_size={rotation_size} not compatible with "
+                f"in_features={in_features}"
+            )
+
+        # Compute / store Hadamard matrix
+        if hadamard_K is None or K is None:
+            hadamard_K, K = get_hadamard_K(rotation_size)
+
+        self._K = K
+        device = original_module.weight.device
+        dtype = original_module.weight.dtype
+
+        # Store hadamard_K as buffer (serialised with model)
+        self.register_buffer(
+            "hadamard_K",
+            hadamard_K.to(device=device, dtype=torch.float32),
+        )
+
+        # For block rotation, pre-build the full rotation matrix
+        if not self._use_butterfly:
+            rot_mat = hadamard_K.to(torch.float64)
+            if rot_mat.shape[0] != rotation_size:
+                had_1, _ = get_hadamard_K(rotation_size // K)
+                rot_mat = torch.kron(
+                    hadamard_K.to(torch.float64),
+                    had_1.to(torch.float64),
+                )
+            self.register_buffer(
+                "rotation_matrix",
+                rot_mat.to(device=device, dtype=torch.float32),
+            )
+
+    # --- Proxy properties to original_module ---
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.original_module.weight
+
+    @weight.setter
+    def weight(self, value: torch.Tensor) -> None:
+        self.original_module.weight = value
+
+    @property
+    def bias(self) -> Optional[torch.Tensor]:
+        return self.original_module.bias
+
+    @bias.setter
+    def bias(self, value: Optional[torch.Tensor]) -> None:
+        self.original_module.bias = value
+
+    @property
+    def in_features(self) -> int:
+        return self.original_module.in_features
+
+    @property
+    def out_features(self) -> int:
+        return self.original_module.out_features
+
+    # --- Forward: rotate input, then call original ---
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._use_butterfly:
+            x = matmul_hadU(
+                x,
+                hadamard_K=self.hadamard_K.to(x.device),
+                K=self._K,
+            )
+        else:
+            dtype = x.dtype
+            shape = x.shape
+            R = self.rotation_matrix.to(x.device, dtype=x.dtype)
+            x = x.reshape(*shape[:-1], -1, self._rotation_size)
+            x = (x @ R).reshape(shape).to(dtype)
+        return self.original_module(x)
+
+    # --- state_dict: strip original_module. prefix ---
+
+    def state_dict(self, *args, destination=None, prefix='', keep_vars=False):
+        # Collect into a temporary dict using the base class implementation,
+        # then copy to destination with "original_module." stripped from keys.
+        from collections import OrderedDict
+        temp = OrderedDict()
+        nn.Module.state_dict(self, destination=temp, prefix=prefix, keep_vars=keep_vars)
+
+        if destination is None:
+            destination = OrderedDict()
+
+        om_token = "original_module."
+        for k, v in temp.items():
+            new_k = k.replace(om_token, "", 1) if om_token in k else k
+            destination[new_k] = v
+
+        return destination
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        # Remap keys: the saved state_dict has no "original_module." prefix,
+        # but the actual parameter lives under self.original_module.
+        # e.g. "layer.weight" → "layer.original_module.weight"
+        om_prefix = prefix + "original_module."
+        keys_to_remap = []
+        for k in list(state_dict.keys()):
+            if k.startswith(prefix) and not k.startswith(om_prefix):
+                suffix = k[len(prefix):]
+                # Skip buffers that belong to the wrapper itself (e.g. hadamard_K)
+                if suffix in ("hadamard_K", "rotation_matrix"):
+                    continue
+                # Everything else (weight, bias) belongs to original_module
+                new_key = om_prefix + suffix
+                keys_to_remap.append((k, new_key))
+
+        for old_key, new_key in keys_to_remap:
+            state_dict[new_key] = state_dict.pop(old_key)
+
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"InputRotationWrapperHadamard(\n"
+            f"  rotation_size={self._rotation_size}, "
+            f"butterfly={self._use_butterfly}, K={self._K}\n"
+            f"  (original_module): {self.original_module}\n"
+            f")"
+        )
 
 
 def rotate_in_channels_(
@@ -442,11 +634,15 @@ def apply_hadamard_to_linear(
         output: If True, apply to output channels (rows). If False, apply
             to input channels (columns).
     """
-    assert isinstance(module, nn.Linear), "module must be nn.Linear"
-    in_features = module.in_features
-    out_features = module.out_features
+    # Support both nn.Linear and InputRotationWrapperHadamard
+    target = module
+    if isinstance(module, InputRotationWrapperHadamard):
+        target = module.original_module
+    assert isinstance(target, nn.Linear), f"module must be nn.Linear, got {type(target).__name__}"
+    in_features = target.in_features
+    out_features = target.out_features
 
-    W = module.weight.data
+    W = target.weight.data
     dtype = W.dtype
     device = W.device
     W = W.to(torch.float64)
@@ -487,18 +683,18 @@ def apply_hadamard_to_linear(
             W_reshaped = torch.einsum('ijk,lk->ijl', W_reshaped, H)
             W = W_reshaped.reshape(out_features, in_features)
 
-    module.weight.data = W.to(dtype)
+    target.weight.data = W.to(dtype)
 
     # Handle bias for output-side rotation
-    if output and module.bias is not None:
-        b = module.bias.data.to(torch.float64)
+    if output and target.bias is not None:
+        b = target.bias.data.to(torch.float64)
         if had_dim == -1:
             b = H @ b
         else:
             b_reshaped = b.view(n_chunks, had_dim)
             b_reshaped = torch.einsum('ij,kj->ki', H, b_reshaped)
             b = b_reshaped.view(-1)
-        module.bias.data = b.to(module.bias.dtype)
+        target.bias.data = b.to(target.bias.dtype)
 
 
 def get_model_arch_info(model: nn.Module) -> dict:

@@ -60,6 +60,9 @@ from auto_round.algorithms.transforms.spinquant.trainer import (
     RotationTrainerCallback,
     RotationTrainerConfig,
 )
+from auto_round.algorithms.transforms.spinquant.rotation_utils import (
+    InputRotationWrapperHadamard,
+)
 from auto_round.algorithms.transforms.spinquant.training import (
     SpinQuantState,
     SpinQuantTrainingHook,
@@ -85,6 +88,8 @@ __all__ = [
     "apply_spinquant_in_place",
     "register_spinquant_hooks",
     "remove_spinquant_hooks",
+    # -- Input rotation wrapper (save/load support) --
+    "InputRotationWrapperHadamard",
     # -- Legacy helpers --
     "SpinQuantTrainingHook",
     "SpinQuantState",
