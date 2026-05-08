@@ -136,48 +136,98 @@ def register_spinquant_hooks(
                 deterministic_hadamard_matrix,
                 get_hadamard_K,
             )
-            had_K, _ = get_hadamard_K(r4_size)
-            had_K = had_K.to(device=compute_device, dtype=torch.float32)
 
-            # Build the hook function for R4
-            if is_pow2(r4_size):
-                # Full butterfly Hadamard
-                def _make_r4_hook(had_mat, k_val, rot_size):
-                    def hook(module, args):
-                        x = args[0]
-                        x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
-                        return (x,) + args[1:]
-                    return hook
+            # Determine if we need block rotation (r4_size < intermediate_size)
+            need_block_rotation = (r4_size < intermediate_size)
+
+            if need_block_rotation:
+                # Block rotation: reshape input to blocks of r4_size, apply Hadamard per block
+                if is_pow2(r4_size):
+                    # Each block is power-of-2: use fast butterfly on each block
+                    had_K_mat, had_K_val = get_hadamard_K(r4_size)
+                    had_K_mat = had_K_mat.to(device=compute_device, dtype=torch.float32)
+
+                    def _make_r4_hook(had_mat, k_val, rot_size):
+                        def hook(module, args):
+                            x = args[0]
+                            shape = x.shape
+                            # Reshape: [..., intermediate_size] → [..., num_blocks, r4_size]
+                            x = x.reshape(*shape[:-1], -1, rot_size)
+                            # Apply Hadamard to last dimension of each block
+                            x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                            return (x.reshape(shape),) + args[1:]
+                        return hook
+
+                    hook_had_K = had_K_mat
+                    hook_K = had_K_val
+                else:
+                    # Each block is non-power-of-2: build explicit rotation matrix
+                    had_K_mat, had_K_val = get_hadamard_K(r4_size)
+                    R_block = had_K_mat.to(torch.float64)
+                    if R_block.shape[0] != r4_size:
+                        had_1, _ = get_hadamard_K(r4_size // had_K_val)
+                        R_block = torch.kron(had_K_mat.to(torch.float64), had_1.to(torch.float64))
+                    R_block_f32 = R_block.float().to(compute_device)
+
+                    def _make_r4_hook(had_mat, k_val, rot_size):
+                        def hook(module, args):
+                            x = args[0]
+                            dtype = x.dtype
+                            shape = x.shape
+                            R = R_block_f32.to(x.device, dtype=x.dtype)
+                            x = x.reshape(*shape[:-1], -1, rot_size)
+                            x = (x @ R).reshape(shape).to(dtype)
+                            return (x,) + args[1:]
+                        return hook
+
+                    hook_had_K = had_K_mat.to(device=compute_device, dtype=torch.float32)
+                    hook_K = had_K_val
             else:
-                # Block Hadamard for non-power-of-2 sizes
-                R_block = had_K.to(torch.float64)
-                if R_block.shape[0] != r4_size:
-                    had_1, _ = get_hadamard_K(r4_size // K)
-                    R_block = torch.kron(had_K.to(torch.float64), had_1.to(torch.float64))
-                R_block_f32 = R_block.float().to(compute_device)
+                # Full-dimension rotation: r4_size == intermediate_size
+                had_K_mat, had_K_val = get_hadamard_K(r4_size)
+                had_K_mat = had_K_mat.to(device=compute_device, dtype=torch.float32)
 
-                def _make_r4_hook(had_mat, k_val, rot_size):
-                    def hook(module, args):
-                        x = args[0]
-                        dtype = x.dtype
-                        shape = x.shape
-                        R = R_block_f32.to(x.device, dtype=x.dtype)
-                        x = x.reshape(*shape[:-1], -1, rot_size)
-                        x = (x @ R).reshape(shape).to(dtype)
-                        return (x,) + args[1:]
-                    return hook
+                if is_pow2(r4_size):
+                    # Full butterfly Hadamard on entire dimension
+                    def _make_r4_hook(had_mat, k_val, rot_size):
+                        def hook(module, args):
+                            x = args[0]
+                            x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                            return (x,) + args[1:]
+                        return hook
+                else:
+                    # Block Hadamard for non-power-of-2 full dimension
+                    R_block = had_K_mat.to(torch.float64)
+                    if R_block.shape[0] != r4_size:
+                        had_1, _ = get_hadamard_K(r4_size // had_K_val)
+                        R_block = torch.kron(had_K_mat.to(torch.float64), had_1.to(torch.float64))
+                    R_block_f32 = R_block.float().to(compute_device)
+
+                    def _make_r4_hook(had_mat, k_val, rot_size):
+                        def hook(module, args):
+                            x = args[0]
+                            dtype = x.dtype
+                            shape = x.shape
+                            R = R_block_f32.to(x.device, dtype=x.dtype)
+                            x = x.reshape(*shape[:-1], -1, rot_size)
+                            x = (x @ R).reshape(shape).to(dtype)
+                            return (x,) + args[1:]
+                        return hook
+
+                hook_had_K = had_K_mat
+                hook_K = had_K_val
 
             r4_count = 0
             for name, module in list(model.named_modules()):
                 if "down_proj" in name and isinstance(module, nn.Linear):
-                    hook = _make_r4_hook(had_K, K, r4_size)
+                    hook = _make_r4_hook(hook_had_K, hook_K, r4_size)
                     handle = module.register_forward_pre_hook(hook)
                     handles.append(handle)
                     r4_count += 1
 
             logger.info(
-                f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, K={K}) "
-                f"on {r4_count} down_proj layers"
+                f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, K={K}, "
+                f"block_rotation={need_block_rotation}) on {r4_count} down_proj layers"
                 + (f" (r4_rotation_size={r4_size})" if r4_size != intermediate_size else "")
             )
 
