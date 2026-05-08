@@ -1,0 +1,54 @@
+[32m
+[QUARK-INFO]: C++ kernel compilation check start.[0m
+[32m
+[QUARK-INFO]: C++ kernel build directory: /root/.cache/torch_extensions/py312_cu128/kernel_ext. First-time compilation may take a few minutes... Building for architectures TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 9.0 10.0 12.0+PTX'.[0m
+[32m
+[QUARK-INFO]: C++ kernel compilation is already complete. Ending the C++ kernel compilation check. Total time: 0.3863 seconds[0m
+`torch_dtype` is deprecated! Use `dtype` instead!
+======================================================================
+Quark: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Device:     cuda:7
+  Levels:     ['baseline_fp16', 'mxfp4_only']
+  Quant:      MXFP4 (W4A4, weight static + activation dynamic)
+  Rotation:   None (Hadamard, no training)
+  Rot. size:  128
+======================================================================
+Initializing tokenizer from Qwen/Qwen3-0.6B
+
+======================================================================
+  Evaluating: baseline_fp16
+======================================================================
+  Loading FP16 baseline model...
+Traceback (most recent call last):
+  File "/data/lkk/quarot/auto-round/examples/test_quark_rotation_mxfp4.py", line 394, in <module>
+    main()
+  File "/data/lkk/quarot/auto-round/examples/test_quark_rotation_mxfp4.py", line 284, in main
+    ).to(args.device)
+      ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/modeling_utils.py", line 4343, in to
+    return super().to(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1381, in to
+    return self._apply(convert)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 964, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1367, in convert
+    return t.to(
+           ^^^^^
+torch.AcceleratorError: CUDA error: invalid device ordinal
+GPU device may be out of range, do you have enough GPUs?
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+

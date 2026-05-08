@@ -65,7 +65,14 @@ def extract_metrics(results):
 
 
 def get_rotation_config(r1=True, r2=True, r3=False, r4=False, online_r1=True, rotation_size=128):
-    """Build a Quark RotationConfig object for the rotation algorithm."""
+    """Build a Quark RotationConfig object for the rotation algorithm.
+
+    Note: Quark's R3 does NOT support custom rotation_size. If r3=True and
+    rotation_size is set, we pass rotation_size=None to Quark (R3 always uses
+    head_dim internally).
+    """
+    # Quark R3 raises NotImplementedError with custom rotation_size
+    effective_rotation_size = None if r3 else rotation_size
     scaling_layers = {
         "first_layer": [
             {
@@ -146,7 +153,7 @@ def get_rotation_config(r1=True, r2=True, r3=False, r4=False, online_r1=True, ro
         r4=r4,
         trainable=False,
         online_r1_rotation=online_r1,
-        rotation_size=rotation_size,
+        rotation_size=effective_rotation_size,
         scaling_layers=scaling_layers,
     )
     return config

@@ -1,0 +1,208 @@
+[32m
+[QUARK-INFO]: C++ kernel compilation check start.[0m
+[32m
+[QUARK-INFO]: C++ kernel build directory: /root/.cache/torch_extensions/py312_cu128/kernel_ext. First-time compilation may take a few minutes... Building for architectures TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 9.0 10.0 12.0+PTX'.[0m
+[32m
+[QUARK-INFO]: C++ kernel compilation is already complete. Ending the C++ kernel compilation check. Total time: 0.3872 seconds[0m
+`torch_dtype` is deprecated! Use `dtype` instead!
+[33m
+[QUARK-WARNING]: quark.torch.config.config.Config is deprecated and will be removed in a future release. Please use quark.torch.config.config.QConfig instead.[0m
+Repo card metadata block was not found. Setting CardData to empty.
+[32m
+[QUARK-INFO]: Configuration checking start.[0m
+[32m
+[QUARK-INFO]: Configuration checking end. The configuration is effective. This is weight quantization and activation dynamic quantization.[0m
+[32m
+[QUARK-INFO]: 
+
+============== QuantizeModel GPU Memory Profiling==============
+|        Total Allocated Memory:         |       0.00GB       |
+|         Total Reserved Memory:         |       0.00GB       |
+|           Total Free Memory:           |       1.13GB       |
+===============================================================
+
+[0m
+[32m
+[QUARK-INFO]: Quantizing with the quantization configuration:
+Config(
+    global_quant_config=QLayerConfig(
+        input_tensors=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=True,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        output_tensors=None,
+        weight=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=False,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        bias=None,
+        target_device=None,
+    ),
+    exclude=['lm_head'],
+    algo_config=[
+        RotationConfig(
+            scaling_layers={'first_layer': [{'prev_modules': ['model.embed_tokens'], 'norm_module': 'model.layers.layer_id.input_layernorm', 'next_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj'], 'target_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj']}, {'prev_modules': ['model.layers.layer_id.self_attn.o_proj'], 'norm_module': 'model.layers.layer_id.post_attention_layernorm', 'next_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj'], 'target_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj']}], 'middle_layers': [{'prev_modules': ['model.layers.pre_layer_id.mlp.down_proj'], 'norm_module': 'model.layers.layer_id.input_layernorm', 'next_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj'], 'target_modules': ['model.layers.layer_id.self_attn.q_proj', 'model.layers.layer_id.self_attn.k_proj', 'model.layers.layer_id.self_attn.v_proj']}, {'prev_modules': ['model.layers.layer_id.self_attn.o_proj'], 'norm_module': 'model.layers.layer_id.post_attention_layernorm', 'next_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj'], 'target_modules': ['model.layers.layer_id.mlp.up_proj', 'model.layers.layer_id.mlp.gate_proj']}], 'last_layer': [{'prev_modules': ['model.layers.layer_id.mlp.down_proj'], 'norm_module': 'model.norm', 'next_modules': ['lm_head'], 'target_modules': ['lm_head']}]},
+            name="rotation",
+            r1=True,
+            r2=True,
+            r3=False,
+            r4=False,
+            rotation_size=128,
+            random=None,
+            random_r1=False,
+            random_r2=False,
+            backbone="model",
+            model_decoder_layers="model.layers",
+            v_proj="self_attn.v_proj",
+            o_proj="self_attn.o_proj",
+            self_attn="self_attn",
+            mlp="mlp",
+            online_r1_rotation=True,
+            online_config=OnlineRotationConfig(
+                shared_parallel=False,
+                online_rotation_layers=None,
+            ),
+            trainable=False,
+            train_smooth=None,
+            smooth_positions=None,
+        ),
+    ],
+    log_severity_level=1,
+    version="0.11.1+210bbb7",
+    layer_type_quant_config={},
+    layer_quant_config={},
+    kv_cache_quant_config={},
+    kv_cache_group=['*k_proj', '*v_proj'],
+    min_kv_scale=0.0,
+    kv_cache_post_rope=False,
+    softmax_quant_spec=None,
+    quant_mode=QuantizationMode.eager_mode,
+)[0m
+[32m
+[QUARK-INFO]: In-place OPs replacement start.[0m
+[32m
+[QUARK-INFO]: Module exclusion from quantization summary:
+|      Exclude pattern       | Number of modules excluded |
+|          lm_head           |             1              |
+[0m
+======================================================================
+Quark: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      200
+  Batch size: 8
+  Device:     cuda:7
+  Levels:     ['rotation_mxfp4']
+  Quant:      MXFP4 (W4A4, weight static + activation dynamic)
+  Rotation:   R1+R2 (Hadamard, no training)
+  Rot. size:  128
+======================================================================
+Initializing tokenizer from Qwen/Qwen3-0.6B
+
+======================================================================
+  Evaluating: rotation_mxfp4
+======================================================================
+  Loading model and applying rotation (R1+R2) + MXFP4...
+[INFO-Warning] For AWQ benchmark, batch_size should be 59. Changing batch_size to 59.
+  0%|          | 0/427 [00:00<?, ?it/s]100%|██████████| 427/427 [00:00<00:00, 11740.12it/s]
+[32m
+[QUARK-INFO]: Module replacement for quantization summary:
+|            Original module             |  Number original   |  Number replaced   |
+|                 Conv2d                 |         0          |         0          |
+|                 Linear                 |        197         |        196         |
+|            ConvTranspose2d             |         0          |         0          |
+|               Embedding                |         1          |         0          |
+|              EmbeddingBag              |         0          |         0          |
+|            Qwen3ForCausalLM            |         1          |         0          |
+|               Qwen3Model               |         1          |         0          |
+|               ModuleList               |         1          |         0          |
+|           Qwen3DecoderLayer            |         28         |         0          |
+|             Qwen3Attention             |         28         |         0          |
+|              Qwen3RMSNorm              |        113         |         0          |
+|                Qwen3MLP                |         28         |         0          |
+|             SiLUActivation             |         28         |         0          |
+|          Qwen3RotaryEmbedding          |         1          |         0          |
+[0m
+[32m
+[QUARK-INFO]: In-place OPs replacement end.[0m
+[32m
+[QUARK-INFO]: Advanced algorithm start.[0m
+[32m
+[QUARK-INFO]: Applying rotation processing/algorithm...[0m
+R1 Rotation:   0%|          | 0/56 [00:00<?, ?it/s]R1 Rotation:   5%|▌         | 3/56 [00:00<00:01, 29.84it/s]R1 Rotation:  84%|████████▍ | 47/56 [00:00<00:00, 270.09it/s]R1 Rotation: 100%|██████████| 56/56 [00:00<00:00, 251.29it/s]
+R2 Rotation:   0%|          | 0/28 [00:00<?, ?it/s]R2 Rotation: 100%|██████████| 28/28 [00:00<00:00, 5512.60it/s]
+[32m
+[QUARK-INFO]: Advanced algorithm end.[0m
+[32m
+[QUARK-INFO]: Weight calibration start.[0m
+Calibrating all params:   0%|          | 0/1491 [00:00<?, ?it/s]Calibrating all params:   1%|          | 8/1491 [00:00<00:22, 65.59it/s]Calibrating all params:  77%|███████▋  | 1150/1491 [00:00<00:00, 6188.02it/s]Calibrating all params: 100%|██████████| 1491/1491 [00:00<00:00, 5187.46it/s]
+[32m
+[QUARK-INFO]: Weight calibration end.[0m
+[32m
+[QUARK-INFO]: Model quantization has been completed.[0m
+[32m
+[QUARK-INFO]: 
+
+====== QuantizeModel GPU Memory Profiling After Forward ======
+|        Current Total Allocated:        |       0.00GB       |
+|        Current Total Reserved:         |       0.00GB       |
+|            Peak Allocated:             |       0.00GB       |
+|             Peak Reserved:             |       0.00GB       |
+|       Total Allocated Increment:       |       0.00GB       |
+|       Total Reserved Increment:        |       0.00GB       |
+==============================================================
+
+[0m
+[32m
+[QUARK-INFO]: Freeze model start.[0m
+[32m
+[QUARK-INFO]: Freezing quantizers for quantized modules...[0m
+Freezing quantized modules:   0%|          | 0/1491 [00:00<?, ?it/s]Freezing quantized modules:   1%|          | 8/1491 [00:02<08:18,  2.97it/s]Freezing quantized modules:   1%|          | 15/1491 [00:03<05:06,  4.82it/s]Freezing quantized modules:   2%|▏         | 28/1491 [00:04<02:44,  8.87it/s]Freezing quantized modules:   3%|▎         | 50/1491 [00:04<01:13, 19.49it/s]Freezing quantized modules: 100%|██████████| 1491/1491 [00:04<00:00, 348.27it/s]
+[32m
+[QUARK-INFO]: Freeze model end.[0m
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+  Setup completed in 26.8s
+  Running lm_eval...
+  0%|          | 0/200 [00:00<?, ?it/s]100%|██████████| 200/200 [00:00<00:00, 2323.62it/s]
+  0%|          | 0/200 [00:00<?, ?it/s] 62%|██████▏   | 123/200 [00:00<00:00, 1226.67it/s]100%|██████████| 200/200 [00:00<00:00, 1222.36it/s]
+Running loglikelihood requests:   0%|          | 0/1200 [00:00<?, ?it/s]Running loglikelihood requests:   0%|          | 1/1200 [00:00<13:08,  1.52it/s]Running loglikelihood requests:   1%|▏         | 17/1200 [00:00<00:41, 28.59it/s]Running loglikelihood requests:   3%|▎         | 33/1200 [00:00<00:21, 53.42it/s]Running loglikelihood requests:   4%|▍         | 49/1200 [00:00<00:15, 75.28it/s]Running loglikelihood requests:   6%|▌         | 73/1200 [00:01<00:10, 105.69it/s]Running loglikelihood requests:   8%|▊         | 97/1200 [00:01<00:08, 128.74it/s]Running loglikelihood requests:  10%|█         | 121/1200 [00:01<00:07, 145.54it/s]Running loglikelihood requests:  12%|█▏        | 145/1200 [00:01<00:06, 157.56it/s]Running loglikelihood requests:  14%|█▍        | 169/1200 [00:01<00:06, 166.69it/s]Running loglikelihood requests:  16%|█▌        | 193/1200 [00:01<00:05, 173.76it/s]Running loglikelihood requests:  18%|█▊        | 217/1200 [00:01<00:05, 179.16it/s]Running loglikelihood requests:  20%|██        | 241/1200 [00:02<00:05, 182.81it/s]Running loglikelihood requests:  22%|██▏       | 265/1200 [00:02<00:05, 185.93it/s]Running loglikelihood requests:  24%|██▍       | 289/1200 [00:02<00:04, 188.18it/s]Running loglikelihood requests:  26%|██▌       | 313/1200 [00:02<00:04, 189.85it/s]Running loglikelihood requests:  28%|██▊       | 337/1200 [00:02<00:04, 191.39it/s]Running loglikelihood requests:  31%|███       | 369/1200 [00:02<00:03, 208.23it/s]Running loglikelihood requests:  33%|███▎      | 393/1200 [00:02<00:03, 216.22it/s]Running loglikelihood requests:  35%|███▍      | 419/1200 [00:02<00:03, 227.82it/s]Running loglikelihood requests:  37%|███▋      | 449/1200 [00:02<00:03, 229.00it/s]Running loglikelihood requests:  40%|████      | 481/1200 [00:03<00:03, 234.69it/s]Running loglikelihood requests:  43%|████▎     | 513/1200 [00:03<00:02, 238.30it/s]Running loglikelihood requests:  45%|████▍     | 537/1200 [00:03<00:02, 233.88it/s]Running loglikelihood requests:  47%|████▋     | 561/1200 [00:03<00:02, 232.01it/s]Running loglikelihood requests:  49%|████▉     | 585/1200 [00:03<00:02, 232.30it/s]Running loglikelihood requests:  51%|█████     | 609/1200 [00:03<00:02, 233.84it/s]Running loglikelihood requests:  53%|█████▎    | 639/1200 [00:03<00:02, 252.57it/s]Running loglikelihood requests:  55%|█████▌    | 665/1200 [00:03<00:02, 236.49it/s]Running loglikelihood requests:  58%|█████▊    | 697/1200 [00:04<00:02, 244.11it/s]Running loglikelihood requests:  61%|██████    | 729/1200 [00:04<00:01, 249.35it/s]Running loglikelihood requests:  63%|██████▎   | 761/1200 [00:04<00:01, 253.34it/s]Running loglikelihood requests:  66%|██████▌   | 793/1200 [00:04<00:01, 256.47it/s]Running loglikelihood requests:  69%|██████▉   | 825/1200 [00:04<00:01, 259.71it/s]Running loglikelihood requests:  71%|███████▏  | 856/1200 [00:04<00:01, 272.96it/s]Running loglikelihood requests:  74%|███████▎  | 884/1200 [00:04<00:01, 261.73it/s]Running loglikelihood requests:  76%|███████▌  | 913/1200 [00:04<00:01, 256.54it/s]Running loglikelihood requests:  79%|███████▉  | 945/1200 [00:04<00:00, 260.43it/s]Running loglikelihood requests:  81%|████████▏ | 977/1200 [00:05<00:00, 263.36it/s]Running loglikelihood requests:  84%|████████▍ | 1009/1200 [00:05<00:00, 265.14it/s]Running loglikelihood requests:  87%|████████▋ | 1041/1200 [00:05<00:00, 267.21it/s]Running loglikelihood requests:  90%|████████▉ | 1074/1200 [00:05<00:00, 262.74it/s]Running loglikelihood requests:  92%|█████████▏| 1101/1200 [00:05<00:00, 263.80it/s]Running loglikelihood requests:  94%|█████████▍| 1128/1200 [00:05<00:00, 265.09it/s]Running loglikelihood requests:  96%|█████████▋| 1155/1200 [00:05<00:00, 243.47it/s]Running loglikelihood requests:  98%|█████████▊| 1180/1200 [00:05<00:00, 242.84it/s]Running loglikelihood requests: 100%|██████████| 1200/1200 [00:05<00:00, 202.08it/s]
+    hellaswag: acc_norm = 0.4450
+    piqa: acc_norm = 0.6100
+  Evaluation done in 39.2s
+
+==========================================================================================
+COMPARISON TABLE — Quark Rotation + MXFP4
+==========================================================================================
+Task            | rotation_mxfp4 
+---------------------------------
+hellaswag       | 0.4450         
+piqa            | 0.6100         
+==========================================================================================

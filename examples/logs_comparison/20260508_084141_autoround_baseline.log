@@ -1,0 +1,45 @@
+======================================================================
+Auto-Round: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      full
+  Batch size: 8
+  Device:     cuda:6
+  Levels:     ['baseline_fp16', 'mxfp4_only']
+  Quant:      MXFP4 (RTN, iters=0)
+  Rotation:   None (online R1, QuaRot mode)
+======================================================================
+
+======================================================================
+  Evaluating: baseline_fp16
+======================================================================
+  Loading FP16 baseline model...
+Traceback (most recent call last):
+  File "/data/lkk/quarot/auto-round/examples/test_autoround_rotation_mxfp4.py", line 304, in <module>
+    main()
+  File "/data/lkk/quarot/auto-round/examples/test_autoround_rotation_mxfp4.py", line 190, in main
+    ).to(args.device)
+      ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/transformers/modeling_utils.py", line 4343, in to
+    return super().to(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1381, in to
+    return self._apply(convert)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 964, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1367, in convert
+    return t.to(
+           ^^^^^
+torch.AcceleratorError: CUDA error: invalid device ordinal
+GPU device may be out of range, do you have enough GPUs?
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+

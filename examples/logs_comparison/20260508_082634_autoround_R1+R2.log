@@ -1,0 +1,137 @@
+[SpinQuant] Starting preprocessing...
+[SpinQuant] Model architecture info: hidden_size=1024, head_dim=128, num_q_heads=16, num_kv_heads=8, intermediate_size=3072
+[SpinQuant] Custom rotation_size=128 → R1 size=128, R4 size=128 (R2/R3 always use head_dim=128)
+[SpinQuant] Rotation config: R1=True, R2=True, R3=False, R4=False, online_r1=True, trainable_rotation=False, trainable_smooth=False
+[SpinQuant] Online R1: skipping untie embeddings (embed_tokens unchanged)
+[SpinQuant] Online R1: skipping RMSNorm fusion (not needed)
+[SpinQuant] Initialising rotation matrices...
+[SpinQuant] R1: Random Hadamard [128×128] block rotation (8 blocks, fixed, offline fuse)
+[SpinQuant] R2: Random Hadamard [128×128] per head (fixed, offline fuse)
+[SpinQuant] Applying online R1 rotation (weight + activation hooks)...
+[SpinQuant] Online R1: rotated 140 target modules, registered 140 activation hooks (rotation_size=128, lm_head/embed_tokens/o_proj/down_proj unchanged)
+[SpinQuant] R2 fused into 28 layers (v_proj out + o_proj in, head_dim=128)
+
+====================================================================================================
+SpinQuant Transformation Summary
+====================================================================================================
+
+Global Transforms:
+  Component                      Transform                                          Status
+  ------------------------------ -------------------------------------------------- ----------
+  embed_tokens / lm_head         Untie word embeddings (skipped: online R1)         - n/a
+  All RMSNorm layers             Fuse gamma (skipped: online R1)                    - n/a
+  Residual stream (R1)           Block Hadamard 128×128, 8 blocks (online)          ✓
+
+Per-Layer Transforms:
+  Layer                               R1 (online)          R2 (weight fuse)     R3 (online hook)       R4 (online hook)      
+  ----------------------------------- -------------------- -------------------- ---------------------- ----------------------
+  model.embed_tokens                  -                    -                    -                      -                     
+  layers.0.self_attn                  q/k/v:W@H+hook       H(128) v↔o           -                      -                     
+  layers.0.mlp                        g/u:W@H+hook         -                    -                      -                     
+  layers.1.self_attn                  q/k/v:W@H+hook       H(128) v↔o           -                      -                     
+  layers.1.mlp                        g/u:W@H+hook         -                    -                      -                     
+    ... (same pattern for all layers)
+  layers.27.self_attn                 q/k/v:W@H+hook       H(128) v↔o           -                      -                     
+  layers.27.mlp                       g/u:W@H+hook         -                    -                      -                     
+  model.lm_head                       -                    -                    -                      -                     
+
+Registered Hooks:
+  R1 online hooks (Hadamard on target module input):          140 modules
+  R3 monkeypatch (apply_rotary_pos_emb → QKRotationWrapper):  0 attention layers
+  R4 forward_pre_hook (block Hadamard on down_proj input):    0 MLP layers
+
+Totals:
+  Transformer layers:   28
+  Online R1 targets:    28×(q/k/v_proj, gate/up_proj) = 140 modules
+  Offline-fused params: 28×(v_proj↔o_proj)
+  Online hooks:         140 total (140 R1 + 0 R3 + 0 R4)
+  Inference overhead:   R1=O(seq×hidden×log₂H) per module
+                        R3=none
+                        R4=none
+====================================================================================================
+[SpinQuant] Preprocessing complete!
+[38;20m2026-05-08 08:31:53 INFO config.py L50: `enable_opt_rtn` is turned on, set `--disable_opt_rtn` for higher speed at the cost of accuracy.[0m
+[38;20m2026-05-08 08:31:53 INFO entry.py L491: Using LLM mode (new architecture).[0m
+[33;1m2026-05-08 08:31:53 WARNING base.py L193: unrecognized keys ['enable_alg_ext', 'QuantizationConfig', 'dataset', 'iters', 'processor', 'image_processor', 'template', 'extra_data_dir', 'guidance_scale', 'num_inference_steps', 'generator_seed'] were passed. Please check them. If you use old api, just ignore this warning.[0m
+[38;20m2026-05-08 08:31:53 INFO base.py L48: ModelContext context initialized.[0m
+[38;20m2026-05-08 08:31:53 INFO model.py L122: using torch.float16 for quantization tuning[0m
+[38;20m2026-05-08 08:31:53 INFO base.py L48: CompressContext context initialized.[0m
+[33;1m2026-05-08 08:31:53 WARNING base.py L657: force to use bf16 for quantization tuning when enabling activation quantization[0m
+[33;1m2026-05-08 08:31:53 WARNING device.py L963: cuda in `device_map` dose not match any modules, please have a check[0m
+[38;20m2026-05-08 08:31:54 INFO zero_shot.py L136: RTN mode detected (iters=0): force blockwise quantization to avoid layer-wise full-model materialization.[0m
+======================================================================
+Auto-Round: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      200
+  Batch size: 8
+  Device:     cuda:6
+  Levels:     ['rotation_mxfp4']
+  Quant:      MXFP4 (RTN, iters=0)
+  Rotation:   R1+R2 (online R1, QuaRot mode)
+  Rot. size:  128
+======================================================================
+
+======================================================================
+  Evaluating: rotation_mxfp4
+======================================================================
+  Step 1: Loading model and applying rotation (R1+R2)...
+  Step 2: Quantizing rotated model with MXFP4...
+  0%|          | 0/28 [00:00<?, ?it/s]Quantizing model.layers.0:   0%|          | 0/28 [00:00<?, ?it/s][38;20m2026-05-08 08:31:55 INFO offload.py L703: OffloadManager (compressor): tempdir = /data/lkk/quarot/auto-round/examples/ar_work_space/offload/compressor_ma084i4g[0m
+[38;20m2026-05-08 08:31:55 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.0:   4%|▎         | 1/28 [00:00<00:24,  1.10it/s]Quantizing model.layers.1:   4%|▎         | 1/28 [00:00<00:24,  1.10it/s][38;20m2026-05-08 08:31:56 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.1:   7%|▋         | 2/28 [00:01<00:18,  1.37it/s]Quantizing model.layers.2:   7%|▋         | 2/28 [00:01<00:18,  1.37it/s][38;20m2026-05-08 08:31:58 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.2:  11%|█         | 3/28 [00:03<00:33,  1.32s/it]Quantizing model.layers.3:  11%|█         | 3/28 [00:03<00:33,  1.32s/it][38;20m2026-05-08 08:31:59 INFO device.py L1802: 'peak_ram': 1.36GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.3:  14%|█▍        | 4/28 [00:04<00:24,  1.02s/it]Quantizing model.layers.4:  14%|█▍        | 4/28 [00:04<00:24,  1.02s/it][38;20m2026-05-08 08:31:59 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.4:  18%|█▊        | 5/28 [00:04<00:19,  1.21it/s]Quantizing model.layers.5:  18%|█▊        | 5/28 [00:04<00:19,  1.21it/s][38;20m2026-05-08 08:32:01 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.5:  21%|██▏       | 6/28 [00:06<00:28,  1.29s/it]Quantizing model.layers.6:  21%|██▏       | 6/28 [00:06<00:28,  1.29s/it][38;20m2026-05-08 08:32:02 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.6:  25%|██▌       | 7/28 [00:07<00:21,  1.04s/it]Quantizing model.layers.7:  25%|██▌       | 7/28 [00:07<00:21,  1.04s/it][38;20m2026-05-08 08:32:02 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.7:  29%|██▊       | 8/28 [00:07<00:17,  1.16it/s]Quantizing model.layers.8:  29%|██▊       | 8/28 [00:07<00:17,  1.16it/s][38;20m2026-05-08 08:32:04 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.8:  32%|███▏      | 9/28 [00:09<00:23,  1.26s/it]Quantizing model.layers.9:  32%|███▏      | 9/28 [00:09<00:23,  1.26s/it][38;20m2026-05-08 08:32:05 INFO device.py L1802: 'peak_ram': 1.37GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.9:  36%|███▌      | 10/28 [00:10<00:18,  1.03s/it]Quantizing model.layers.10:  36%|███▌      | 10/28 [00:10<00:18,  1.03s/it][38;20m2026-05-08 08:32:05 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.10:  39%|███▉      | 11/28 [00:10<00:14,  1.15it/s]Quantizing model.layers.11:  39%|███▉      | 11/28 [00:10<00:14,  1.15it/s][38;20m2026-05-08 08:32:07 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.11:  43%|████▎     | 12/28 [00:13<00:19,  1.24s/it]Quantizing model.layers.12:  43%|████▎     | 12/28 [00:13<00:19,  1.24s/it][38;20m2026-05-08 08:32:08 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.12:  46%|████▋     | 13/28 [00:13<00:15,  1.02s/it]Quantizing model.layers.13:  46%|████▋     | 13/28 [00:13<00:15,  1.02s/it][38;20m2026-05-08 08:32:08 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.13:  50%|█████     | 14/28 [00:14<00:12,  1.16it/s]Quantizing model.layers.14:  50%|█████     | 14/28 [00:14<00:12,  1.16it/s][38;20m2026-05-08 08:32:11 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.14:  54%|█████▎    | 15/28 [00:16<00:15,  1.23s/it]Quantizing model.layers.15:  54%|█████▎    | 15/28 [00:16<00:15,  1.23s/it][38;20m2026-05-08 08:32:11 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.15:  57%|█████▋    | 16/28 [00:16<00:12,  1.02s/it]Quantizing model.layers.16:  57%|█████▋    | 16/28 [00:16<00:12,  1.02s/it][38;20m2026-05-08 08:32:12 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.16:  61%|██████    | 17/28 [00:17<00:09,  1.15it/s]Quantizing model.layers.17:  61%|██████    | 17/28 [00:17<00:09,  1.15it/s][38;20m2026-05-08 08:32:14 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.17:  64%|██████▍   | 18/28 [00:19<00:12,  1.22s/it]Quantizing model.layers.18:  64%|██████▍   | 18/28 [00:19<00:12,  1.22s/it][38;20m2026-05-08 08:32:14 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.18:  68%|██████▊   | 19/28 [00:19<00:09,  1.01s/it]Quantizing model.layers.19:  68%|██████▊   | 19/28 [00:19<00:09,  1.01s/it][38;20m2026-05-08 08:32:15 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.19:  71%|███████▏  | 20/28 [00:20<00:06,  1.15it/s]Quantizing model.layers.20:  71%|███████▏  | 20/28 [00:20<00:06,  1.15it/s][38;20m2026-05-08 08:32:17 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.20:  75%|███████▌  | 21/28 [00:22<00:08,  1.22s/it]Quantizing model.layers.21:  75%|███████▌  | 21/28 [00:22<00:08,  1.22s/it][38;20m2026-05-08 08:32:17 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.21:  79%|███████▊  | 22/28 [00:22<00:06,  1.02s/it]Quantizing model.layers.22:  79%|███████▊  | 22/28 [00:22<00:06,  1.02s/it][38;20m2026-05-08 08:32:18 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.22:  82%|████████▏ | 23/28 [00:23<00:04,  1.14it/s]Quantizing model.layers.23:  82%|████████▏ | 23/28 [00:23<00:04,  1.14it/s][38;20m2026-05-08 08:32:20 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.23:  86%|████████▌ | 24/28 [00:25<00:04,  1.23s/it]Quantizing model.layers.24:  86%|████████▌ | 24/28 [00:25<00:04,  1.23s/it][38;20m2026-05-08 08:32:20 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.24:  89%|████████▉ | 25/28 [00:25<00:03,  1.02s/it]Quantizing model.layers.25:  89%|████████▉ | 25/28 [00:25<00:03,  1.02s/it][38;20m2026-05-08 08:32:21 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.25:  93%|█████████▎| 26/28 [00:26<00:01,  1.15it/s]Quantizing model.layers.26:  93%|█████████▎| 26/28 [00:26<00:01,  1.15it/s][38;20m2026-05-08 08:32:23 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.26:  96%|█████████▋| 27/28 [00:28<00:01,  1.23s/it]Quantizing model.layers.27:  96%|█████████▋| 27/28 [00:28<00:01,  1.23s/it][38;20m2026-05-08 08:32:24 INFO device.py L1802: 'peak_ram': 1.38GB, 'peak_vram': 1.51GB[0m
+Quantizing model.layers.27: 100%|██████████| 28/28 [00:29<00:00,  1.02s/it]Quantizing model.layers.27: 100%|██████████| 28/28 [00:30<00:00,  1.07s/it]
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+Using pre-initialized model
+Selected tasks:
+Task: hellaswag (hellaswag/hellaswag.yaml)
+Task: piqa (piqa/piqa.yaml)
+Building contexts for hellaswag on rank 0...
+  Setup completed in 36.2s
+  Running lm_eval...
+  0%|          | 0/200 [00:00<?, ?it/s]100%|██████████| 200/200 [00:00<00:00, 2352.37it/s]
+Building contexts for piqa on rank 0...
+  0%|          | 0/200 [00:00<?, ?it/s] 60%|██████    | 120/200 [00:00<00:00, 1191.65it/s]100%|██████████| 200/200 [00:00<00:00, 1105.33it/s]
+Running loglikelihood requests
+Running loglikelihood requests:   0%|          | 0/1200 [00:00<?, ?it/s]Running loglikelihood requests:   0%|          | 1/1200 [00:01<24:13,  1.21s/it]Running loglikelihood requests:   1%|          | 9/1200 [00:01<02:13,  8.90it/s]Running loglikelihood requests:   1%|▏         | 17/1200 [00:01<01:07, 17.42it/s]Running loglikelihood requests:   2%|▏         | 25/1200 [00:01<00:45, 25.94it/s]Running loglikelihood requests:   3%|▎         | 33/1200 [00:01<00:34, 33.94it/s]Running loglikelihood requests:   3%|▎         | 41/1200 [00:01<00:28, 40.95it/s]Running loglikelihood requests:   4%|▍         | 49/1200 [00:01<00:24, 46.81it/s]Running loglikelihood requests:   5%|▍         | 57/1200 [00:02<00:22, 51.35it/s]Running loglikelihood requests:   5%|▌         | 65/1200 [00:02<00:20, 54.85it/s]Running loglikelihood requests:   6%|▌         | 73/1200 [00:04<01:35, 11.75it/s]Running loglikelihood requests:   7%|▋         | 81/1200 [00:04<01:11, 15.71it/s]Running loglikelihood requests:   7%|▋         | 89/1200 [00:04<00:54, 20.43it/s]Running loglikelihood requests:   8%|▊         | 97/1200 [00:04<00:42, 25.75it/s]Running loglikelihood requests:   9%|▉         | 105/1200 [00:04<00:34, 31.43it/s]Running loglikelihood requests:   9%|▉         | 113/1200 [00:04<00:29, 37.23it/s]Running loglikelihood requests:  10%|█         | 121/1200 [00:04<00:25, 42.70it/s]Running loglikelihood requests:  11%|█         | 129/1200 [00:04<00:22, 47.15it/s]Running loglikelihood requests:  11%|█▏        | 137/1200 [00:05<00:20, 50.98it/s]Running loglikelihood requests:  12%|█▏        | 145/1200 [00:05<00:19, 54.46it/s]Running loglikelihood requests:  13%|█▎        | 153/1200 [00:05<00:18, 56.98it/s]Running loglikelihood requests:  13%|█▎        | 161/1200 [00:05<00:17, 58.67it/s]Running loglikelihood requests:  14%|█▍        | 169/1200 [00:05<00:17, 60.27it/s]Running loglikelihood requests:  15%|█▍        | 177/1200 [00:05<00:16, 61.49it/s]Running loglikelihood requests:  15%|█▌        | 185/1200 [00:05<00:16, 62.34it/s]Running loglikelihood requests:  16%|█▌        | 193/1200 [00:05<00:16, 62.88it/s]Running loglikelihood requests:  17%|█▋        | 201/1200 [00:06<00:15, 63.36it/s]Running loglikelihood requests:  17%|█▋        | 209/1200 [00:06<00:15, 63.84it/s]Running loglikelihood requests:  18%|█▊        | 217/1200 [00:06<00:15, 64.12it/s]Running loglikelihood requests:  19%|█▉        | 225/1200 [00:06<00:15, 64.25it/s]Running loglikelihood requests:  19%|█▉        | 233/1200 [00:06<00:15, 64.01it/s]Running loglikelihood requests:  20%|██        | 241/1200 [00:06<00:14, 64.26it/s]Running loglikelihood requests:  21%|██        | 249/1200 [00:06<00:14, 64.24it/s]Running loglikelihood requests:  21%|██▏       | 257/1200 [00:06<00:14, 64.38it/s]Running loglikelihood requests:  22%|██▏       | 265/1200 [00:07<00:14, 64.26it/s]Running loglikelihood requests:  23%|██▎       | 273/1200 [00:07<00:14, 63.96it/s]Running loglikelihood requests:  23%|██▎       | 281/1200 [00:07<00:14, 63.96it/s]Running loglikelihood requests:  24%|██▍       | 289/1200 [00:07<00:14, 63.86it/s]Running loglikelihood requests:  25%|██▍       | 297/1200 [00:07<00:14, 63.61it/s]Running loglikelihood requests:  25%|██▌       | 305/1200 [00:07<00:13, 64.05it/s]Running loglikelihood requests:  26%|██▌       | 313/1200 [00:07<00:13, 64.37it/s]Running loglikelihood requests:  27%|██▋       | 321/1200 [00:07<00:13, 64.52it/s]Running loglikelihood requests:  27%|██▋       | 329/1200 [00:08<00:13, 64.54it/s]Running loglikelihood requests:  28%|██▊       | 337/1200 [00:08<00:13, 64.68it/s]Running loglikelihood requests:  29%|██▉       | 345/1200 [00:08<00:13, 64.77it/s]Running loglikelihood requests:  29%|██▉       | 353/1200 [00:08<00:13, 64.84it/s]Running loglikelihood requests:  30%|███       | 361/1200 [00:08<00:13, 64.44it/s]Running loglikelihood requests:  31%|███       | 369/1200 [00:08<00:12, 64.29it/s]Running loglikelihood requests:  31%|███▏      | 377/1200 [00:08<00:12, 64.34it/s]Running loglikelihood requests:  32%|███▏      | 385/1200 [00:08<00:12, 64.47it/s]Running loglikelihood requests:  33%|███▎      | 393/1200 [00:09<00:12, 64.39it/s]Running loglikelihood requests:  33%|███▎      | 401/1200 [00:09<00:12, 63.19it/s]Running loglikelihood requests:  34%|███▍      | 409/1200 [00:09<00:12, 63.70it/s]Running loglikelihood requests:  35%|███▍      | 417/1200 [00:09<00:12, 64.02it/s]Running loglikelihood requests:  35%|███▌      | 425/1200 [00:09<00:12, 64.11it/s]Running loglikelihood requests:  36%|███▌      | 433/1200 [00:09<00:11, 64.24it/s]Running loglikelihood requests:  37%|███▋      | 441/1200 [00:09<00:11, 64.39it/s]Running loglikelihood requests:  37%|███▋      | 449/1200 [00:09<00:11, 64.63it/s]Running loglikelihood requests:  38%|███▊      | 457/1200 [00:10<00:11, 64.76it/s]Running loglikelihood requests:  39%|███▉      | 465/1200 [00:10<00:11, 64.97it/s]Running loglikelihood requests:  39%|███▉      | 473/1200 [00:10<00:11, 65.03it/s]Running loglikelihood requests:  40%|████      | 481/1200 [00:10<00:11, 65.18it/s]Running loglikelihood requests:  41%|████      | 489/1200 [00:10<00:10, 65.26it/s]Running loglikelihood requests:  41%|████▏     | 497/1200 [00:10<00:10, 64.85it/s]Running loglikelihood requests:  42%|████▏     | 505/1200 [00:10<00:10, 64.55it/s]Running loglikelihood requests:  43%|████▎     | 513/1200 [00:10<00:10, 64.73it/s]Running loglikelihood requests:  43%|████▎     | 521/1200 [00:11<00:10, 64.81it/s]Running loglikelihood requests:  44%|████▍     | 529/1200 [00:11<00:10, 64.92it/s]Running loglikelihood requests:  45%|████▍     | 537/1200 [00:11<00:10, 65.14it/s]Running loglikelihood requests:  45%|████▌     | 545/1200 [00:11<00:10, 65.32it/s]Running loglikelihood requests:  46%|████▌     | 553/1200 [00:11<00:09, 65.51it/s]Running loglikelihood requests:  47%|████▋     | 561/1200 [00:11<00:09, 65.61it/s]Running loglikelihood requests:  47%|████▋     | 569/1200 [00:11<00:09, 65.38it/s]Running loglikelihood requests:  48%|████▊     | 577/1200 [00:11<00:09, 65.10it/s]Running loglikelihood requests:  49%|████▉     | 585/1200 [00:12<00:09, 65.13it/s]Running loglikelihood requests:  49%|████▉     | 593/1200 [00:12<00:09, 65.23it/s]Running loglikelihood requests:  50%|█████     | 601/1200 [00:12<00:09, 65.33it/s]Running loglikelihood requests:  51%|█████     | 609/1200 [00:12<00:09, 65.45it/s]Running loglikelihood requests:  51%|█████▏    | 617/1200 [00:12<00:08, 65.47it/s]Running loglikelihood requests:  52%|█████▏    | 625/1200 [00:12<00:08, 65.48it/s]Running loglikelihood requests:  53%|█████▎    | 633/1200 [00:12<00:08, 65.60it/s]Running loglikelihood requests:  53%|█████▎    | 641/1200 [00:12<00:08, 65.58it/s]Running loglikelihood requests:  54%|█████▍    | 649/1200 [00:12<00:08, 65.66it/s]Running loglikelihood requests:  55%|█████▍    | 657/1200 [00:13<00:08, 65.72it/s]Running loglikelihood requests:  55%|█████▌    | 665/1200 [00:13<00:08, 65.76it/s]Running loglikelihood requests:  56%|█████▌    | 673/1200 [00:13<00:08, 65.74it/s]Running loglikelihood requests:  57%|█████▋    | 681/1200 [00:13<00:07, 65.82it/s]Running loglikelihood requests:  57%|█████▋    | 689/1200 [00:13<00:07, 65.81it/s]Running loglikelihood requests:  58%|█████▊    | 697/1200 [00:13<00:07, 65.66it/s]Running loglikelihood requests:  59%|█████▉    | 705/1200 [00:13<00:07, 65.72it/s]Running loglikelihood requests:  59%|█████▉    | 713/1200 [00:13<00:07, 65.68it/s]Running loglikelihood requests:  60%|██████    | 721/1200 [00:14<00:07, 65.64it/s]Running loglikelihood requests:  61%|██████    | 729/1200 [00:14<00:07, 65.81it/s]Running loglikelihood requests:  61%|██████▏   | 737/1200 [00:14<00:07, 65.73it/s]Running loglikelihood requests:  62%|██████▏   | 745/1200 [00:14<00:06, 65.81it/s]Running loglikelihood requests:  63%|██████▎   | 753/1200 [00:14<00:06, 65.93it/s]Running loglikelihood requests:  63%|██████▎   | 761/1200 [00:14<00:06, 65.93it/s]Running loglikelihood requests:  64%|██████▍   | 769/1200 [00:14<00:06, 65.88it/s]Running loglikelihood requests:  65%|██████▍   | 777/1200 [00:14<00:06, 65.96it/s]Running loglikelihood requests:  65%|██████▌   | 785/1200 [00:15<00:06, 65.69it/s]Running loglikelihood requests:  66%|██████▌   | 793/1200 [00:15<00:06, 65.56it/s]Running loglikelihood requests:  67%|██████▋   | 801/1200 [00:15<00:06, 65.60it/s]Running loglikelihood requests:  67%|██████▋   | 809/1200 [00:15<00:05, 65.67it/s]Running loglikelihood requests:  68%|██████▊   | 817/1200 [00:15<00:05, 65.38it/s]Running loglikelihood requests:  69%|██████▉   | 825/1200 [00:15<00:05, 65.28it/s]Running loglikelihood requests:  69%|██████▉   | 833/1200 [00:15<00:05, 65.12it/s]Running loglikelihood requests:  70%|███████   | 841/1200 [00:15<00:05, 65.11it/s]Running loglikelihood requests:  71%|███████   | 849/1200 [00:16<00:05, 65.19it/s]Running loglikelihood requests:  71%|███████▏  | 857/1200 [00:16<00:05, 65.27it/s]Running loglikelihood requests:  72%|███████▏  | 865/1200 [00:16<00:05, 65.18it/s]Running loglikelihood requests:  73%|███████▎  | 873/1200 [00:16<00:05, 65.14it/s]Running loglikelihood requests:  73%|███████▎  | 881/1200 [00:16<00:04, 65.17it/s]Running loglikelihood requests:  74%|███████▍  | 889/1200 [00:16<00:04, 65.02it/s]Running loglikelihood requests:  75%|███████▍  | 897/1200 [00:16<00:04, 64.93it/s]Running loglikelihood requests:  75%|███████▌  | 905/1200 [00:16<00:04, 64.95it/s]Running loglikelihood requests:  76%|███████▌  | 913/1200 [00:17<00:04, 65.01it/s]Running loglikelihood requests:  77%|███████▋  | 921/1200 [00:17<00:04, 64.91it/s]Running loglikelihood requests:  77%|███████▋  | 929/1200 [00:17<00:04, 65.00it/s]Running loglikelihood requests:  78%|███████▊  | 937/1200 [00:17<00:04, 65.10it/s]Running loglikelihood requests:  79%|███████▉  | 945/1200 [00:17<00:03, 65.25it/s]Running loglikelihood requests:  79%|███████▉  | 953/1200 [00:17<00:03, 65.34it/s]Running loglikelihood requests:  80%|████████  | 961/1200 [00:17<00:03, 65.22it/s]Running loglikelihood requests:  81%|████████  | 969/1200 [00:17<00:03, 65.41it/s]Running loglikelihood requests:  81%|████████▏ | 977/1200 [00:17<00:03, 65.36it/s]Running loglikelihood requests:  82%|████████▏ | 985/1200 [00:18<00:03, 65.22it/s]Running loglikelihood requests:  83%|████████▎ | 993/1200 [00:18<00:03, 65.11it/s]Running loglikelihood requests:  83%|████████▎ | 1001/1200 [00:18<00:03, 64.94it/s]Running loglikelihood requests:  84%|████████▍ | 1009/1200 [00:18<00:02, 64.95it/s]Running loglikelihood requests:  85%|████████▍ | 1017/1200 [00:18<00:02, 65.03it/s]Running loglikelihood requests:  85%|████████▌ | 1025/1200 [00:18<00:02, 64.78it/s]Running loglikelihood requests:  86%|████████▌ | 1033/1200 [00:18<00:02, 64.71it/s]Running loglikelihood requests:  87%|████████▋ | 1041/1200 [00:18<00:02, 64.81it/s]Running loglikelihood requests:  87%|████████▋ | 1049/1200 [00:19<00:02, 64.88it/s]Running loglikelihood requests:  88%|████████▊ | 1057/1200 [00:19<00:02, 65.00it/s]Running loglikelihood requests:  89%|████████▉ | 1066/1200 [00:19<00:01, 67.48it/s]Running loglikelihood requests:  90%|████████▉ | 1074/1200 [00:19<00:01, 66.66it/s]Running loglikelihood requests:  90%|█████████ | 1082/1200 [00:19<00:01, 66.32it/s]Running loglikelihood requests:  91%|█████████ | 1090/1200 [00:19<00:01, 66.04it/s]Running loglikelihood requests:  92%|█████████▏| 1098/1200 [00:19<00:01, 66.02it/s]Running loglikelihood requests:  92%|█████████▏| 1106/1200 [00:19<00:01, 65.87it/s]Running loglikelihood requests:  93%|█████████▎| 1114/1200 [00:20<00:01, 65.74it/s]Running loglikelihood requests:  94%|█████████▎| 1122/1200 [00:20<00:01, 65.60it/s]Running loglikelihood requests:  94%|█████████▍| 1130/1200 [00:20<00:01, 65.55it/s]Running loglikelihood requests:  95%|█████████▍| 1138/1200 [00:20<00:00, 65.48it/s]Running loglikelihood requests:  96%|█████████▌| 1146/1200 [00:20<00:00, 65.54it/s]Running loglikelihood requests:  96%|█████████▌| 1154/1200 [00:20<00:00, 65.46it/s]Running loglikelihood requests:  97%|█████████▋| 1162/1200 [00:20<00:00, 65.23it/s]Running loglikelihood requests:  98%|█████████▊| 1170/1200 [00:20<00:00, 65.14it/s]Running loglikelihood requests:  98%|█████████▊| 1178/1200 [00:21<00:00, 65.13it/s]Running loglikelihood requests:  99%|█████████▉| 1186/1200 [00:21<00:00, 65.11it/s]Running loglikelihood requests: 100%|█████████▉| 1194/1200 [00:21<00:00, 65.30it/s]Running loglikelihood requests: 100%|██████████| 1200/1200 [00:21<00:00, 56.30it/s]
+    hellaswag: acc_norm = 0.4250
+    piqa: acc_norm = 0.6050
+  Evaluation done in 70.6s
+
+==========================================================================================
+COMPARISON TABLE — Auto-Round Rotation + MXFP4
+==========================================================================================
+Task            | rotation_mxfp4 
+---------------------------------
+hellaswag       | 0.4250         
+piqa            | 0.6050         
+==========================================================================================

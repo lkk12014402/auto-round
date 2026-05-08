@@ -1,0 +1,192 @@
+[32m
+[QUARK-INFO]: C++ kernel compilation check start.[0m
+[32m
+[QUARK-INFO]: C++ kernel build directory: /root/.cache/torch_extensions/py312_cu128/kernel_ext. First-time compilation may take a few minutes... Building for architectures TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 9.0 10.0 12.0+PTX'.[0m
+[32m
+[QUARK-INFO]: C++ kernel compilation is already complete. Ending the C++ kernel compilation check. Total time: 0.4004 seconds[0m
+`torch_dtype` is deprecated! Use `dtype` instead!
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+======================================================================
+Quark: Rotation + MXFP4 Quantization Evaluation
+======================================================================
+  Model:      Qwen/Qwen3-0.6B
+  Tasks:      piqa,hellaswag
+  Limit:      200
+  Batch size: 8
+  Device:     cuda:7
+  Levels:     ['baseline_fp16', 'mxfp4_only']
+  Quant:      MXFP4 (W4A4, weight static + activation dynamic)
+  Rotation:   None (Hadamard, no training)
+  Rot. size:  128
+======================================================================
+Initializing tokenizer from Qwen/Qwen3-0.6B
+
+======================================================================
+  Evaluating: baseline_fp16
+======================================================================
+  Loading FP16 baseline model...
+  Setup completed in 2.2s
+  Running lm_eval...
+  0%|          | 0/200 [00:00<?, ?it/s]100%|██████████| 200/200 [00:00<00:00, 2002.26it/s]
+  0%|          | 0/200 [00:00<?, ?it/s] 50%|█████     | 101/200 [00:00<00:00, 1008.58it/s]100%|██████████| 200/200 [00:00<00:00, 1015.65it/s]
+Running loglikelihood requests:   0%|          | 0/1200 [00:00<?, ?it/s]Running loglikelihood requests:   0%|          | 1/1200 [00:02<42:18,  2.12s/it]Running loglikelihood requests:   1%|          | 9/1200 [00:02<03:44,  5.30it/s]Running loglikelihood requests:   4%|▍         | 49/1200 [00:02<00:31, 36.86it/s]Running loglikelihood requests:   6%|▌         | 73/1200 [00:02<00:25, 44.35it/s]Running loglikelihood requests:  10%|█         | 121/1200 [00:02<00:12, 88.25it/s]Running loglikelihood requests:  14%|█▍        | 169/1200 [00:02<00:07, 137.40it/s]Running loglikelihood requests:  18%|█▊        | 217/1200 [00:03<00:05, 189.40it/s]Running loglikelihood requests:  22%|██▏       | 265/1200 [00:03<00:03, 241.20it/s]Running loglikelihood requests:  27%|██▋       | 319/1200 [00:03<00:02, 301.88it/s]Running loglikelihood requests:  30%|███       | 365/1200 [00:03<00:02, 335.69it/s]Running loglikelihood requests:  34%|███▍      | 411/1200 [00:03<00:02, 362.59it/s]Running loglikelihood requests:  38%|███▊      | 457/1200 [00:03<00:01, 383.89it/s]Running loglikelihood requests:  42%|████▏     | 505/1200 [00:03<00:01, 404.11it/s]Running loglikelihood requests:  46%|████▌     | 553/1200 [00:03<00:01, 415.06it/s]Running loglikelihood requests:  50%|█████     | 601/1200 [00:03<00:01, 425.72it/s]Running loglikelihood requests:  54%|█████▍    | 649/1200 [00:04<00:01, 431.77it/s]Running loglikelihood requests:  58%|█████▊    | 697/1200 [00:04<00:01, 436.62it/s]Running loglikelihood requests:  62%|██████▏   | 745/1200 [00:04<00:01, 437.95it/s]Running loglikelihood requests:  66%|██████▌   | 793/1200 [00:04<00:00, 439.25it/s]Running loglikelihood requests:  70%|██████▉   | 838/1200 [00:04<00:00, 438.43it/s]Running loglikelihood requests:  74%|███████▎  | 883/1200 [00:04<00:00, 431.17it/s]Running loglikelihood requests:  77%|███████▋  | 929/1200 [00:04<00:00, 430.20it/s]Running loglikelihood requests:  81%|████████▏ | 977/1200 [00:04<00:00, 434.34it/s]Running loglikelihood requests:  85%|████████▌ | 1025/1200 [00:04<00:00, 441.91it/s]Running loglikelihood requests:  90%|████████▉ | 1074/1200 [00:04<00:00, 446.67it/s]Running loglikelihood requests:  94%|█████████▍| 1130/1200 [00:05<00:00, 464.94it/s]Running loglikelihood requests:  99%|█████████▉| 1186/1200 [00:05<00:00, 479.77it/s]Running loglikelihood requests: 100%|██████████| 1200/1200 [00:05<00:00, 230.19it/s]
+[33m
+[QUARK-WARNING]: quark.torch.config.config.Config is deprecated and will be removed in a future release. Please use quark.torch.config.config.QConfig instead.[0m
+Repo card metadata block was not found. Setting CardData to empty.
+[32m
+[QUARK-INFO]: Configuration checking start.[0m
+[32m
+[QUARK-INFO]: Configuration checking end. The configuration is effective. This is weight quantization and activation dynamic quantization.[0m
+[32m
+[QUARK-INFO]: 
+
+============== QuantizeModel GPU Memory Profiling==============
+|        Total Allocated Memory:         |       0.00GB       |
+|         Total Reserved Memory:         |       0.00GB       |
+|           Total Free Memory:           |       1.13GB       |
+===============================================================
+
+[0m
+[32m
+[QUARK-INFO]: Quantizing with the quantization configuration:
+Config(
+    global_quant_config=QLayerConfig(
+        input_tensors=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=True,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        output_tensors=None,
+        weight=QTensorConfig(
+            dtype=Dtype.fp4,
+            observer_cls=<class 'quark.torch.quantization.observer.observer.PerBlockMXObserver'>,
+            is_dynamic=False,
+            qscheme=QSchemeType.per_group,
+            ch_axis=-1,
+            group_size=32,
+            symmetric=None,
+            round_method=RoundType.half_even,
+            scale_type=ScaleType.float,
+            scale_format="e8m0",
+            scale_calculation_mode="even",
+            qat_spec=None,
+            mx_element_dtype=None,
+            zero_point_type=ZeroPointType.int32,
+            is_scale_quant=False,
+        ),
+        bias=None,
+        target_device=None,
+    ),
+    exclude=['lm_head'],
+    algo_config=None,
+    log_severity_level=1,
+    version="0.11.1+210bbb7",
+    layer_type_quant_config={},
+    layer_quant_config={},
+    kv_cache_quant_config={},
+    kv_cache_group=['*k_proj', '*v_proj'],
+    min_kv_scale=0.0,
+    kv_cache_post_rope=False,
+    softmax_quant_spec=None,
+    quant_mode=QuantizationMode.eager_mode,
+)[0m
+[32m
+[QUARK-INFO]: In-place OPs replacement start.[0m
+[32m
+[QUARK-INFO]: Module exclusion from quantization summary:
+|      Exclude pattern       | Number of modules excluded |
+|          lm_head           |             1              |
+[0m
+    hellaswag: acc_norm = 0.5250
+    piqa: acc_norm = 0.6800
+  Evaluation done in 53.6s
+
+======================================================================
+  Evaluating: mxfp4_only
+======================================================================
+  Loading model and applying MXFP4 quantization (no rotation)...
+[INFO-Warning] For AWQ benchmark, batch_size should be 59. Changing batch_size to 59.
+  0%|          | 0/427 [00:00<?, ?it/s]100%|██████████| 427/427 [00:00<00:00, 11614.58it/s]
+[32m
+[QUARK-INFO]: Module replacement for quantization summary:
+|            Original module             |  Number original   |  Number replaced   |
+|                 Conv2d                 |         0          |         0          |
+|                 Linear                 |        197         |        196         |
+|            ConvTranspose2d             |         0          |         0          |
+|               Embedding                |         1          |         0          |
+|              EmbeddingBag              |         0          |         0          |
+|            Qwen3ForCausalLM            |         1          |         0          |
+|               Qwen3Model               |         1          |         0          |
+|               ModuleList               |         1          |         0          |
+|           Qwen3DecoderLayer            |         28         |         0          |
+|             Qwen3Attention             |         28         |         0          |
+|              Qwen3RMSNorm              |        113         |         0          |
+|                Qwen3MLP                |         28         |         0          |
+|             SiLUActivation             |         28         |         0          |
+|          Qwen3RotaryEmbedding          |         1          |         0          |
+[0m
+[32m
+[QUARK-INFO]: In-place OPs replacement end.[0m
+[32m
+[QUARK-INFO]: Weight calibration start.[0m
+Calibrating all params:   0%|          | 0/1211 [00:00<?, ?it/s]Calibrating all params:  25%|██▌       | 308/1211 [00:00<00:00, 3070.10it/s]Calibrating all params: 100%|██████████| 1211/1211 [00:00<00:00, 6142.49it/s]
+[32m
+[QUARK-INFO]: Weight calibration end.[0m
+[32m
+[QUARK-INFO]: Model quantization has been completed.[0m
+[32m
+[QUARK-INFO]: 
+
+====== QuantizeModel GPU Memory Profiling After Forward ======
+|        Current Total Allocated:        |       0.00GB       |
+|        Current Total Reserved:         |       0.00GB       |
+|            Peak Allocated:             |       0.00GB       |
+|             Peak Reserved:             |       0.00GB       |
+|       Total Allocated Increment:       |       0.00GB       |
+|       Total Reserved Increment:        |       0.00GB       |
+==============================================================
+
+[0m
+[32m
+[QUARK-INFO]: Freeze model start.[0m
+[32m
+[QUARK-INFO]: Freezing quantizers for quantized modules...[0m
+Freezing quantized modules:   0%|          | 0/1211 [00:00<?, ?it/s]Freezing quantized modules:   1%|          | 7/1211 [00:04<11:44,  1.71it/s]Freezing quantized modules:   1%|          | 12/1211 [00:07<11:54,  1.68it/s]Freezing quantized modules:   2%|▏         | 22/1211 [00:10<08:59,  2.21it/s]Freezing quantized modules:   3%|▎         | 40/1211 [00:13<05:20,  3.65it/s]Freezing quantized modules: 100%|██████████| 1211/1211 [00:13<00:00, 89.59it/s]
+[32m
+[QUARK-INFO]: Freeze model end.[0m
+`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+  Setup completed in 29.8s
+  Running lm_eval...
+  0%|          | 0/200 [00:00<?, ?it/s] 94%|█████████▍| 189/200 [00:00<00:00, 1888.70it/s]100%|██████████| 200/200 [00:00<00:00, 1870.64it/s]
+  0%|          | 0/200 [00:00<?, ?it/s] 50%|█████     | 101/200 [00:00<00:00, 1007.93it/s]100%|██████████| 200/200 [00:00<00:00, 1006.61it/s]
+Running loglikelihood requests:   0%|          | 0/1200 [00:00<?, ?it/s]Running loglikelihood requests:   2%|▏         | 25/1200 [00:00<00:05, 216.77it/s]Running loglikelihood requests:   5%|▌         | 65/1200 [00:00<00:03, 288.84it/s]Running loglikelihood requests:   8%|▊         | 97/1200 [00:00<00:03, 300.85it/s]Running loglikelihood requests:  11%|█▏        | 137/1200 [00:00<00:03, 319.66it/s]Running loglikelihood requests:  15%|█▍        | 177/1200 [00:00<00:03, 328.92it/s]Running loglikelihood requests:  18%|█▊        | 217/1200 [00:00<00:02, 332.50it/s]Running loglikelihood requests:  21%|██▏       | 257/1200 [00:00<00:02, 335.44it/s]Running loglikelihood requests:  25%|██▍       | 297/1200 [00:00<00:02, 338.02it/s]Running loglikelihood requests:  28%|██▊       | 337/1200 [00:01<00:02, 338.91it/s]Running loglikelihood requests:  31%|███▏      | 377/1200 [00:01<00:02, 339.29it/s]Running loglikelihood requests:  35%|███▍      | 417/1200 [00:01<00:02, 341.10it/s]Running loglikelihood requests:  38%|███▊      | 457/1200 [00:01<00:02, 341.06it/s]Running loglikelihood requests:  41%|████▏     | 497/1200 [00:01<00:02, 340.92it/s]Running loglikelihood requests:  45%|████▍     | 537/1200 [00:01<00:01, 337.82it/s]Running loglikelihood requests:  48%|████▊     | 577/1200 [00:01<00:01, 333.99it/s]Running loglikelihood requests:  51%|█████▏    | 617/1200 [00:01<00:01, 332.34it/s]Running loglikelihood requests:  55%|█████▍    | 657/1200 [00:01<00:01, 331.35it/s]Running loglikelihood requests:  58%|█████▊    | 693/1200 [00:02<00:01, 338.87it/s]Running loglikelihood requests:  61%|██████    | 728/1200 [00:02<00:01, 340.19it/s]Running loglikelihood requests:  64%|██████▎   | 763/1200 [00:02<00:01, 320.34it/s]Running loglikelihood requests:  66%|██████▋   | 797/1200 [00:02<00:01, 325.61it/s]Running loglikelihood requests:  69%|██████▉   | 833/1200 [00:02<00:01, 312.79it/s]Running loglikelihood requests:  72%|███████▏  | 865/1200 [00:02<00:01, 313.57it/s]Running loglikelihood requests:  75%|███████▍  | 897/1200 [00:02<00:00, 313.92it/s]Running loglikelihood requests:  78%|███████▊  | 937/1200 [00:02<00:00, 318.79it/s]Running loglikelihood requests:  81%|████████▏ | 977/1200 [00:02<00:00, 320.72it/s]Running loglikelihood requests:  84%|████████▍ | 1010/1200 [00:03<00:00, 322.93it/s]Running loglikelihood requests:  87%|████████▋ | 1049/1200 [00:03<00:00, 324.70it/s]Running loglikelihood requests:  91%|█████████ | 1090/1200 [00:03<00:00, 331.64it/s]Running loglikelihood requests:  94%|█████████▍| 1130/1200 [00:03<00:00, 338.37it/s]Running loglikelihood requests:  98%|█████████▊| 1170/1200 [00:03<00:00, 346.26it/s]Running loglikelihood requests: 100%|██████████| 1200/1200 [00:03<00:00, 331.75it/s]
+    hellaswag: acc_norm = 0.4550
+    piqa: acc_norm = 0.6250
+  Evaluation done in 38.4s
+
+==========================================================================================
+COMPARISON TABLE — Quark Rotation + MXFP4
+==========================================================================================
+Task            | baseline_fp16   | mxfp4_only     
+---------------------------------------------------
+hellaswag       | 0.5250          | 0.4550         
+piqa            | 0.6800          | 0.6250         
+
+Δ vs baseline_fp16:
+  hellaswag:   mxfp4_only: -0.0700
+  piqa:   mxfp4_only: -0.0550
+==========================================================================================
