@@ -1,0 +1,26 @@
+07:49:09 [INFO] 
+══════════════════════════════════════════════════════════════════════
+07:49:09 [INFO]   ROTATION × QUANTIZATION ACCURACY MATRIX
+07:49:09 [INFO] ══════════════════════════════════════════════════════════════════════
+07:49:09 [INFO]   Model:          Qwen/Qwen3-0.6B
+07:49:09 [INFO]   Device:         cuda:4
+07:49:09 [INFO]   Rotations:      ['none', 'R1', 'R1+R2', 'R1+R2+R3+R4']
+07:49:09 [INFO]   Schemes:        ['W4A16', 'MXFP4', 'NVFP4']
+07:49:09 [INFO]   Total combos:   13
+07:49:09 [INFO]   Tasks:          ['hellaswag', 'piqa', 'winogrande', 'lambada_openai', 'mmlu']
+07:49:09 [INFO]   Eval limit:     full
+07:49:09 [INFO]   Quant iters:    0 (RTN)
+07:49:09 [INFO]   rotation_size:  auto
+07:49:09 [INFO]   Hadamard type:  Deterministic
+07:49:09 [INFO]   Online R1:      True
+07:49:09 [INFO]   Output dir:     /data/lkk/quarot/auto-round/examples/results_rtn
+07:49:09 [INFO] ══════════════════════════════════════════════════════════════════════
+
+07:49:18 [INFO] 
+======================================================================
+07:49:18 [INFO]   FP16 BASELINE (no rotation, no quantization)
+07:49:18 [INFO] ======================================================================
+07:49:20 [WARNING] `pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+07:49:20 [WARNING] Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+07:49:20 [INFO] Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+07:49:20 [INFO] Using pre-initialized model
