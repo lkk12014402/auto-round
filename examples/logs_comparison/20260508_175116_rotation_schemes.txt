@@ -1,0 +1,11 @@
+Model: Qwen/Qwen3-0.6B
+Schemes: ['NVFP4']
+Rotations: ['R1', 'R1+R2', 'R1+R2+R3', 'R1+R2+R3+R4']
+Limit: full
+
+FP16_baseline: {'hellaswag': 0.47321250746863175, 'piqa': 0.676278563656148}
+NVFP4_only: {'hellaswag': 0.43596893049193386, 'piqa': 0.6273122959738846}
+R1+NVFP4: {'hellaswag': 0.42322246564429394, 'piqa': 0.6267682263329706}
+R1+R2+NVFP4: {'hellaswag': 0.427504481179048, 'piqa': 0.6300326441784548}
+R1+R2+R3+NVFP4: {'hellaswag': 0.42561242780322645, 'piqa': 0.6218715995647442}
+R1+R2+R3+R4+NVFP4: {'hellaswag': 0.41674965146385184, 'piqa': 0.6175190424374319}

@@ -1,0 +1,9 @@
+Model: Qwen/Qwen3-0.6B
+Frameworks: ['autoround', 'quark', 'llmcompressor']
+Rotations: ['R1']
+Limit: full
+Rotation size: 128
+
+autoround/R1: {'hellaswag': 0.39235212109141604, 'piqa': 0.6011969532100109}
+quark/R1: {'hellaswag': 0.40111531567416847, 'piqa': 0.6033732317736671}
+llmcompressor/R1: {'hellaswag': 0.25323640709022105, 'piqa': 0.529923830250272}

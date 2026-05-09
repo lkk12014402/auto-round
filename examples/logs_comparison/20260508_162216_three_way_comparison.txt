@@ -1,0 +1,9 @@
+Model: Qwen/Qwen3-0.6B
+Frameworks: ['autoround', 'quark', 'llmcompressor']
+Rotations: ['R1']
+Limit: full
+Rotation size: 128
+
+autoround/R1: {'hellaswag': 0.39235212109141604, 'piqa': 0.6011969532100109}
+quark/R1: {'hellaswag': 0.40111531567416847, 'piqa': 0.6033732317736671}
+llmcompressor/R1: {'error': 'CUDA out of memory. Tried to allocate 1.16 GiB. GPU 0 has a total capacity of 44.39 GiB of which 809.81 MiB is free. Process 1332739 has 42.97 GiB memory in use. Process 2903033 has 630.00 MiB memory in use. Of the allocated memory 296.75 MiB is allocated by PyTorch, and 1.25 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)'}
