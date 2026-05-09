@@ -96,12 +96,26 @@ def normalize_rotation_config(
         alg = config.get("algorithm", "hadamard")
         if alg == "hadamard":
             return RotationConfig.model_validate(config)
+        if alg == "spinquant":
+            from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig
+
+            # Filter out "algorithm" key since SpinQuantConfig sets it via default
+            filtered = {k: v for k, v in config.items() if k != "algorithm"}
+            return SpinQuantConfig(**filtered)
         raise ValueError(
             f"Unknown rotation algorithm: {alg!r}. " f"Registered algorithms: {sorted(BaseRotation._REGISTRY)}"
         )
 
     if isinstance(config, str):
-        # String shorthand → treat as Hadamard config.
+        key = config.strip().lower()
+        if key in ("spinquant", "quarot"):
+            from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig
+
+            # "quarot" → QuaRot defaults (no training)
+            if key == "quarot":
+                return SpinQuantConfig(trainable_rotation=False, trainable_smooth=False)
+            return SpinQuantConfig()
+        # Otherwise treat as Hadamard config.
         return RotationConfig.model_validate(_normalize_hadamard_config(config))
 
     raise TypeError(

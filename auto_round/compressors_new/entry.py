@@ -10,6 +10,7 @@ from auto_round.algorithms.alg_config import AlgConfig
 from auto_round.algorithms.quantization.rtn.config import RTNConfig
 from auto_round.algorithms.quantization.sign_round.config import SignRoundConfig
 from auto_round.algorithms.transforms.rotation.config import RotationConfig as _NewArchRotationConfig
+from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig as _SpinQuantConfig
 from auto_round.auto_scheme.gen_auto_scheme import AutoScheme
 from auto_round.compressors_new.calib import CalibCompressor, CalibratedRTNCompressor
 from auto_round.compressors_new.utils import check_need_act_calibration
@@ -149,11 +150,15 @@ class AutoRound(object):
     SKIP_ARGS = ("local_args", "kwargs", "cls", "alg_configs", "quant_config", "quant_configs")
 
     # Mapping from string alias to config class (and optional defaults override).
+    # Values can be a type (called with no args) or a callable/lambda returning a config.
     _CONFIG_ALIASES: dict[str, type] = {
         "sign_round": SignRoundConfig,
         "signround": SignRoundConfig,
         "rtn": RTNConfig,
         "hadamard": _NewArchRotationConfig,
+        "spinquant": _SpinQuantConfig,
+        # "quarot" uses QuaRot defaults: fixed Hadamard, no training.
+        "quarot": lambda: _SpinQuantConfig(trainable_rotation=False, trainable_smooth=False),
     }
 
     @classmethod
@@ -163,7 +168,8 @@ class AutoRound(object):
             key = config.strip().lower()
             if key not in cls._CONFIG_ALIASES:
                 raise ValueError(f"Unknown config alias '{config}'. " f"Supported: {list(cls._CONFIG_ALIASES.keys())}")
-            return cls._CONFIG_ALIASES[key]()
+            factory = cls._CONFIG_ALIASES[key]
+            return factory()  # works for both types (Class()) and lambdas
         if isinstance(config, list):
             return [cls._resolve_config(c) for c in config]
         return config

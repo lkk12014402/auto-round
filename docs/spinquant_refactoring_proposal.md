@@ -1,7 +1,7 @@
 # SpinQuant / QuaRot Refactoring Proposal
 
 **Date**: 2026-05-09  
-**Status**: Draft  
+**Status**: ✅ Implemented (Phase 1–3 complete)  
 **Author**: Copilot  
 
 ---
@@ -504,3 +504,77 @@ model = apply_rotation(model, SpinQuantConfig(r1=True, r2=True))
 | `compressors_new/base.py` | — | — | 可能修改 |
 | `compressors_new/spinquant_mixin.py` | — | — | deprecated |
 | `docs/spinquant_quarot_api_guide.md` | 更新 | 更新 | 更新 |
+
+---
+
+## 11. Implementation Status (2026-05-09)
+
+All three phases have been implemented and verified:
+
+### Phase 1: Registry Integration ✅
+
+| Task | Status | Notes |
+|------|--------|-------|
+| SpinQuantConfig → BaseRotationConfig | ✅ Done | Added `algorithm = "spinquant"` field |
+| SpinQuantRotation + @register | ✅ Done | New `algorithm.py` delegates to SpinQuantPreprocessor |
+| Registry wiring | ✅ Done | `_ensure_registry_populated()` includes "spinquant" |
+| normalize_rotation_config | ✅ Done | Handles dicts and "spinquant"/"quarot" strings |
+| AutoRound._CONFIG_ALIASES | ✅ Done | "quarot" → lambda factory with non-trainable defaults |
+| Integration tests | ✅ Done | 4 tests pass: config, dict, string, isinstance check |
+
+### Phase 2: Training Logic Deduplication ✅
+
+| Task | Status | Notes |
+|------|--------|-------|
+| training_core.py created | ✅ Done | ~250 lines, 7 shared primitives |
+| preprocessor.py refactored | ✅ Done | `_train_rotations()` → `run_training_loop()` |
+| trainer.py refactored | ✅ Done | Uses shared helpers, unused imports cleaned |
+| Regression tests pass | ✅ Done | test_reference_equivalence, test_quark_comparison |
+
+### Phase 3: Mixin Simplification ✅
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Deprecation warnings added | ✅ Done | DeprecationWarning on `__init__` and `preprocess_with_spinquant` |
+| Mixin delegates to apply_rotation | ✅ Done | `preprocess_with_spinquant()` → `apply_rotation()` |
+| patch_compressor_for_spinquant deprecated | ✅ Done | With deprecation warning |
+| Migration examples in docstring | ✅ Done | Shows new `rotation_configs=` API |
+
+### Phase 4: Config Style Alignment
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Pydantic migration | ⏸️ Deferred | SpinQuantConfig stays as @dataclass (intentional: lighter weight, matches BaseRotationConfig) |
+
+### Files Changed
+
+| File | Action | Lines Changed |
+|------|--------|---------------|
+| `spinquant/algorithm.py` | **Created** | ~90 lines |
+| `spinquant/training_core.py` | **Created** | ~250 lines |
+| `spinquant/preprocessor.py` | Modified | Config inheritance, training delegation, import cleanup |
+| `spinquant/trainer.py` | Modified | Shared helpers, import cleanup |
+| `spinquant/__init__.py` | Modified | Added SpinQuantRotation export |
+| `transforms/base.py` | Modified | +1 line in `_ensure_registry_populated()` |
+| `transforms/__init__.py` | Modified | +30 lines in `normalize_rotation_config()` |
+| `compressors_new/entry.py` | Modified | +5 lines for config aliases |
+| `compressors_new/spinquant_mixin.py` | Modified | Deprecated, delegates to apply_rotation |
+
+### Unified API (Post-Refactoring)
+
+```python
+# QuaRot via string alias
+from auto_round.compressors_new.entry import AutoRound
+autoround = AutoRound(model=model, scheme="W4A16", rotation_configs=["quarot"])
+
+# SpinQuant via explicit config
+from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
+cfg = SpinQuantConfig(r1=True, r2=True, r3=False, r4=False,
+                      trainable_rotation=False, random_rotation=True)
+autoround = AutoRound(model=model, scheme="W4A16", rotation_configs=[cfg])
+
+# Standalone rotation (no quantization)
+from auto_round.algorithms.transforms import apply_rotation
+model = apply_rotation(model, "quarot")
+model = apply_rotation(model, SpinQuantConfig(r1=True, r2=True))
+```

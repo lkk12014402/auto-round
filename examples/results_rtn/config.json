@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "device": "cuda:4",
+  "rotations": [
+    "none",
+    "R1",
+    "R1+R2",
+    "R1+R2+R3+R4"
+  ],
+  "schemes": [
+    "W4A16",
+    "MXFP4",
+    "NVFP4"
+  ],
+  "tasks": [
+    "hellaswag",
+    "piqa",
+    "winogrande",
+    "lambada_openai",
+    "mmlu"
+  ],
+  "limit": null,
+  "quant_iters": 0,
+  "rotation_size": null,
+  "random_hadamard": false,
+  "online_r1": true,
+  "total_time_s": 14007.6,
+  "timestamp": "2026-05-09T11:42:45.613132"
+}

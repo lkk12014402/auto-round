@@ -36,10 +36,17 @@ def deterministic_hadamard_matrix(
 def random_hadamard_matrix(
     size: int, dtype: torch.dtype = torch.float32, device: torch.device = torch.device("cpu")
 ) -> torch.Tensor:
-    """Generate a normalized random Hadamard matrix (H * D / sqrt(N))."""
-    H = deterministic_hadamard_matrix(size, dtype=dtype, device=device)
-    D = torch.randint(0, 2, (size,), dtype=dtype, device=device) * 2 - 1
-    return H * D.unsqueeze(1)
+    """Generate a random Hadamard matrix: H @ diag(±1) / sqrt(N).
+
+    Works for any size supported by :func:`get_hadamard_K` (power-of-2 or
+    known non-power-of-2 sizes like 12, 20, 28, etc.).
+    """
+    D = torch.randint(0, 2, (size,), dtype=torch.float64, device=device) * 2 - 1
+    Q = torch.diag(D)
+    hadamard_K, K = get_hadamard_K(size)
+    hadamard_K = hadamard_K.to(dtype=torch.float64, device=device)
+    result = matmul_hadU(Q, hadamard_K=hadamard_K, K=K)
+    return result.to(dtype=dtype)
 
 
 def is_pow2(n: int) -> bool:
@@ -52,24 +59,38 @@ def get_hadamard_K(n: int) -> Tuple[torch.Tensor, int]:
 
     For power-of-2 sizes, K=1 (full Walsh-Hadamard via butterfly).
     For non-power-of-2 sizes, K is the largest known Hadamard size that
-    divides n such that n/K is a power of 2.
+    divides n such that n/K is a power of 2.  Known sizes are sourced from
+    :mod:`known_hadamard` (ported from Quark/AMD), covering sizes like 12,
+    20, 28, 36, 40, 52, 60, 108, 140, 156, 172.
+
+    Examples:
+        - n=3072: 3072 = 12 × 256  →  K=12, returns 12×12 Hadamard
+        - n=1024: power-of-2       →  K=1,  returns 1024×1024 Hadamard
 
     Returns:
         (hadamard_K, K): The K×K Hadamard matrix and the value K.
     """
+    from scipy.linalg import hadamard as scipy_hadamard
+
+    from auto_round.algorithms.transforms.spinquant.known_hadamard import (
+        KNOWN_HADAMARD_MATRICES,
+    )
+
     if is_pow2(n):
-        # For power-of-2, we use butterfly decomposition (K=1 means no explicit matrix needed)
-        had = deterministic_hadamard_matrix(n, dtype=torch.float64)
+        had = torch.Tensor(scipy_hadamard(n))
         return had, 1
     else:
-        # Find the largest power-of-2 K dividing n
-        K = 1
-        while K * 2 <= n and n % (K * 2) == 0:
-            K *= 2
-        if K > 1:
-            had_K = deterministic_hadamard_matrix(K, dtype=torch.float64)
-            return had_K, K
-        raise ValueError(f"Cannot find suitable Hadamard decomposition for n={n}")
+        # Search known Hadamard matrices: find K such that n % K == 0 and n/K is pow2
+        for size in KNOWN_HADAMARD_MATRICES:
+            if n % size == 0 and is_pow2(n // size):
+                had_K = KNOWN_HADAMARD_MATRICES[size]()
+                return had_K, size
+
+        raise ValueError(
+            f"Cannot find suitable Hadamard decomposition for n={n}. "
+            f"Known non-pow2 sizes: {sorted(KNOWN_HADAMARD_MATRICES.keys())}. "
+            f"n must be a power of 2, or n = K × 2^m for a known K."
+        )
 
 
 def matmul_hadU(X: torch.Tensor, hadamard_K: Optional[torch.Tensor] = None, K: Optional[int] = None) -> torch.Tensor:
@@ -95,15 +116,8 @@ def matmul_hadU(X: torch.Tensor, hadamard_K: Optional[torch.Tensor] = None, K: O
     n = X.shape[-1]
 
     if hadamard_K is None or K is None:
-        if is_pow2(n):
-            K = 1
-        else:
-            K = 1
-            while K * 2 <= n and n % (K * 2) == 0:
-                K *= 2
-            if K <= 1:
-                raise ValueError(f"Cannot apply Hadamard transform to dimension {n}")
-            hadamard_K = deterministic_hadamard_matrix(K, dtype=X.dtype, device=X.device)
+        hadamard_K, K = get_hadamard_K(n)
+        hadamard_K = hadamard_K.to(dtype=X.dtype, device=X.device)
 
     inp = X.clone().reshape(-1, n, 1)
     output = inp.clone()
@@ -121,12 +135,10 @@ def matmul_hadU(X: torch.Tensor, hadamard_K: Optional[torch.Tensor] = None, K: O
     # Apply the K×K Hadamard block (if K > 1)
     if K > 1:
         had = hadamard_K.to(inp.device).to(inp.dtype)
-        # Multiply: had already normalized by 1/sqrt(K) from deterministic_hadamard_matrix
-        # but butterfly is unnormalized, so we need to scale by 1/sqrt(n/K)
         inp = had.view(1, K, K) @ inp
 
-    # Normalization: butterfly gives factor of sqrt(n/K), combined with had gives sqrt(n)
-    result = inp.view(X.shape) / math.sqrt(n / K if K > 1 else n)
+    # Normalize: butterfly + K-block gives unnormalized result, divide by √n
+    result = inp.view(X.shape) / math.sqrt(n)
 
     return result
 
@@ -270,8 +282,8 @@ class InputRotationWrapperHadamard(nn.Module):
             if rot_mat.shape[0] != rotation_size:
                 had_1, _ = get_hadamard_K(rotation_size // K)
                 rot_mat = torch.kron(
-                    hadamard_K.to(torch.float64),
-                    had_1.to(torch.float64),
+                    hadamard_K.to(device="cpu", dtype=torch.float64),
+                    had_1.to(device="cpu", dtype=torch.float64),
                 )
             self.register_buffer(
                 "rotation_matrix",

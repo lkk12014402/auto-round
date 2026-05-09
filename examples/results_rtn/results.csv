@@ -1,0 +1,14 @@
+rotation,scheme,random_hadamard,quant_iters,rotation_size,status,total_time_s,hellaswag,lambada_openai,mmlu,piqa,winogrande,avg_accuracy
+none,FP16,False,0,,success,435.0,0.4732,0.4044,0.4009,0.6763,0.5596,0.5029
+none,W4A16,False,0,,success,555.3,0.4329,0.2697,0.3381,0.6474,0.5217,0.442
+none,MXFP4,False,0,,success,1284.5,0.3974,0.23,0.2672,0.6115,0.5367,0.4086
+none,NVFP4,False,0,,success,1562.0,0.4364,0.2913,0.3364,0.6268,0.5375,0.4457
+R1,W4A16,False,0,,success,1115.9,0.4306,0.3089,0.2965,0.6387,0.5438,0.4437
+R1,MXFP4,False,0,,success,1841.4,0.3879,0.1974,0.3091,0.6192,0.5233,0.4074
+R1,NVFP4,False,0,,success,2116.6,0.4139,0.2369,0.301,0.6077,0.5399,0.4199
+R1+R2,W4A16,False,0,,success,1122.5,0.4257,0.2971,0.2953,0.6502,0.5351,0.4407
+R1+R2,MXFP4,False,0,,success,1838.0,0.3877,0.2096,0.2887,0.6028,0.5217,0.4021
+R1+R2,NVFP4,False,0,,success,2117.1,0.4245,0.222,0.2947,0.6121,0.5359,0.4178
+R1+R2+R3+R4,W4A16,False,0,,error,9.4,,,,,,
+R1+R2+R3+R4,MXFP4,False,0,,error,3.0,,,,,,
+R1+R2+R3+R4,NVFP4,False,0,,error,2.3,,,,,,

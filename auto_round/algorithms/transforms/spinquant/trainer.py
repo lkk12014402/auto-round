@@ -38,33 +38,23 @@ Usage::
 
 from __future__ import annotations
 
-import copy
-import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from auto_round.algorithms.transforms.spinquant.cayley_optimizer import AdamAndSGDG
 from auto_round.algorithms.transforms.spinquant.inplace.apply import (
     register_spinquant_hooks,
-    remove_spinquant_hooks,
 )
 from auto_round.algorithms.transforms.spinquant.preprocessor import (
     SpinQuantConfig,
     SpinQuantPreprocessor,
-    TrainableRMSNorm,
     get_model_arch_info,
-    remove_spinquant_hooks_from_model,
 )
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     fuse_rmsnorm_in_model,
-    random_hadamard_matrix,
-    rotate_in_channels_,
-    rotate_out_channels_,
     untie_word_embeddings_if_needed,
 )
 
@@ -256,7 +246,7 @@ class RotationTrainer:
         self.intermediate_size = info.get("intermediate_size", 0)
 
         # Training components (created lazily)
-        self.optimizer: Optional[AdamAndSGDG] = None
+        self.optimizer = None
         self._original_model: Optional[nn.Module] = None
         self._hook_handles: list[Any] = []
         self._rotated_modules: set[nn.Module] = set()
@@ -330,24 +320,34 @@ class RotationTrainer:
 
         Returns a dict with ``loss``, ``max_diff``, etc.
         """
+        from auto_round.algorithms.transforms.spinquant.training_core import (
+            compute_rotation_loss,
+            move_batch_to_device,
+        )
+
         if self._original_model is None:
             return {}
 
         self.model.eval()
+        device = next(self.model.parameters()).device
         losses = []
         max_diffs = []
 
         for i, batch in enumerate(dataloader):
             if i >= 10:  # evaluate on first 10 batches only
                 break
-            batch = self._move_to_device(batch)
+            batch = move_batch_to_device(batch, device)
             with torch.no_grad():
                 out_rot = self.model(**batch)
                 logits_rot = out_rot.logits if hasattr(out_rot, "logits") else out_rot
                 out_ori = self._original_model(**batch)
                 logits_ori = out_ori.logits if hasattr(out_ori, "logits") else out_ori
 
-                loss = self.compute_loss_fn(logits_rot, logits_ori, self.config)
+                loss = compute_rotation_loss(
+                    logits_rot, logits_ori,
+                    loss_type=self.config.loss_type,
+                    kl_top_k=self.config.kl_top_k,
+                )
                 losses.append(loss.item())
                 max_diffs.append((logits_rot - logits_ori).abs().max().item())
 
@@ -403,6 +403,11 @@ class RotationTrainer:
     # ------------------------------------------------------------------
     def _setup_training(self, dataloader: Any) -> None:
         """Initialise rotations, optimiser, and original-model clone."""
+        from auto_round.algorithms.transforms.spinquant.training_core import (
+            clone_model_for_reference,
+            create_dual_optimizer,
+        )
+
         cfg = self.config
 
         # 1. Untie + RMSNorm fusion
@@ -426,39 +431,26 @@ class RotationTrainer:
                 intermediate_size=self.intermediate_size,
             )
 
-        # 5. Create dual optimiser
-        rot_params = [
-            p for n, p in self.model.named_parameters()
-            if p.requires_grad and "spinquant_R" in n
-        ]
-        smooth_params = [
-            p for n, p in self.model.named_parameters()
-            if p.requires_grad and "smooth_values" in n
-        ]
+        # 5. Create dual optimiser (shared helper)
+        self.optimizer = create_dual_optimizer(
+            self.model, lr=cfg.lr, smooth_lr=cfg.smooth_lr,
+        )
 
-        if rot_params or smooth_params:
-            self.optimizer = AdamAndSGDG(
-                adam_params=smooth_params if smooth_params else [],
-                sgdg_params=rot_params if rot_params else [],
-                learning_rate=cfg.lr,
-                smooth_learning_rate=cfg.smooth_lr,
-            )
-        else:
-            print("[RotationTrainer] No trainable params – nothing to train.")
-
-        # 6. Clone original model for KL reference
-        self._original_model = copy.deepcopy(self.model)
-        self._original_model.eval()
-        for p in self._original_model.parameters():
-            p.requires_grad = False
-        remove_spinquant_hooks_from_model(self._original_model)
+        # 6. Clone original model for KL reference (shared helper)
+        self._original_model = clone_model_for_reference(self.model)
 
         # 7. Use model's existing device (don't move)
         self.model.train()
 
     def _training_step(self, batch: Any) -> float:
         """Single training step. Returns loss scalar."""
-        batch = self._move_to_device(batch)
+        from auto_round.algorithms.transforms.spinquant.training_core import (
+            compute_rotation_loss,
+            move_batch_to_device,
+        )
+
+        device = next(self.model.parameters()).device
+        batch = move_batch_to_device(batch, device)
 
         # Forward: rotated model
         out_rot = self.model(**batch)
@@ -470,8 +462,15 @@ class RotationTrainer:
             out_ori = self._original_model(**batch)
             logits_ori = out_ori.logits if hasattr(out_ori, "logits") else out_ori
 
-        # Loss & backward
-        loss = self.compute_loss_fn(logits_rot, logits_ori, self.config)
+        # Loss & backward — use custom loss_fn if set, else shared core
+        if self.compute_loss_fn is not self._default_compute_loss:
+            loss = self.compute_loss_fn(logits_rot, logits_ori, self.config)
+        else:
+            loss = compute_rotation_loss(
+                logits_rot, logits_ori,
+                loss_type=self.config.loss_type,
+                kl_top_k=self.config.kl_top_k,
+            )
         loss.backward()
         self.optimizer.step()  # type: ignore[union-attr]
         self.optimizer.zero_grad()  # type: ignore[union-attr]
@@ -486,17 +485,6 @@ class RotationTrainer:
             torch.cuda.empty_cache()
         self.model.eval()
 
-    def _move_to_device(self, batch: Any) -> Any:
-        device = next(self.model.parameters()).device
-        if hasattr(batch, "to"):
-            return batch.to(device)
-        if isinstance(batch, dict):
-            return {
-                k: v.to(device) if hasattr(v, "to") else v
-                for k, v in batch.items()
-            }
-        return batch
-
     def _trigger_event(self, event_name: str, **kwargs) -> None:
         """Fire callback hooks."""
         for cb in self.callbacks:
@@ -510,24 +498,10 @@ class RotationTrainer:
         ori_logits: torch.Tensor,
         config: RotationTrainerConfig,
     ) -> torch.Tensor:
-        if config.loss_type == "kl_top":
-            k = min(config.kl_top_k, logits.size(-1))
-            top_ori, indices = ori_logits.topk(k, dim=-1, sorted=False)
-            top_logits = logits.gather(-1, indices)
-            return F.kl_div(
-                F.log_softmax(top_logits.flatten(0, -2), dim=-1),
-                F.softmax(top_ori.flatten(0, -2), dim=-1),
-                reduction="batchmean",
-            )
-        if config.loss_type == "kl_full":
-            return F.kl_div(
-                F.log_softmax(logits.flatten(0, -2), dim=-1),
-                F.softmax(ori_logits.flatten(0, -2), dim=-1),
-                reduction="batchmean",
-            )
-        if config.loss_type == "mse":
-            return F.mse_loss(logits, ori_logits)
-        raise ValueError(f"Unknown loss_type={config.loss_type!r}")
+        """Default loss — delegates to :func:`training_core.compute_rotation_loss`."""
+        from auto_round.algorithms.transforms.spinquant.training_core import compute_rotation_loss
+
+        return compute_rotation_loss(logits, ori_logits, config.loss_type, config.kl_top_k)
 
     @staticmethod
     def _to_sq_config(cfg: RotationTrainerConfig) -> SpinQuantConfig:

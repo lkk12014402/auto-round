@@ -67,6 +67,9 @@ Example (SpinQuant — trainable, ⚠️ experimental)::
     autoround.quantize()
 """
 
+from auto_round.algorithms.transforms.spinquant.algorithm import (
+    SpinQuantRotation,
+)
 from auto_round.algorithms.transforms.spinquant.cayley_optimizer import (
     AdamAndSGDG,
     SGDG,
@@ -99,6 +102,8 @@ from auto_round.algorithms.transforms.spinquant.training import (
 )
 
 __all__ = [
+    # -- Registry algorithm (unified apply_rotation() entry) --
+    "SpinQuantRotation",
     # -- Preprocessor (QuaRot, recommended) --
     "SpinQuantConfig",
     "SpinQuantPreprocessor",

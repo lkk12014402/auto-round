@@ -1,0 +1,18 @@
+Model: Qwen/Qwen3-0.6B
+Frameworks: ['autoround', 'quark', 'llmcompressor']
+Rotations: ['R1', 'R1+R2', 'R1+R2+R4', 'R1+R2+R3+R4']
+Limit: full
+Rotation size: 128
+
+autoround/R1: {'hellaswag': 0.39235212109141604, 'piqa': 0.6011969532100109}
+quark/R1: {'hellaswag': 0.40111531567416847, 'piqa': 0.6033732317736671}
+llmcompressor/R1: {'hellaswag': 0.25323640709022105, 'piqa': 0.529923830250272}
+autoround/R1+R2: {'hellaswag': 0.39832702648874724, 'piqa': 0.6011969532100109}
+quark/R1+R2: {'hellaswag': 0.40460067715594505, 'piqa': 0.6115342763873776}
+llmcompressor/R1+R2: {'hellaswag': 0.2638916550487951, 'piqa': 0.5}
+autoround/R1+R2+R4: {'hellaswag': 0.3951404102768373, 'piqa': 0.6180631120783461}
+quark/R1+R2+R4: {'hellaswag': 0.40221071499701255, 'piqa': 0.6158868335146899}
+llmcompressor/R1+R2+R4: {'hellaswag': 0.261700856403107, 'piqa': 0.529379760609358}
+autoround/R1+R2+R3+R4: {'hellaswag': 0.3995220075682135, 'piqa': 0.5952121871599565}
+quark/R1+R2+R3+R4: {'hellaswag': 0.3714399522007568, 'piqa': 0.6060935799782372}
+llmcompressor/R1+R2+R3+R4: {'hellaswag': 0.2551284604660426, 'piqa': 0.5125136017410229}

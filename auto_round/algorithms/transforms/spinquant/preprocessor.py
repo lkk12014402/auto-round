@@ -17,7 +17,6 @@ same pattern as AutoRound's ``rotation.inplace`` package.
 
 from __future__ import annotations
 
-import copy
 import logging
 import math
 from dataclasses import dataclass, field
@@ -25,9 +24,8 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from auto_round.algorithms.transforms.spinquant.cayley_optimizer import AdamAndSGDG
+from auto_round.algorithms.transforms.base import BaseRotationConfig
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     apply_hadamard_to_linear,
     create_block_diag_from_head_matrix,
@@ -60,8 +58,13 @@ logger = logging.getLogger("auto_round.spinquant")
 
 
 @dataclass
-class SpinQuantConfig:
+class SpinQuantConfig(BaseRotationConfig):
     """Configuration for SpinQuant / QuaRot preprocessing.
+
+    Inherits from :class:`BaseRotationConfig` so that instances can be
+    collected by :class:`BaseCompressor` alongside Hadamard configs and
+    dispatched through the unified ``apply_rotation()`` / ``BaseRotation``
+    registry.
 
     Feature Status:
         ✅ QuaRot mode (``trainable_rotation=False``): Fully supported.
@@ -70,6 +73,9 @@ class SpinQuantConfig:
            Training loop exists but not fully validated on real models.
         ⚠️  Model save/load: Not yet implemented for models with online hooks.
     """
+
+    #: Registry key — used by ``BaseRotation.from_config()`` to dispatch.
+    algorithm: str = "spinquant"
 
     # Rotation dimensions
     r1: bool = True                    # R1: hidden_size rotation (offline fused)
@@ -338,28 +344,28 @@ class SpinQuantPreprocessor:
             )
 
         if self.config.r4 and self.r4_rotation_size > 0:
-            # For R4: find K = largest pow2 factor of r4_rotation_size
+            # Validate using get_hadamard_K — same decomposition used by matmul_hadU
             inter = self.r4_rotation_size
-            K = 1
-            while K * 2 <= inter and inter % (K * 2) == 0:
-                K *= 2
-            if K <= 1:
+            try:
+                _, K = get_hadamard_K(inter)
+            except ValueError:
                 logger.warning(
-                    f"[SpinQuant] R4 requires rotation size divisible by a power of 2 > 1, "
-                    f"but r4_rotation_size={inter} has no such factor. Disabling R4."
+                    f"[SpinQuant] R4 cannot find Hadamard decomposition for "
+                    f"r4_rotation_size={inter}. Disabling R4."
                 )
                 self.config.r4 = False
-            elif self.intermediate_size % self.r4_rotation_size != 0:
+                K = 0
+
+            if self.config.r4 and self.intermediate_size % self.r4_rotation_size != 0:
                 logger.warning(
                     f"[SpinQuant] R4 rotation_size={self.r4_rotation_size} must divide "
                     f"intermediate_size={self.intermediate_size}. Disabling R4."
                 )
                 self.config.r4 = False
-            else:
+            elif self.config.r4:
                 logger.info(
-                    f"[SpinQuant] R4 block Hadamard: K={K}, "
-                    f"blocks={inter // K} "
-                    f"(r4_rotation_size={inter}, intermediate_size={self.intermediate_size})"
+                    f"[SpinQuant] R4 Hadamard: K={K}, "
+                    f"r4_rotation_size={inter}, intermediate_size={self.intermediate_size}"
                 )
 
     # ------------------------------------------------------------------
@@ -481,26 +487,22 @@ class SpinQuantPreprocessor:
 
         # R4: always deterministic Hadamard (online, uses matmul_hadU butterfly)
         if self.config.r4 and self.r4_rotation_size > 0:
-            # Find the largest K that divides r4_rotation_size
             r4_size = self.r4_rotation_size
-            K = 1
-            while K * 2 <= r4_size and r4_size % (K * 2) == 0:
-                K *= 2
-            if K > 1:
-                had_K = deterministic_hadamard_matrix(K, dtype=dtype, device=model_device)
-                self.model.register_buffer("spinquant_R4_had_K", had_K)
-                self.model.register_buffer("spinquant_R4_K", torch.tensor(K, device=model_device))
-                if r4_size < self.intermediate_size:
-                    logger.info(
-                        f"[SpinQuant] R4: Block Hadamard K={K}, "
-                        f"{r4_size // K} blocks within rotation_size={r4_size}, "
-                        f"{self.intermediate_size // r4_size} rotation blocks on down_proj"
-                    )
-                else:
-                    logger.info(
-                        f"[SpinQuant] R4: Block Hadamard K={K}, "
-                        f"{r4_size // K} blocks on down_proj (offline fuse + online hook)"
-                    )
+            had_K, K = get_hadamard_K(r4_size)
+            had_K = had_K.to(dtype=dtype, device=model_device)
+            self.model.register_buffer("spinquant_R4_had_K", had_K)
+            self.model.register_buffer("spinquant_R4_K", torch.tensor(K, device=model_device))
+            if r4_size < self.intermediate_size:
+                logger.info(
+                    f"[SpinQuant] R4: Hadamard K={K}, "
+                    f"rotation_size={r4_size}, "
+                    f"{self.intermediate_size // r4_size} rotation blocks on down_proj"
+                )
+            else:
+                logger.info(
+                    f"[SpinQuant] R4: Hadamard K={K}, "
+                    f"rotation_size={r4_size} (offline fuse + online hook)"
+                )
 
     def _register_rotation(self, name: str, param: nn.Parameter) -> None:
         self.model.register_parameter(name, param)
@@ -511,127 +513,47 @@ class SpinQuantPreprocessor:
     # Step 5: Training
     # ------------------------------------------------------------------
     def _train_rotations(self, dataloader: Any) -> None:
-        """Simple embedded training loop (no callbacks/checkpointing).
+        """Train rotation matrices using the shared training loop.
+
+        Delegates to :func:`training_core.run_training_loop` which is the
+        single implementation shared with :class:`RotationTrainer`.
 
         For advanced training features (callbacks, evaluation, checkpointing,
         custom loss), use ``RotationTrainer`` from ``trainer.py`` directly.
-        This method provides a minimal training path for the one-call
-        ``preprocess()`` API.
         """
-        if not (self.rotation_params or self.smooth_params):
-            logger.info("[SpinQuant] No trainable parameters, skipping training")
+        from auto_round.algorithms.transforms.spinquant.training_core import (
+            clone_model_for_reference,
+            create_dual_optimizer,
+            run_training_loop,
+        )
+
+        optimizer = create_dual_optimizer(
+            self.model, lr=self.config.lr, smooth_lr=self.config.smooth_lr,
+        )
+        if optimizer is None:
             return
 
-        n_rot = len(self.rotation_params)
-        n_smooth = len(self.smooth_params)
-        total_params = sum(p.numel() for p in self.rotation_params) + sum(p.numel() for p in self.smooth_params)
-        logger.info(
-            f"[SpinQuant] Training: {n_rot} rotation params + {n_smooth} smooth params "
-            f"= {total_params:,} trainable parameters"
-        )
-        for p in self.rotation_params:
-            logger.debug(f"  Trainable rotation: {p.shape} on {p.device}")
-
-        # Use model's current device for training
-        model_device = next(self.model.parameters()).device
-
-        # Dual optimiser: Adam for smooth values, SGDG (Cayley) for rotations
-        optimizer = AdamAndSGDG(
-            adam_params=self.smooth_params,
-            sgdg_params=self.rotation_params,
-            learning_rate=self.config.lr,
-            smooth_learning_rate=self.config.smooth_lr,
-        )
-
-        # Clone original model for KL reference
         logger.info("[SpinQuant] Cloning original model for KL reference...")
-        original_model = copy.deepcopy(self.model)
-        original_model.eval()
-        for p in original_model.parameters():
-            p.requires_grad = False
-        # Remove hooks from the clone so it runs as the un-rotated baseline
-        remove_spinquant_hooks_from_model(original_model)
+        original_model = clone_model_for_reference(self.model)
 
-        self.model.train()
-        step = 0
-        loss_history: list[float] = []
+        result = run_training_loop(
+            model=self.model,
+            original_model=original_model,
+            optimizer=optimizer,
+            dataloader=dataloader,
+            max_iters=self.config.iters,
+            loss_type=self.config.loss_type,
+            kl_top_k=self.config.kl_top_k,
+            log_interval=50,
+        )
 
-        for batch in dataloader:
-            if step >= self.config.iters:
-                break
-
-            # Move batch to model device
-            if hasattr(batch, "to"):
-                batch = batch.to(model_device)
-            elif isinstance(batch, dict):
-                batch = {k: v.to(model_device) if hasattr(v, "to") else v for k, v in batch.items()}
-
-            # Forward: rotated model
-            out_rot = self.model(**batch)
-            logits = out_rot.logits if hasattr(out_rot, "logits") else out_rot
-
-            # Forward: original model (no grad)
-            with torch.no_grad():
-                out_ori = original_model(**batch)
-                ori_logits = out_ori.logits if hasattr(out_ori, "logits") else out_ori
-
-            # Loss
-            loss = self._compute_loss(logits, ori_logits)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-            loss_history.append(loss.item())
-            if step % 50 == 0:
-                avg = sum(loss_history[-50:]) / len(loss_history[-50:]) if loss_history else 0.0
-                logger.info(f"[SpinQuant] Step {step}/{self.config.iters}, loss={loss.item():.6f} (avg={avg:.6f})")
-
-            step += 1
-
-        # Final orthogonality check
-        self._check_orthogonality()
+        logger.info(
+            f"[SpinQuant] Training complete: {result.steps} steps, "
+            f"best_loss={result.best_loss:.6f}, ortho_dev={result.final_ortho_deviation:.2e}"
+        )
 
         del original_model
         torch.cuda.empty_cache()
-        self.model.eval()
-
-    def _compute_loss(self, logits: torch.Tensor, ori_logits: torch.Tensor) -> torch.Tensor:
-        if self.config.loss_type == "kl_top":
-            k = min(self.config.kl_top_k, logits.size(-1))
-            top_ori, indices = ori_logits.topk(k, dim=-1, sorted=False)
-            top_logits = logits.gather(-1, indices)
-            return F.kl_div(
-                F.log_softmax(top_logits.flatten(0, -2), dim=-1),
-                F.softmax(top_ori.flatten(0, -2), dim=-1),
-                reduction="batchmean",
-            )
-        if self.config.loss_type == "kl_full":
-            return F.kl_div(
-                F.log_softmax(logits.flatten(0, -2), dim=-1),
-                F.softmax(ori_logits.flatten(0, -2), dim=-1),
-                reduction="batchmean",
-            )
-        if self.config.loss_type == "mse":
-            return F.mse_loss(logits, ori_logits)
-        raise ValueError(f"Unknown loss_type={self.config.loss_type!r}")
-
-    def _check_orthogonality(self) -> None:
-        max_dev = 0.0
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad or "spinquant_R" not in name:
-                continue
-            R = param.data
-            if R.dim() != 2 or R.shape[0] != R.shape[1] or R.numel() == 0:
-                continue
-            I = torch.eye(R.shape[0], device=R.device, dtype=R.dtype)
-            dev = (torch.matmul(R, R.t()) - I).abs().max().item()
-            max_dev = max(max_dev, dev)
-            if dev > 1e-4:
-                logger.warning(f"  {name} orthogonality deviation={dev:.2e}")
-        if max_dev > 0:
-            logger.info(f"[SpinQuant] Max orthogonality deviation={max_dev:.2e}")
-            if max_dev > 1e-3:
-                logger.warning("  Orthogonality constraint significantly violated!")
 
     def _get_embed_tokens(self) -> Optional[nn.Module]:
         """Get embedding module, supporting both model.embed_tokens and model.model.embed_tokens."""
@@ -740,7 +662,10 @@ class SpinQuantPreprocessor:
                     R_block = had_K_local.to(torch.float64)
                     if R_block.shape[0] != r1_size:
                         had_1, _ = get_hadamard_K(r1_size // K)
-                        R_block = torch.kron(had_K_local.to(torch.float64), had_1.to(layer_device, torch.float64))
+                        R_block = torch.kron(
+                            had_K_local.to(device="cpu", dtype=torch.float64),
+                            had_1.to(device="cpu", dtype=torch.float64),
+                        )
                     rotate_in_channels_(module, R_in=R_block)
                 else:
                     raise ValueError(
@@ -777,7 +702,10 @@ class SpinQuantPreprocessor:
             R_block = hadamard_K.to(torch.float64)
             if R_block.shape[0] != r1_size:
                 had_1, _ = get_hadamard_K(r1_size // K)
-                R_block = torch.kron(hadamard_K.to(torch.float64), had_1.to(torch.float64))
+                R_block = torch.kron(
+                    hadamard_K.to(device="cpu", dtype=torch.float64),
+                    had_1.to(device="cpu", dtype=torch.float64),
+                )
             R_block_f32 = R_block.float()
 
             def hook(module, args):
@@ -907,22 +835,15 @@ class SpinQuantPreprocessor:
     def _fuse_r4_rotation(self) -> None:
         """Fuse R4 Hadamard into down_proj's input side.
 
-        Applies the same block Hadamard that the online hook uses. The hook
-        computes x.view(-1, M, K) @ H_K.T where K is the largest power-of-2
-        dividing r4_rotation_size. The offline fusion applies the matching
-        transform to the weight so they cancel: (x@H_block) @ (W@H_block).T = x@W.T.
+        Uses :func:`matmul_hadU` (via :func:`get_hadamard_K`) to apply the
+        same decomposition that the online hook uses.  For non-power-of-2
+        intermediate sizes (e.g. 3072 = 12 × 256), the decomposition is
+        ``kron(H_12, butterfly_256)`` — matching Quark's approach.
         """
         if not self.config.r4 or self.r4_rotation_size <= 0:
             return
 
-        # Compute K: same logic as the hook in inplace/apply.py
         r4_size = self.r4_rotation_size
-        K = 1
-        while K * 2 <= r4_size and r4_size % (K * 2) == 0:
-            K *= 2
-
-        if K <= 1:
-            return
 
         n_fused = 0
         for layer in self._get_layers():
@@ -930,12 +851,26 @@ class SpinQuantPreprocessor:
                 continue
             mlp = layer.mlp
             if hasattr(mlp, "down_proj"):
-                apply_hadamard_to_linear(mlp.down_proj, had_dim=K, output=False)
+                W = mlp.down_proj.weight.data
+                dtype = W.dtype
+                # matmul_hadU operates on the last dimension — for weight
+                # shape [out, in], last dim = in_features which is what
+                # we want to rotate (input channels of down_proj).
+                if r4_size == W.shape[1]:
+                    # Full-dimension rotation
+                    mlp.down_proj.weight.data = matmul_hadU(W).to(dtype)
+                else:
+                    # Block rotation: reshape to [..., n_blocks, r4_size]
+                    out_feat, in_feat = W.shape
+                    n_blocks = in_feat // r4_size
+                    W_reshaped = W.reshape(out_feat, n_blocks, r4_size)
+                    W_rotated = matmul_hadU(W_reshaped)
+                    mlp.down_proj.weight.data = W_rotated.reshape(out_feat, in_feat).to(dtype)
                 n_fused += 1
 
         logger.info(
             f"[SpinQuant] R4 offline fused into {n_fused} down_proj layers "
-            f"(block Hadamard K={K}, r4_rotation_size={r4_size})"
+            f"(r4_rotation_size={r4_size}, intermediate_size={self.intermediate_size})"
         )
 
     # ------------------------------------------------------------------
