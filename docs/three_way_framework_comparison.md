@@ -32,8 +32,8 @@ Stiefel manifold (set of orthogonal matrices) to minimize quantization loss:
 
 | Framework | R1 | R2 | R3 | R4 |
 |-----------|----|----|----|----|
-| **auto-round** | Random Hadamard | Random Hadamard | **Deterministic** Hadamard | **Deterministic** Hadamard |
-| **Quark** | Deterministic Hadamard (default, `random_r1=False`); Random Hadamard (opt-in `random_r1=True`); Trainable (`trainable=True`) | Deterministic (default); Random (`random_r2=True`); Trainable | **Deterministic** Hadamard | **Deterministic** Hadamard (`random=False`) |
+| **auto-round** | Deterministic Hadamard (default, `random_r1=False`); Random Hadamard (`random_r1=True`); Trainable (`trainable_rotation=True`) | Deterministic (default); Random (`random_r2=True`); Trainable | **Deterministic** Hadamard (always) | **Deterministic** Hadamard (always) |
+| **Quark** | Deterministic Hadamard (default, `random_r1=False`); Random Hadamard (opt-in `random_r1=True`); Trainable (`trainable=True`) | Deterministic (default); Random (`random_r2=True`); Trainable | **Deterministic** Hadamard (always) | **Deterministic** Hadamard (`random=False`) |
 | **llm-compressor** | Deterministic Hadamard (only option) | Deterministic Hadamard | Deterministic Hadamard | Deterministic Hadamard |
 
 **Pattern:** R1/R2 are **offline** → can use Random Hadamard (O(N²) once).
@@ -68,12 +68,6 @@ R1/R2 are **offline** (fused into weights during preparation, no runtime cost), 
 O(N²) cost of random Hadamard only happens once at model preparation time. The random
 sign diagonal D better scatters weight outliers than pure deterministic Hadamard.
 
-**auto-round R3 note:** auto-round's `_init_rotation_matrices()` calls
-`random_hadamard_matrix()` for R3 and stores it as a buffer, but `QKRotationWrapper.forward()`
-calls `matmul_hadU(q)` with no arguments — which uses the default deterministic butterfly
-internally. So the stored random matrix is **not actually used at runtime**; the effective
-R3 rotation is deterministic Hadamard, same as Quark.
-
 ### 1.3 Important Distinction: Computation Engine vs Matrix Choice
 
 A common source of confusion: `matmul_hadU()` and `get_hadamard_K()` internally use
@@ -81,33 +75,35 @@ A common source of confusion: `matmul_hadU()` and `get_hadamard_K()` internally 
 rotation matrix itself.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ _init_rotation_matrices()                               │
-│                                                         │
-│ R1 = random_hadamard_matrix(size)    ← MATRIX CHOICE    │
-│    = deterministic_H(size) × random_D                   │
-│                                                         │
-│ This R1 is then applied to weights:                     │
-│   W_new = W @ R1          (offline, dense O(N²), once)  │
-│                                                         │
-│ R4 uses matmul_hadU(x)    ← COMPUTATION ENGINE          │
-│    = butterfly with deterministic H  (online, O(NlogN)) │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ _init_rotation_matrices()                                    │
+│                                                              │
+│ if random_r1=False:                                          │
+│   R1 = deterministic_hadamard_matrix(size)  ← same every run│
+│ if random_r1=True:                                           │
+│   R1 = random_hadamard_matrix(size)         ← H × random D  │
+│ if trainable_rotation=True:                                  │
+│   R1 = torch.eye(size)                      ← identity init │
+│                                                              │
+│ R1 applied to weights: W_new = W @ R1  (offline, O(N²), once│
+│                                                              │
+│ R3/R4 always use matmul_hadU(x) ← COMPUTATION ENGINE        │
+│   = butterfly with deterministic H  (online, O(NlogN))      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-- `deterministic_hadamard_matrix()` appears frequently in the codebase because it's
-  the building block for both the butterfly algorithm AND for constructing random Hadamard
-- This does NOT mean the overall rotation matrix is deterministic
-- The actual rotation matrix used for R1/R2/R3 is `random_hadamard_matrix()` = H × D
+- `deterministic_hadamard_matrix()` is the building block for butterfly AND for random Hadamard
+- R1/R2: user chooses deterministic/random/trainable via config flags
+- R3/R4: always deterministic (required by butterfly algorithm)
 
 ### 1.4 Framework Support Summary
 
 | Feature | auto-round | Quark | llm-compressor |
 |---------|-----------|-------|----------------|
-| Deterministic Hadamard | ✅ (R4) | ✅ (R4) | ✅ (all, default) |
-| Random Hadamard (QuaRot) | ✅ (R1/R2/R3 default) | ✅ (R1/R2 opt-in via `random_r1/r2=True`) | ❌ (`NotImplementedError` on `randomize=True`) |
+| Deterministic Hadamard | ✅ (R1/R2 default, R3/R4 always) | ✅ (R1/R2 default, R3/R4 always) | ✅ (all, only option) |
+| Random Hadamard (QuaRot) | ✅ (R1/R2 opt-in via `random_r1/r2=True`) | ✅ (R1/R2 opt-in via `random_r1/r2=True`) | ❌ (`NotImplementedError` on `randomize=True`) |
 | Trainable (SpinQuant) | ⚠️ Code scaffolding exists (`trainable_rotation`, Cayley optimizer) but training loop not complete | ✅ Full Cayley SGD optimization | ❌ (`NotImplementedError` on `learnable=True`) |
-| Config toggle | `trainable_rotation`, always random H for non-trainable | `random_r1`, `random_r2` per-level toggle | `transform_type` field (`"hadamard"` only works) |
+| Config toggle | `random_r1`, `random_r2`, `trainable_rotation` (aligned with Quark) | `random_r1`, `random_r2`, `trainable` | `transform_type` field (`"hadamard"` only works) |
 
 ### 1.5 Normalization Convention
 
@@ -1353,25 +1349,41 @@ that random Hadamard spreads outliers "well enough."
 | Framework | QuaRot Mode | SpinQuant Mode |
 |-----------|-------------|----------------|
 | **Quark** | `trainable=False, random_r1=True/False` | `trainable=True` (+ Cayley SGD training script) |
-| **auto-round** | `trainable_rotation=False` (default) | `trainable_rotation=True` (⚠️ training loop incomplete) |
+| **auto-round** | `trainable_rotation=False, random_r1=True/False` (aligned with Quark) | `trainable_rotation=True` (⚠️ training loop incomplete) |
 | **llm-compressor** | `learnable=False` (default, only option) | `learnable=True` → `NotImplementedError` |
 
-### 14.4 Quark's QuaRot vs SpinQuant Config Differences
+### 14.4 QuaRot vs SpinQuant Config: Quark and auto-round Side-by-Side
 
-**QuaRot mode** (non-trainable, Quark default):
+**QuaRot mode** (non-trainable):
+
+| Config | Quark | auto-round |
+|--------|-------|-----------|
+| Flag | `trainable=False` | `trainable_rotation=False, trainable_smooth=False` |
+| Random R1 | `random_r1=True/False` (default False) | `random_r1=True/False` (default False) |
+| Random R2 | `random_r2=True/False` (default False) | `random_r2=True/False` (default False) |
+| Online R1 | `online_r1_rotation=True/False` | `online_r1_rotation=True/False` |
+| R3/R4 | Always deterministic Hadamard | Always deterministic Hadamard |
+
+```python
+# auto-round QuaRot example:
+SpinQuantConfig(
+    r1=True, r2=True, r3=False, r4=False,
+    trainable_rotation=False, trainable_smooth=False,
+    random_r1=False, random_r2=False,        # deterministic (default)
+    online_r1_rotation=True,
+)
+```
+
 ```json
+// Quark QuaRot example:
 {
   "trainable": false,
-  "random_r1": false,       // deterministic Hadamard (can set true for random)
+  "random_r1": false,
   "random_r2": false,
   "online_r1_rotation": true,
   "r1": true, "r2": true, "r3": false, "r4": false
 }
 ```
-- Uses `get_rotation_matrix(size, random=False)` → deterministic Hadamard
-- No training, no calibration data needed for rotation
-- Can enable `random_r1=True` for QuaRot-style random Hadamard
-- R3/R4 not commonly used in QuaRot (paper focuses on R1+R2)
 
 **SpinQuant mode** (trainable):
 ```json
@@ -1429,3 +1441,30 @@ if self.trainable and self.r3:
 | Large models (70B+) | ✅ No GPU training cost | ❌ Training cost very high |
 | No save/load needed | auto-round | Simplest API, hook-based, scheme-agnostic |
 | Need R3 support | auto-round or Quark | llm-compressor R3 is incomplete |
+
+### 14.7 Bug Fix: auto-round R3 Init and Config Alignment
+
+**R3 Init Bug (Fixed):**
+Previously, `_init_rotation_matrices()` called `random_hadamard_matrix()` for R3 and stored
+it as a buffer. However, `QKRotationWrapper.forward()` calls `matmul_hadU(q)` using the
+deterministic butterfly algorithm internally. The stored random matrix was **never used
+at runtime** — R3 was always effectively deterministic. The fix changed R3 init to
+`deterministic_hadamard_matrix()` to match the runtime behavior.
+
+**Config Alignment with Quark (Added):**
+Added `random_r1: bool = False` and `random_r2: bool = False` to `SpinQuantConfig`,
+matching Quark's `RotationConfig` design:
+
+```python
+# Before (auto-round always used random for R1/R2):
+R1 = random_hadamard_matrix(hidden_size)   # no config toggle
+
+# After (configurable, default deterministic — aligned with Quark):
+if self.config.random_r1:
+    R1 = random_hadamard_matrix(hidden_size)
+else:
+    R1 = deterministic_hadamard_matrix(hidden_size)
+```
+
+This ensures auto-round defaults match Quark defaults (deterministic Hadamard for all rotations),
+and accuracy comparisons between frameworks use equivalent configurations.

@@ -76,6 +76,14 @@ class SpinQuantConfig:
     # This follows the same convention as Quark's rotation_size.
     rotation_size: Optional[int] = None
 
+    # Rotation matrix type for R1 and R2 (R3/R4 always use deterministic Hadamard)
+    # - False (default): deterministic Hadamard (same matrix every time, no need to persist)
+    # - True: random Hadamard = H × D where D = diag(±1) random (must persist matrix)
+    # Only relevant when trainable_rotation=False (QuaRot mode).
+    # When trainable_rotation=True (SpinQuant mode), R1/R2 init from identity regardless.
+    random_r1: bool = False
+    random_r2: bool = False
+
     # Training control
     trainable_rotation: bool = True    # Learn R via Cayley SGD (False = QuaRot fixed Hadamard)
     trainable_smooth: bool = True      # Learn smooth_values via Adam (joint SmoothQuant)
@@ -412,17 +420,25 @@ class SpinQuantPreprocessor:
                 R1 = nn.Parameter(torch.eye(r1_size, device=model_device, dtype=dtype))
                 logger.info(f"[SpinQuant] R1: Trainable rotation matrix [{r1_size}×{r1_size}] (identity init)")
             else:
-                R1 = nn.Parameter(
-                    random_hadamard_matrix(r1_size, dtype=dtype, device=model_device),
-                    requires_grad=False,
-                )
+                if self.config.random_r1:
+                    R1 = nn.Parameter(
+                        random_hadamard_matrix(r1_size, dtype=dtype, device=model_device),
+                        requires_grad=False,
+                    )
+                    matrix_type = "Random Hadamard"
+                else:
+                    R1 = nn.Parameter(
+                        deterministic_hadamard_matrix(r1_size, dtype=dtype, device=model_device),
+                        requires_grad=False,
+                    )
+                    matrix_type = "Deterministic Hadamard"
                 if r1_size < self.hidden_size:
                     logger.info(
-                        f"[SpinQuant] R1: Random Hadamard [{r1_size}×{r1_size}] block rotation "
+                        f"[SpinQuant] R1: {matrix_type} [{r1_size}×{r1_size}] block rotation "
                         f"({self.hidden_size // r1_size} blocks, fixed, offline fuse)"
                     )
                 else:
-                    logger.info(f"[SpinQuant] R1: Random Hadamard [{r1_size}×{r1_size}] (fixed, offline fuse)")
+                    logger.info(f"[SpinQuant] R1: {matrix_type} [{r1_size}×{r1_size}] (fixed, offline fuse)")
             self._register_rotation("spinquant_R1", R1)
 
         # R2_head: head_dim x head_dim
@@ -431,20 +447,28 @@ class SpinQuantPreprocessor:
                 R2_head = nn.Parameter(torch.eye(self.head_dim, device=model_device, dtype=dtype))
                 logger.info(f"[SpinQuant] R2: Trainable per-head rotation [{self.head_dim}×{self.head_dim}] (identity init)")
             else:
-                R2_head = nn.Parameter(
-                    random_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device),
-                    requires_grad=False,
-                )
-                logger.info(f"[SpinQuant] R2: Random Hadamard [{self.head_dim}×{self.head_dim}] per head (fixed, offline fuse)")
+                if self.config.random_r2:
+                    R2_head = nn.Parameter(
+                        random_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device),
+                        requires_grad=False,
+                    )
+                    matrix_type = "Random Hadamard"
+                else:
+                    R2_head = nn.Parameter(
+                        deterministic_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device),
+                        requires_grad=False,
+                    )
+                    matrix_type = "Deterministic Hadamard"
+                logger.info(f"[SpinQuant] R2: {matrix_type} [{self.head_dim}×{self.head_dim}] per head (fixed, offline fuse)")
             self._register_rotation("spinquant_R2_head", R2_head)
 
-        # R3_head: fixed Hadamard (online, not trainable)
+        # R3_head: always deterministic Hadamard (online, uses matmul_hadU butterfly)
         if self.config.r3 and self.head_dim > 0:
-            R3 = random_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
+            R3 = deterministic_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
             self.model.register_buffer("spinquant_R3_head", R3)
-            logger.info(f"[SpinQuant] R3: Online Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (monkeypatch)")
+            logger.info(f"[SpinQuant] R3: Deterministic Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (online, butterfly)")
 
-        # R4: r4_rotation_size Hadamard (online buffer)
+        # R4: always deterministic Hadamard (online, uses matmul_hadU butterfly)
         if self.config.r4 and self.r4_rotation_size > 0:
             # Find the largest K that divides r4_rotation_size
             r4_size = self.r4_rotation_size
