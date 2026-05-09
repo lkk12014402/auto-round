@@ -8,20 +8,113 @@ This document provides a detailed comparison of how **auto-round**, **Quark**, a
 
 ## 1. Rotation Matrices
 
-### 1.1 Matrix Type
+### 1.1 Three Types of Rotation Matrices
 
-| Framework | R1 Matrix | R2 Matrix | R3 Matrix | R4 Matrix |
-|-----------|-----------|-----------|-----------|-----------|
-| auto-round | Deterministic Hadamard (normalized H/√N) | Same | Same | Same |
-| Quark | Deterministic Hadamard (unnormalized ±1) | Same | Same | Same |
-| llm-compressor | Configurable: `hadamard`, `random-hadamard`, `random-matrix` | Same | Same | Same |
+| Type | Formula | Orthogonal? | Deterministic? | Must Persist? |
+|------|---------|-------------|----------------|---------------|
+| **Deterministic Hadamard** | `H = Sylvester(N) / √N` | ✅ | ✅ (same matrix every time) | ❌ Just save `rotation_size` |
+| **Random Hadamard (QuaRot)** | `R = H × D`, D = diag(±1) random | ✅ | ❌ (random D each run) | ✅ Must save D or full R |
+| **Trainable (SpinQuant)** | `R = Cayley(A)` optimized on Stiefel manifold | ✅ | ❌ (learned) | ✅ Must save full R |
 
-### 1.2 Normalization Convention
+**Deterministic Hadamard:** Sylvester construction `[[H,H],[H,-H]]`, values are all ±1/√N.
+Given the same size, the matrix is always identical → no need to persist.
+
+**Random Hadamard (QuaRot):** Multiply deterministic H by a random sign diagonal D.
+This randomly flips each column's sign, breaking systematic outlier alignment.
+QuaRot paper proved this better scatters weight outliers than deterministic H alone.
+Must persist D (or the full matrix) to reproduce.
+
+**Trainable (SpinQuant):** Initialize from identity, optimize via Cayley SGD on the
+Stiefel manifold (set of orthogonal matrices) to minimize quantization loss:
+`argmin_R ||Q(R·W) - R·W||`. Must persist the trained matrix.
+
+### 1.2 Which Matrix Type Each Framework Uses Per Rotation Level
+
+| Framework | R1 | R2 | R3 | R4 |
+|-----------|----|----|----|----|
+| **auto-round** | Random Hadamard | Random Hadamard | **Deterministic** Hadamard | **Deterministic** Hadamard |
+| **Quark** | Deterministic Hadamard (default, `random_r1=False`); Random Hadamard (opt-in `random_r1=True`); Trainable (`trainable=True`) | Deterministic (default); Random (`random_r2=True`); Trainable | **Deterministic** Hadamard | **Deterministic** Hadamard (`random=False`) |
+| **llm-compressor** | Deterministic Hadamard (only option) | Deterministic Hadamard | Deterministic Hadamard | Deterministic Hadamard |
+
+**Pattern:** R1/R2 are **offline** → can use Random Hadamard (O(N²) once).
+R3/R4 are **online** → must use Deterministic Hadamard (O(N·log N) per token via butterfly).
+
+**Why R3 and R4 always use Deterministic Hadamard (all frameworks):**
+
+R3 and R4 are both **online** rotations that run at every inference step. They use the
+`matmul_hadU()` butterfly algorithm for O(N·log N) efficiency. The butterfly algorithm
+exploits the recursive `[[H,H],[H,-H]]` structure of Sylvester Hadamard. A random
+diagonal D would **destroy this structure**, forcing fallback to O(N²) dense matrix
+multiply — unacceptable for per-token inference cost.
 
 ```
-auto-round:     H = scipy.linalg.hadamard(N) / sqrt(N)   → orthogonal (H @ H.T = I)
-Quark:          H = ±1 matrix (unnormalized)              → user must divide by sqrt(N)
-llm-compressor: H = deterministic_hadamard_matrix(N)      → ±1, normalized by sqrt(N) during apply
+Deterministic H:  matmul_hadU(x) → O(N·log N) butterfly  ← fast, used for R3/R4
+Random H×D:       x @ (H×D)     → O(N²) dense matmul     ← slow, not used for R3/R4
+```
+
+Quark code evidence:
+- R3: `QKRotation.forward()` calls `matmul_hadU(q)` / `matmul_hadU(k)` with no arguments
+  → uses default deterministic Hadamard internally (`rotation_utils.py` line 218-221)
+- R4: `get_rotation_matrix(size, random=False)` explicitly (`rotation.py` line 1019)
+
+auto-round:
+- R3: `matmul_hadU(q_roped, hadamard_K, K)` where hadamard_K from `get_hadamard_K()`
+  → deterministic
+- R4: same `get_hadamard_K()` → `deterministic_hadamard_matrix()`
+
+**Why R1/R2 can use Random Hadamard:**
+
+R1/R2 are **offline** (fused into weights during preparation, no runtime cost), so the
+O(N²) cost of random Hadamard only happens once at model preparation time. The random
+sign diagonal D better scatters weight outliers than pure deterministic Hadamard.
+
+**auto-round R3 note:** auto-round's `_init_rotation_matrices()` calls
+`random_hadamard_matrix()` for R3 and stores it as a buffer, but `QKRotationWrapper.forward()`
+calls `matmul_hadU(q)` with no arguments — which uses the default deterministic butterfly
+internally. So the stored random matrix is **not actually used at runtime**; the effective
+R3 rotation is deterministic Hadamard, same as Quark.
+
+### 1.3 Important Distinction: Computation Engine vs Matrix Choice
+
+A common source of confusion: `matmul_hadU()` and `get_hadamard_K()` internally use
+`deterministic_hadamard_matrix()` — but this is the **computation engine**, not the
+rotation matrix itself.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ _init_rotation_matrices()                               │
+│                                                         │
+│ R1 = random_hadamard_matrix(size)    ← MATRIX CHOICE    │
+│    = deterministic_H(size) × random_D                   │
+│                                                         │
+│ This R1 is then applied to weights:                     │
+│   W_new = W @ R1          (offline, dense O(N²), once)  │
+│                                                         │
+│ R4 uses matmul_hadU(x)    ← COMPUTATION ENGINE          │
+│    = butterfly with deterministic H  (online, O(NlogN)) │
+└─────────────────────────────────────────────────────────┘
+```
+
+- `deterministic_hadamard_matrix()` appears frequently in the codebase because it's
+  the building block for both the butterfly algorithm AND for constructing random Hadamard
+- This does NOT mean the overall rotation matrix is deterministic
+- The actual rotation matrix used for R1/R2/R3 is `random_hadamard_matrix()` = H × D
+
+### 1.4 Framework Support Summary
+
+| Feature | auto-round | Quark | llm-compressor |
+|---------|-----------|-------|----------------|
+| Deterministic Hadamard | ✅ (R4) | ✅ (R4) | ✅ (all, default) |
+| Random Hadamard (QuaRot) | ✅ (R1/R2/R3 default) | ✅ (R1/R2 opt-in via `random_r1/r2=True`) | ❌ (`NotImplementedError` on `randomize=True`) |
+| Trainable (SpinQuant) | ⚠️ Code scaffolding exists (`trainable_rotation`, Cayley optimizer) but training loop not complete | ✅ Full Cayley SGD optimization | ❌ (`NotImplementedError` on `learnable=True`) |
+| Config toggle | `trainable_rotation`, always random H for non-trainable | `random_r1`, `random_r2` per-level toggle | `transform_type` field (`"hadamard"` only works) |
+
+### 1.5 Normalization Convention
+
+```
+auto-round:     H = Sylvester(N) / √N                    → orthogonal (H @ H.T = I)
+Quark:          H = ±1 matrix (unnormalized)              → user must divide by √N
+llm-compressor: H = deterministic_hadamard_matrix(N)      → ±1, normalized by √N during apply
 ```
 
 **Critical difference:** auto-round's `get_hadamard_K()` returns already-normalized matrices.
@@ -29,10 +122,10 @@ Quark's `_get_hadamard_K()` returns raw ±1 matrices. The normalization is appli
 in each framework's multiplication routines. This caused a catastrophic double-normalization
 bug in early auto-round development (hellaswag dropped from 0.42 to 0.26).
 
-### 1.3 Matrix Construction Algorithm
+### 1.6 Matrix Construction Algorithm
 
 All three frameworks use the **butterfly (Fast Walsh-Hadamard Transform)** algorithm for
-efficient Hadamard multiplication:
+efficient Hadamard multiplication (used for online R4 and R3):
 
 ```python
 # O(N log N) butterfly algorithm (shared across all three)
@@ -50,7 +143,10 @@ def matmul_hadU(X, hadamard_K, K):
     return X
 ```
 
-### 1.4 Rotation Size
+For offline rotation (R1/R2 weight fusion), dense matrix multiply is used since it only
+runs once during model preparation — the O(N²) cost is negligible.
+
+### 1.7 Rotation Size
 
 | Framework | Config Parameter | Default | Semantics |
 |-----------|-----------------|---------|-----------|
@@ -1212,5 +1308,124 @@ For a 28-layer model with hidden_size=1024:
 | Best quantization quality | auto-round (online R1) | Preserves original weight distributions |
 | Production deployment | llm-compressor | Full save/load, vLLM integration, Hadacore kernels |
 | Research / flexibility | Quark | Most features, trainable rotation, comprehensive export |
+
+---
+
+## 14. QuaRot vs SpinQuant: Algorithm Differences
+
+QuaRot and SpinQuant are two distinct rotation-based quantization papers that share the
+same R1–R4 rotation framework but differ significantly in their approach.
+
+### 14.1 Core Algorithm Comparison
+
+| Aspect | QuaRot | SpinQuant |
+|--------|--------|-----------|
+| **Paper** | [QuaRot (Ashkboos et al., 2024)](https://arxiv.org/abs/2404.00456) | [SpinQuant (Liu et al., 2024)](https://arxiv.org/abs/2405.16406) |
+| **Rotation matrix** | Fixed random Hadamard (H × D, D = diag(±1)) | Trainable orthogonal (optimized via Cayley SGD) |
+| **Training required?** | ❌ No — rotation is random, applied once | ✅ Yes — optimize R to minimize `\|Q(RW) - RW\|` |
+| **Calibration data** | Not needed for rotation (only for quantization) | Required for rotation training |
+| **Optimizer** | N/A | Cayley SGD on Stiefel manifold (preserves orthogonality) |
+| **Training cost** | Zero | Hours of GPU compute (forward+backward through LLM) |
+| **Quality** | Good (random scatter of outliers) | Better (optimized for specific model + quantization) |
+| **R1–R4 structure** | Same R1, R2, R3, R4 as SpinQuant | Invented R1, R2, R3, R4 terminology |
+| **Key insight** | Random orthogonal rotation reduces outliers enough | Learned rotation can further minimize quantization error |
+
+### 14.2 Mathematical Difference
+
+```
+QuaRot:
+  R = H × D          (H = Hadamard, D = random diagonal ±1)
+  Applied once, no optimization. Quality depends on luck of random D.
+
+SpinQuant:
+  R = argmin_R ||Q(R @ W) - R @ W||_F    subject to R.T @ R = I
+  Initialize: R₀ = I (identity matrix)
+  Optimize: Cayley SGD on Stiefel manifold for N epochs
+  Each step: R_{t+1} = Cayley(R_t - lr × ∇L)  (preserves orthogonality)
+```
+
+SpinQuant's training finds a rotation that specifically minimizes the quantization error
+for the given model and quantization scheme. QuaRot relies on the statistical argument
+that random Hadamard spreads outliers "well enough."
+
+### 14.3 How Each Framework Maps to QuaRot/SpinQuant
+
+| Framework | QuaRot Mode | SpinQuant Mode |
+|-----------|-------------|----------------|
+| **Quark** | `trainable=False, random_r1=True/False` | `trainable=True` (+ Cayley SGD training script) |
+| **auto-round** | `trainable_rotation=False` (default) | `trainable_rotation=True` (⚠️ training loop incomplete) |
+| **llm-compressor** | `learnable=False` (default, only option) | `learnable=True` → `NotImplementedError` |
+
+### 14.4 Quark's QuaRot vs SpinQuant Config Differences
+
+**QuaRot mode** (non-trainable, Quark default):
+```json
+{
+  "trainable": false,
+  "random_r1": false,       // deterministic Hadamard (can set true for random)
+  "random_r2": false,
+  "online_r1_rotation": true,
+  "r1": true, "r2": true, "r3": false, "r4": false
+}
+```
+- Uses `get_rotation_matrix(size, random=False)` → deterministic Hadamard
+- No training, no calibration data needed for rotation
+- Can enable `random_r1=True` for QuaRot-style random Hadamard
+- R3/R4 not commonly used in QuaRot (paper focuses on R1+R2)
+
+**SpinQuant mode** (trainable):
+```json
+{
+  "trainable": true,
+  "online_r1_rotation": true,
+  "online_config": {"shared_parallel": true},
+  "r1": true, "r2": true, "r3": false, "r4": false
+}
+```
+- R1 rotation initialized as `nn.Parameter(random_hadamard_matrix())` with `requires_grad=True`
+- Training script (`train_rotation.py`) runs Cayley SGD optimizer
+- `RotationLinear` wrapper wraps each linear → forward: `Q(R @ x) @ W` for gradient flow
+- After training: `post_process_trained_rotation()` fuses learned R into weights
+- Optional: `train_smooth=True` + `smooth_positions=["r1","r2","r4"]` for OSTQuant-style SmoothQuant scale training alongside rotation
+
+**Key Quark limitation:** `trainable=True` with `r3=True` raises `NotImplementedError`:
+```python
+# config.py line 2271
+if self.trainable and self.r3:
+    raise NotImplementedError("trainable=True along r3=True is not implemented.")
+```
+
+### 14.5 Quark's Training Pipeline (SpinQuant mode)
+
+```
+1. Load model → RotationProcessor.apply()
+   - Insert RotationLinear wrappers (trainable R as nn.Parameter)
+   - Optionally insert TrainableRMSNorm (SmoothQuant scales)
+   - Insert quantization observers (QDQ nodes)
+
+2. Training loop (train_rotation.py)
+   - Optimizer: SGDG (Cayley SGD for orthogonal params)
+                + Adam (for SmoothQuant scale params, if any)
+   - Forward: model(input) → loss (cross-entropy with teacher)
+   - Backward: gradients flow through Q(R @ x) → ∇R
+   - SGDG step: project gradient onto Stiefel manifold via Cayley transform
+
+3. Post-training: post_process_trained_rotation()
+   - Remove RotationLinear wrappers
+   - Fuse learned rotation R into weights: W_new = W @ R
+   - Insert InputRotationWrapperOrthogonal for online activation rotation
+   - Convert TrainableRMSNorm back to standard RMSNorm
+```
+
+### 14.6 Summary: When to Use Which
+
+| Scenario | Use QuaRot | Use SpinQuant |
+|----------|-----------|---------------|
+| Quick experiment | ✅ No training needed | ❌ Hours of training |
+| Best accuracy | ❌ Random rotation suboptimal | ✅ Optimized for specific model |
+| No calibration data | ✅ Works without data | ❌ Needs data for training |
+| Reproducibility | ✅ Deterministic H always same | ⚠️ Must save trained R |
+| Production | ✅ Simple pipeline | ✅ If accuracy matters more |
+| Large models (70B+) | ✅ No GPU training cost | ❌ Training cost very high |
 | No save/load needed | auto-round | Simplest API, hook-based, scheme-agnostic |
 | Need R3 support | auto-round or Quark | llm-compressor R3 is incomplete |
