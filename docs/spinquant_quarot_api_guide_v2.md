@@ -24,6 +24,10 @@
 11. [Dimension Support & Known Hadamard Matrices](#11-dimension-support)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Examples](#13-examples)
+- [Appendix A: Test Scripts Summary](#appendix-a-test-scripts-summary)
+- [Appendix B: Module Structure](#appendix-b-module-structure)
+- [Appendix C: Rotation Matrix Type Reference](#appendix-c-rotation-matrix-type-reference-comprehensive) ← **New**
+- [Appendix D: Migration from v1 API](#appendix-d-migration-from-v1-api)
 
 ---
 
@@ -67,7 +71,7 @@ After rotation:     [2.1, 1.8, 2.3, 1.9, 2.0, ...]     ← uniform distribution
 | String shorthand (`"quarot"`) | ✅ New in v2 | `apply_rotation(model, "quarot")` |
 | Non-power-of-2 dimensions | ✅ New in v2 | Known Hadamard matrices (12,20,28,...,172) via Quark port |
 | Deterministic Hadamard | ✅ Default | Same matrix every run, no need to persist |
-| Random Hadamard (H×D) | ✅ Via `random_r1=True`/`random_r2=True` | Must persist the matrix for reproducibility |
+| Random Hadamard (H×D) | ⚠️ Offline R1/R2 only | `random_r1=True`/`random_r2=True`; **ignored in online R1** (default mode) |
 | Online R1 (hook-based) | ✅ Default, recommended | Small runtime overhead per layer |
 | Offline R1 (weight fusion) | ✅ Via `online_r1_rotation=False` | ⚠️ May degrade accuracy when combined with quantization |
 | R2 (per-head V/O rotation) | ✅ Offline fused | Zero runtime cost |
@@ -122,11 +126,15 @@ of the transformer:
 
 ### 2.3 Rotation Matrix Types
 
-| Type | Formula | Reproducible? | Config |
-|------|---------|---------------|--------|
-| **Deterministic Hadamard** | `H = Sylvester(N) / √N` | Yes (same every run) | `random_r1=False` (default) |
-| **Random Hadamard** | `R = H × diag(±1)` | No (must save matrix) | `random_r1=True` |
-| **Trainable** (SpinQuant) | `R = Cayley(A)` optimized | No (must save) | `trainable_rotation=True` |
+| Type | Formula | Reproducible? | Config | Applicable Modes |
+|------|---------|---------------|--------|------------------|
+| **Deterministic Hadamard** | `H = Sylvester(N) / √N` | Yes (same every run) | `random_r1=False` (default) | All modes (online uses butterfly internally) |
+| **Random Hadamard** | `R = H × diag(±1) / √N` | No (must save matrix) | `random_r1=True` | **Offline R1 and R2 only** — ignored in online R1, R3, R4 |
+| **Trainable** (SpinQuant) | `R = Cayley(A)` optimized | No (must save) | `trainable_rotation=True` | Offline R1 and R2 only |
+
+> ⚠️ **Important:** `random_r1=True` is **silently ignored** when `online_r1_rotation=True`
+> (the default). Online R1 always uses deterministic Hadamard via the butterfly algorithm.
+> This matches Quark's behavior. See Appendix C for full details.
 
 ---
 
@@ -422,13 +430,15 @@ model = apply_rotation(model, config)
 model = apply_rotation(model, "quarot")
 ```
 
-**Random Hadamard (better outlier distribution):**
+**Random Hadamard (better outlier distribution — offline R1 only):**
 ```python
+# ⚠️ random_r1 only works with offline R1 (online_r1_rotation=False)
+# With online R1 (default), random_r1 is silently ignored
 config = SpinQuantConfig(
     r1=True, r2=True, r3=False, r4=False,
     trainable_rotation=False, trainable_smooth=False,
     random_r1=True, random_r2=True,
-    online_r1_rotation=True,
+    online_r1_rotation=False,  # Must be False for random_r1 to take effect
 )
 model = apply_rotation(model, config)
 ```
@@ -612,14 +622,17 @@ For each linear layer W in the block:
 ```
 
 **Online mode** (default, recommended):
-- Each target linear layer's weight is rotated: `W_rotated = W @ R1`
-- A `forward_pre_hook` applies `x_rotated = x @ R1.T` before the layer
+- Each target linear layer's weight is rotated: `W_rotated = matmul_hadU(W)` (butterfly)
+- A `forward_pre_hook` applies `x_rotated = matmul_hadU(x)` before the layer
 - No change to embeddings, norms, or output head
+- **Always uses deterministic Hadamard** — `random_r1=True` is silently ignored
+- Reason: butterfly algorithm only supports deterministic Hadamard structure
 
 **Offline mode** (`online_r1_rotation=False`):
 - Rotation is fused globally: `embed → R1`, `head → R1⁻¹`, all internal layers `R1⁻¹ @ W @ R1`
 - Requires untying embeddings and fusing RMSNorm
-- More complex, same mathematical result
+- Supports `random_r1=True` (random Hadamard `H × diag(±1)`)
+- Dimension must be power-of-2 (uses `deterministic_hadamard_matrix` / `random_hadamard_matrix`)
 
 ### 7.2 R2: Attention Head Rotation
 
@@ -724,17 +737,17 @@ AutoRound(model, tokenizer, scheme="W4A16", iters=200).quantize()
 ### 9.2 Online R1 vs Offline R1
 
 **Online R1** (recommended, `online_r1_rotation=True`):
-- Rotates each target module's weight: `W_rotated = W @ R1`
-- Registers `forward_pre_hook`: `x → x @ R1.T`
-- Pros: No need to untie embeddings or fuse RMSNorm, simpler
-- Cons: Small per-module runtime cost for the hook
+- Rotates each target module's weight via `matmul_hadU` (butterfly algorithm)
+- Registers `forward_pre_hook`: activation rotation via `matmul_hadU`
+- Pros: No need to untie embeddings or fuse RMSNorm, simpler, supports non-pow2 via known Hadamard
+- Cons: Small per-module runtime cost; **`random_r1` is ignored** (always deterministic)
 
 **Offline R1** (`online_r1_rotation=False`):
-- Fuses rotation globally into all weights
+- Fuses rotation globally into all weights using stored R1 matrix
 - Rotates embed_tokens, LM head, and all internal layers
 - Requires: untie embeddings + fuse RMSNorm (automatically handled)
-- Pros: Zero runtime overhead
-- Cons: More complex transformations, must handle embeddings carefully
+- Pros: Zero runtime overhead, supports `random_r1=True`
+- Cons: More complex transformations; requires pow2 dimension; must handle embeddings carefully
 
 **⚠️ Accuracy Warning:** In quantized models, offline R1 can degrade accuracy significantly
 because the fused RMSNorm changes the effective precision of normalization. Online R1 is
@@ -1034,7 +1047,153 @@ auto_round/algorithms/transforms/
         └── apply.py         # register_spinquant_hooks, apply_spinquant_in_place
 ```
 
-## Appendix C: Migration from v1 API
+## Appendix C: Rotation Matrix Type Reference (Comprehensive)
+
+This appendix provides a precise, per-rotation-level reference for what matrix type is used,
+what normalization convention applies, and what dimension constraints exist — including
+comparison with Quark and llm-compressor.
+
+### C.1 Auto-Round: Matrix Type per Rotation × Mode
+
+| Rotation | Mode | Matrix Generator | Normalized? | Random Supported? | Dimension Constraint |
+|----------|------|-----------------|-------------|-------------------|---------------------|
+| **R1** | **Online** (default) | `get_hadamard_K()` → `matmul_hadU()` (butterfly) | Yes (÷√n inside `matmul_hadU`) | ❌ No — `random_r1` is **silently ignored** | `rotation_size` must be decomposable by `get_hadamard_K` (pow2 or known Hadamard) |
+| **R1** | **Online + block** | `get_hadamard_K()` → dense matmul | Yes (manually ÷√n after kron) | ❌ No | `rotation_size` must be pow2, must divide `hidden_size` |
+| **R1** | **Offline** | `deterministic_hadamard_matrix()` or `random_hadamard_matrix()` | Yes (÷√n built-in) | ✅ Yes (`random_r1=True`) | `rotation_size` must be **pow2** (Sylvester construction) |
+| **R1** | **Trainable** | `torch.eye()` → Cayley SGD | N/A (learned) | N/A | `rotation_size` must be pow2 |
+| **R2** | Offline only | `deterministic_hadamard_matrix()` or `random_hadamard_matrix()` | Yes (÷√n built-in) | ✅ Yes (`random_r2=True`) | `head_dim` must be **pow2** |
+| **R2** | Trainable | `torch.eye()` → Cayley SGD | N/A (learned) | N/A | `head_dim` must be pow2 |
+| **R3** | Online only | `deterministic_hadamard_matrix()` → stored as buffer, applied via `matmul_hadU` butterfly in monkeypatch | Yes | ❌ No — always deterministic | `head_dim` must be **pow2** |
+| **R4** | Hybrid (act online + weight offline) | `get_hadamard_K()` → `matmul_hadU()` (butterfly) for activation; `apply_hadamard_to_linear()` for weight | Yes (÷√n inside `matmul_hadU`) | ❌ No — always deterministic | `rotation_size` supports **pow2 + known Hadamard** (broadest) |
+
+### C.2 Key Observations
+
+**Online R1 ignores `random_r1`:**
+When `online_r1_rotation=True` (the default), `_apply_online_r1()` generates its own
+Hadamard matrix via `get_hadamard_K()` — it does **not** use the `spinquant_R1` buffer
+created by `_init_rotation_matrices()`. The `random_r1=True` config option only takes effect
+in **offline mode** (`online_r1_rotation=False`). This matches Quark's behavior exactly:
+Quark's `apply_online_r1()` also ignores `r1_rotation` and generates Hadamard internally.
+
+**Reason:** Online rotation uses the O(n log n) butterfly algorithm (`matmul_hadU`) which
+can only compute **deterministic Hadamard** transforms. Random Hadamard (`H × diag(±1)`)
+would require storing and multiplying a full n×n matrix, losing the performance advantage.
+
+**Offline R1 requires pow2:**
+`deterministic_hadamard_matrix()` uses Sylvester construction which only produces
+power-of-2 sizes. `random_hadamard_matrix()` internally calls `matmul_hadU` which supports
+non-pow2 via `get_hadamard_K`, but currently the `_validate_dimensions()` check requires
+pow2 for R1 — so non-pow2 `hidden_size` models can't use offline R1 either.
+
+**R4 has broadest dimension support:**
+R4 validation uses `get_hadamard_K()` try/except, supporting all pow2 sizes plus the 11
+known Hadamard sizes (12, 20, 28, 36, 40, 52, 60, 108, 140, 156, 172) and their products
+with pow2. R1/R2/R3 validation still requires strict pow2 — this is a known inconsistency
+(see §5.4).
+
+### C.3 Normalization Functions Reference
+
+| Function | Returns | Normalization | Use Case |
+|----------|---------|---------------|----------|
+| `get_hadamard_K(n)` | `(H_K, K)` where n=K×2^m | **Unnormalized** (±1 entries, H@H.T=n·I) | Input to `matmul_hadU` butterfly algorithm |
+| `matmul_hadU(X)` | `X @ H / √n` | **Normalized** output | Online R1 full-dim, R3, R4 activation rotation |
+| `deterministic_hadamard_matrix(n)` | `H / √n` | **Normalized** (orthogonal, H@H.T=I) | Offline R1, R2, R3 matrix init |
+| `random_hadamard_matrix(n)` | `H × diag(±1) / √n` | **Normalized** (orthogonal) | Offline R1 (`random_r1=True`), R2 (`random_r2=True`) |
+| `apply_hadamard_to_linear(module)` | in-place weight rotation | **Normalized** (calls `matmul_hadU` internally) | R4 weight-side offline fusion |
+
+⚠️ **Critical rule:** If you use `get_hadamard_K()` directly for matrix multiplication
+(e.g., block rotation path), you **must** divide by `√n` manually. The online R1 block
+rotation bug (#18-fix) was caused by using `get_hadamard_K()` output without normalization.
+
+### C.4 Three-Framework Comparison
+
+#### R1 — Residual Stream Rotation
+
+| Feature | Auto-Round | Quark | llm-compressor |
+|---------|-----------|-------|----------------|
+| **Online mode** | ✅ Default | ✅ Default | ❌ Always offline |
+| **Offline mode** | ✅ `online_r1_rotation=False` | ✅ `online_r1_rotation=False` | ✅ (only mode) |
+| **Random R1** | ✅ Offline only (`random_r1=True`) | ✅ Offline only (`random_r1=True`) | ❌ Not supported (planned via `randomize=True` but raises `NotImplementedError`) |
+| **Online R1 + random** | ❌ Silently ignored | ❌ Silently ignored | N/A |
+| **Trainable R1** | ⚠️ Experimental | ✅ Supported | ❌ Not supported (`learnable=True` raises `NotImplementedError`) |
+| **Dimension req (online)** | pow2 or known Hadamard via `get_hadamard_K` | pow2 or known Hadamard via `_get_hadamard_K` | N/A |
+| **Dimension req (offline)** | pow2 only (`deterministic_hadamard_matrix`) | pow2 or known Hadamard (`get_rotation_matrix`) | pow2 or random-matrix fallback |
+| **Block rotation** | ✅ `rotation_size=N` | ✅ `rotation_size=N` | ✅ `transform_block_size=N` |
+| **Weight rotation algorithm** | `matmul_hadU` (full) or `rotate_in_channels_` (block) | `matmul_hadU` (full) or `rotate_in_channels_` (block) | `compressed_tensors` transform framework |
+| **Activation rotation** | `forward_pre_hook` calling `matmul_hadU` | `InputRotationWrapperHadamard` (replaces module) | N/A (offline only, no hooks) |
+| **RMSNorm fusion** | Online: skipped; Offline: fused | Online: skipped; Offline: fused | Always fused (`fuse_norm_linears`) |
+| **Embedding handling** | Online: untied only; Offline: untied + rotated | Online: not modified; Offline: rotated | Centered (`center_embeddings`) + rotated |
+
+#### R2 — Attention Head Rotation
+
+| Feature | Auto-Round | Quark | llm-compressor |
+|---------|-----------|-------|----------------|
+| **Mode** | Offline only (fused into v_proj/o_proj) | Offline only | Offline only |
+| **Random R2** | ✅ `random_r2=True` | ✅ `random_r2=True` | ❌ `NotImplementedError` |
+| **Trainable** | ⚠️ Experimental | ✅ Supported | ❌ `NotImplementedError` |
+| **Dimension** | `head_dim` (pow2 required) | `head_dim` | `head_dim` |
+| **Matrix type** | `deterministic_hadamard_matrix` / `random_hadamard_matrix` | `get_rotation_matrix(head_dim, random=...)` | `hadamard` transform type |
+
+#### R3 — Query/Key Rotation (After RoPE)
+
+| Feature | Auto-Round | Quark | llm-compressor |
+|---------|-----------|-------|----------------|
+| **Mode** | Online only (monkeypatch `apply_rotary_pos_emb`) | Online only (monkeypatch) | Online only (hooks on attention) |
+| **Matrix type** | Deterministic Hadamard only | Deterministic Hadamard only | Hadamard (configurable via `transform_type`) |
+| **Random** | ❌ Not supported | ❌ Not supported | ❌ `NotImplementedError` |
+| **Dimension** | `head_dim` (pow2 required) | `head_dim` | `head_dim` |
+| **`rotation_size`** | Ignored (always `head_dim`) | N/A | `transform_block_size` applies |
+
+#### R4 — MLP Activation Rotation
+
+| Feature | Auto-Round | Quark | llm-compressor |
+|---------|-----------|-------|----------------|
+| **Mode** | Hybrid: activation online (hook) + weight offline (fused into `down_proj`) | Hybrid: same as auto-round | Hybrid: same |
+| **Matrix type** | `get_hadamard_K` → `matmul_hadU` (butterfly) | `_get_hadamard_K` → `matmul_hadU` | `hadamard` / `random-hadamard` / `random-matrix` |
+| **Random** | ❌ Not supported | ❌ Not supported | ❌ `NotImplementedError` |
+| **Dimension** | `intermediate_size` or `rotation_size` — supports pow2 + known Hadamard | `intermediate_size` or `rotation_size` | `intermediate_size` or `transform_block_size` |
+| **Non-pow2 support** | ✅ via known Hadamard (e.g., 3072=12×256) | ✅ via known Hadamard | ✅ via `random-matrix` fallback (QR decomposition) |
+
+### C.5 rotation_size Constraints Summary
+
+| | Auto-Round | Quark | llm-compressor |
+|---|-----------|-------|----------------|
+| **Config name** | `rotation_size` | `rotation_size` | `transform_block_size` |
+| **Default** | `None` (= full dimension) | `None` (= full dimension) | `None` (= full dimension) |
+| **Affects R1** | ✅ `hidden_size / rotation_size` blocks | ✅ Same | ✅ Same |
+| **Affects R2** | ❌ Always `head_dim` | ❌ Always `head_dim` | ✅ Can override (unusual) |
+| **Affects R3** | ❌ Always `head_dim` | ❌ N/A | ✅ Can override (unusual) |
+| **Affects R4** | ✅ `intermediate_size / rotation_size` blocks | ✅ Same | ✅ Same |
+| **Must be pow2** | Yes (for R1 block rotation) | Yes (block path uses Hadamard) | No (supports `random-matrix`) |
+| **Must divide dim** | Yes | Yes | Yes |
+
+### C.6 Transform Type Comparison (llm-compressor specific)
+
+llm-compressor has three `transform_type` options that auto-round and Quark don't:
+
+| `transform_type` | Matrix | Performance | Dimension Support |
+|------------------|--------|-------------|-------------------|
+| `"hadamard"` | Sylvester Hadamard | Best (O(n log n) butterfly possible) | pow2 only |
+| `"random-hadamard"` | `H × diag(±1)` | Good (O(n²) dense) | pow2 only |
+| `"random-matrix"` | Random orthogonal via QR decomposition | Worst (O(n²) dense, no structure) | **Any size** |
+
+Auto-round and Quark handle non-pow2 via **known Hadamard matrices** (maintaining fast
+butterfly structure), while llm-compressor falls back to dense random orthogonal matrices.
+
+### C.7 Known Issues & Gaps
+
+| Issue | Status |
+|-------|--------|
+| `random_r1=True` silently ignored in online mode | ⚠️ Should warn user |
+| R1/R2/R3 validation requires pow2, R4 uses `get_hadamard_K` | ⚠️ Inconsistency (see §5.4) |
+| Offline R1 doesn't support non-pow2 `hidden_size` | ⚠️ Could use `get_hadamard_K` + normalize |
+| `spinquant_R1` buffer created but unused in online mode | ⚠️ Wasted memory |
+| Online R1 block rotation normalization bug | ✅ Fixed (÷√n added) |
+| R4 offline/online Hadamard mismatch | ✅ Fixed (prior checkpoint) |
+
+---
+
+## Appendix D: Migration from v1 API
 
 ```python
 # ──── v1 (still works, not deprecated) ────

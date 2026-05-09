@@ -323,6 +323,14 @@ class SpinQuantPreprocessor:
                 )
                 self.config.r1 = False
 
+        # Warn if random_r1 is set but will be ignored in online mode
+        if self.config.r1 and self.config.random_r1 and self.config.online_r1_rotation:
+            logger.warning(
+                "[SpinQuant] random_r1=True is ignored in online R1 mode "
+                "(online R1 always uses deterministic Hadamard via butterfly algorithm). "
+                "Set online_r1_rotation=False to use random Hadamard."
+            )
+
         if self.config.r2 and self.head_dim > 0 and not is_pow2(self.head_dim):
             logger.warning(
                 f"[SpinQuant] R2 requires head_dim to be a power of 2, "
@@ -433,9 +441,18 @@ class SpinQuantPreprocessor:
         # R1: r1_rotation_size x r1_rotation_size
         if self.config.r1:
             r1_size = self.r1_rotation_size
-            if self.config.trainable_rotation and not self.config.online_r1_rotation:
+            if self.config.online_r1_rotation and not self.config.trainable_rotation:
+                # Online non-trainable R1 generates Hadamard on-the-fly via
+                # get_hadamard_K() in _apply_online_r1(); no need to store a
+                # spinquant_R1 buffer (it would be unused).
+                logger.info(
+                    f"[SpinQuant] R1: Online mode — Hadamard will be computed "
+                    f"on-the-fly via butterfly algorithm (rotation_size={r1_size})"
+                )
+            elif self.config.trainable_rotation and not self.config.online_r1_rotation:
                 R1 = nn.Parameter(torch.eye(r1_size, device=model_device, dtype=dtype))
                 logger.info(f"[SpinQuant] R1: Trainable rotation matrix [{r1_size}×{r1_size}] (identity init)")
+                self._register_rotation("spinquant_R1", R1)
             else:
                 if self.config.random_r1:
                     R1 = nn.Parameter(
@@ -456,7 +473,7 @@ class SpinQuantPreprocessor:
                     )
                 else:
                     logger.info(f"[SpinQuant] R1: {matrix_type} [{r1_size}×{r1_size}] (fixed, offline fuse)")
-            self._register_rotation("spinquant_R1", R1)
+                self._register_rotation("spinquant_R1", R1)
 
         # R2_head: head_dim x head_dim
         if self.config.r2 and self.head_dim > 0:
@@ -657,8 +674,8 @@ class SpinQuantPreprocessor:
                         module.weight.data, hadamard_K=had_K_local, K=K
                     ).to(dtype)
                 elif in_features % r1_size == 0:
-                    # Block rotation: get_hadamard_K already returns normalized
-                    # (orthogonal) matrix — no extra division needed.
+                    # Block rotation: get_hadamard_K returns unnormalized matrix,
+                    # so we must normalize by 1/√r1_size to get an orthogonal matrix.
                     R_block = had_K_local.to(torch.float64)
                     if R_block.shape[0] != r1_size:
                         had_1, _ = get_hadamard_K(r1_size // K)
@@ -666,6 +683,7 @@ class SpinQuantPreprocessor:
                             had_K_local.to(device="cpu", dtype=torch.float64),
                             had_1.to(device="cpu", dtype=torch.float64),
                         )
+                    R_block = R_block / math.sqrt(r1_size)
                     rotate_in_channels_(module, R_in=R_block)
                 else:
                     raise ValueError(
@@ -698,7 +716,7 @@ class SpinQuantPreprocessor:
                 x = matmul_hadU(x, hadamard_K=hadamard_K.to(x.device), K=K)
                 return (x,) + args[1:]
         else:
-            # Block rotation
+            # Block rotation — normalize by 1/√r1_size for orthogonal matrix
             R_block = hadamard_K.to(torch.float64)
             if R_block.shape[0] != r1_size:
                 had_1, _ = get_hadamard_K(r1_size // K)
@@ -706,6 +724,7 @@ class SpinQuantPreprocessor:
                     hadamard_K.to(device="cpu", dtype=torch.float64),
                     had_1.to(device="cpu", dtype=torch.float64),
                 )
+            R_block = R_block / math.sqrt(r1_size)
             R_block_f32 = R_block.float()
 
             def hook(module, args):
