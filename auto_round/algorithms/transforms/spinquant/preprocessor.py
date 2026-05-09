@@ -61,7 +61,15 @@ logger = logging.getLogger("auto_round.spinquant")
 
 @dataclass
 class SpinQuantConfig:
-    """Configuration for SpinQuant preprocessing."""
+    """Configuration for SpinQuant / QuaRot preprocessing.
+
+    Feature Status:
+        ✅ QuaRot mode (``trainable_rotation=False``): Fully supported.
+           Fixed Hadamard rotation (R1–R4), no training needed, no calibration data.
+        ⚠️  SpinQuant mode (``trainable_rotation=True``): Experimental.
+           Training loop exists but not fully validated on real models.
+        ⚠️  Model save/load: Not yet implemented for models with online hooks.
+    """
 
     # Rotation dimensions
     r1: bool = True                    # R1: hidden_size rotation (offline fused)
@@ -85,6 +93,9 @@ class SpinQuantConfig:
     random_r2: bool = False
 
     # Training control
+    # ⚠️ trainable_rotation=True (SpinQuant mode) is experimental — training
+    #    loop exists but not validated end-to-end. Use trainable_rotation=False
+    #    (QuaRot mode) for production use.
     trainable_rotation: bool = True    # Learn R via Cayley SGD (False = QuaRot fixed Hadamard)
     trainable_smooth: bool = True      # Learn smooth_values via Adam (joint SmoothQuant)
     online_r1_rotation: bool = True    # Online R1: rotate target weights + hook (Quark default)

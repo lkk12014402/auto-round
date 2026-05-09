@@ -55,19 +55,21 @@ After rotation:     [2.1, 1.8, 2.3, 1.9, 2.0, ...]     ← uniform distribution
 
 ### What's Supported
 
-| Feature | Status |
-|---------|--------|
-| QuaRot (fixed Hadamard, R1-R4) | ✅ Fully supported |
-| SpinQuant (trainable rotation) | ⚠️ Scaffolding exists, training loop under development |
-| Deterministic Hadamard | ✅ Default |
-| Random Hadamard (H×D) | ✅ Via `random_r1=True`/`random_r2=True` |
-| Online R1 (hook-based) | ✅ Default |
-| Offline R1 (weight fusion) | ✅ Via `online_r1_rotation=False` |
-| R2 (per-head V/O rotation) | ✅ Offline fused |
-| R3 (Q/K after RoPE) | ✅ Online monkeypatch |
-| R4 (MLP activation) | ✅ Online hook |
-| Block rotation (`rotation_size`) | ✅ For non-power-of-2 models |
-| All HuggingFace architectures | ✅ Llama, Qwen, Mistral, Phi, Gemma, etc. |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| QuaRot (fixed Hadamard, R1-R4) | ✅ Fully supported | Production-ready, no training needed |
+| SpinQuant (trainable rotation) | ⚠️ Experimental | Training loop exists but NOT validated end-to-end on real models |
+| Deterministic Hadamard | ✅ Default | Same matrix every run, no need to persist |
+| Random Hadamard (H×D) | ✅ Via `random_r1=True`/`random_r2=True` | Must persist the matrix for reproducibility |
+| Online R1 (hook-based) | ✅ Default, recommended | Small runtime overhead per layer |
+| Offline R1 (weight fusion) | ✅ Via `online_r1_rotation=False` | ⚠️ May degrade accuracy when combined with quantization |
+| R2 (per-head V/O rotation) | ✅ Offline fused | Zero runtime cost |
+| R3 (Q/K after RoPE) | ✅ Online monkeypatch | Works across all HF architectures |
+| R4 (MLP activation) | ✅ Online hook | Hybrid: activation online + weight offline |
+| Block rotation (`rotation_size`) | ✅ For non-power-of-2 models | Auto-validates dimension compatibility |
+| Model save/load after rotation | ❌ Not yet implemented | Online hooks not serialized by `save_pretrained()` |
+| Pre-trained rotation matrices | ❌ Not shipped | No pre-trained SpinQuant matrices available |
+| All HuggingFace architectures | ✅ Llama, Qwen, Mistral, Phi, Gemma, etc. | Generic monkeypatch approach |
 
 ---
 
@@ -263,6 +265,11 @@ model = preprocessor.preprocess(dataloader=None)
 
 ### 4.3 `RotationTrainer` (Alternative Interface)
 
+> ⚠️ **Experimental**: The `RotationTrainer` has basic infrastructure (Cayley SGD,
+> KL-divergence loss, callbacks, checkpointing) but the SpinQuant training path
+> has **NOT been validated end-to-end** on real models. For production use, prefer
+> `SpinQuantPreprocessor` with `trainable_rotation=False` (QuaRot mode).
+
 HuggingFace-Trainer-style interface for SpinQuant training.
 
 ```python
@@ -403,8 +410,10 @@ SpinQuantConfig(
 )
 ```
 
-**SpinQuant (trainable, best accuracy — training under development):**
+**SpinQuant (trainable, best accuracy — ⚠️ experimental, training under development):**
 ```python
+# ⚠️ Training loop exists but NOT validated end-to-end.
+# Use QuaRot mode above for production.
 SpinQuantConfig(
     r1=True, r2=True, r3=False, r4=False,
     trainable_rotation=True, trainable_smooth=True,

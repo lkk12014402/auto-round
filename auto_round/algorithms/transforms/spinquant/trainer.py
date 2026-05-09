@@ -71,7 +71,13 @@ from auto_round.algorithms.transforms.spinquant.rotation_utils import (
 
 @dataclass
 class RotationTrainerConfig:
-    """Training hyperparameters for ``RotationTrainer``."""
+    """Training hyperparameters for ``RotationTrainer``.
+
+    ⚠️  **Experimental**: The SpinQuant training loop has basic infrastructure
+    (Cayley SGD, KL loss, callbacks, checkpointing) but has NOT been validated
+    end-to-end on real models. For production use, prefer QuaRot mode via
+    ``SpinQuantPreprocessor`` with ``trainable_rotation=False``.
+    """
 
     # ----------  Rotation knobs  ----------
     r1: bool = True
@@ -192,6 +198,11 @@ class LossLogger(RotationTrainerCallback):
 class RotationTrainer:
     """
     Trainer for SpinQuant / QuaRot orthogonal rotation matrices.
+
+    ⚠️  **Experimental**: This trainer has basic infrastructure but the
+    SpinQuant training path has NOT been validated end-to-end on real models.
+    For production QuaRot usage (fixed Hadamard, no training), use
+    ``SpinQuantPreprocessor`` directly instead.
 
     Similar to Quark's ``SpinQuantTrainer`` but decoupled from
     ``transformers.Trainer``, making it usable inside AutoRound without

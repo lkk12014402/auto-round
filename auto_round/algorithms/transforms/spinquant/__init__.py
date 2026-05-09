@@ -1,20 +1,53 @@
 """
-SpinQuant rotation for Intel AutoRound.
+SpinQuant / QuaRot rotation for Intel AutoRound.
 
-This package provides SpinQuant-style trainable orthogonal rotation
-transforms that can be applied before AutoRound quantization.
+This package provides orthogonal rotation transforms (QuaRot / SpinQuant)
+that can be applied before AutoRound quantization to improve accuracy.
+
+Feature Status
+--------------
+✅ **QuaRot (fixed Hadamard rotation)** — Fully supported.
+   Use ``trainable_rotation=False, trainable_smooth=False`` for fixed
+   Hadamard rotation (R1–R4) without any training or calibration data.
+
+⚠️  **SpinQuant (trainable rotation)** — Experimental / under development.
+   The training loop (``trainable_rotation=True``) has basic infrastructure
+   (Cayley SGD optimizer, KL-divergence loss, training hooks) but has NOT
+   been validated end-to-end on real models. Use at your own risk.
+   Known limitations:
+   - Training + R3 (online Q/K rotation) may cause gradient issues
+   - ``RotationTrainer.fuse()`` does not handle online R1 mode fully
+   - No pre-trained rotation matrices are shipped
+
+⚠️  **Model save/load after rotation** — Not yet implemented.
+   Rotated models with online hooks (R1/R3/R4) cannot be saved/loaded
+   with standard ``model.save_pretrained()`` because hooks are not
+   serialized. A rotation-config-aware save/load is planned.
 
 Main API::
 
-    RotationTrainer              – HuggingFace-Trainer-style SpinQuant trainer
-    RotationTrainerConfig        – Trainer hyperparameters
-    SpinQuantPreprocessor       – Direct preprocessing (8-step pipeline)
+    SpinQuantPreprocessor       – Direct preprocessing (8-step pipeline, recommended)
     SpinQuantConfig              – Configuration dataclass
-    TrainableRMSNorm             – RMSNorm + SmoothQuant wrapper
-    apply_spinquant_in_place     – In-place application (AutoRound style)
-    register_spinquant_hooks     – Online hook registration
+    apply_spinquant_in_place     – One-shot in-place application
+    register_spinquant_hooks     – Online hook registration (R3/R4)
 
-Example (Trainer style, recommended)::
+    RotationTrainer              – HuggingFace-Trainer-style SpinQuant trainer (⚠️ experimental)
+    RotationTrainerConfig        – Trainer hyperparameters
+
+Example (QuaRot — fixed Hadamard, recommended)::
+
+    from auto_round.algorithms.transforms.spinquant import SpinQuantPreprocessor, SpinQuantConfig
+
+    config = SpinQuantConfig(
+        r1=True, r2=True, r3=False, r4=False,
+        trainable_rotation=False,   # QuaRot: fixed Hadamard, no training needed
+        trainable_smooth=False,
+        online_r1_rotation=True,
+    )
+    SpinQuantPreprocessor(model, config).preprocess()  # no dataloader needed
+    AutoRound(model, tokenizer, bits=4).quantize()
+
+Example (SpinQuant — trainable, ⚠️ experimental)::
 
     from auto_round.algorithms.transforms.spinquant import (
         RotationTrainer, RotationTrainerConfig
@@ -22,21 +55,16 @@ Example (Trainer style, recommended)::
 
     trainer = RotationTrainer(
         model,
-        config=RotationTrainerConfig(iters=200, lr=1e-4),
+        config=RotationTrainerConfig(
+            trainable_rotation=True, iters=200, lr=1e-4,
+        ),
     )
-    metrics = trainer.train(dataloader)
+    metrics = trainer.train(dataloader)  # requires calibration data
     model = trainer.fuse()
 
     # Now model is ready for AutoRound
     autoround = AutoRound(model, tokenizer, bits=4, group_size=128)
     autoround.quantize()
-
-Example (Preprocessor style, simplest)::
-
-    from auto_round.algorithms.transforms.spinquant import SpinQuantPreprocessor, SpinQuantConfig
-
-    SpinQuantPreprocessor(model, SpinQuantConfig()).preprocess(dataloader)
-    AutoRound(model, tokenizer, bits=4).quantize()
 """
 
 from auto_round.algorithms.transforms.spinquant.cayley_optimizer import (
@@ -71,16 +99,7 @@ from auto_round.algorithms.transforms.spinquant.training import (
 )
 
 __all__ = [
-    # -- Trainer (HF-style, recommended) --
-    "RotationTrainer",
-    "RotationTrainerConfig",
-    "RotationTrainerCallback",
-    "LossLogger",
-    "OrthogonalityMonitor",
-    # -- Optimiser core (Cayley) --
-    "AdamAndSGDG",
-    "SGDG",
-    # -- Preprocessor (direct) --
+    # -- Preprocessor (QuaRot, recommended) --
     "SpinQuantConfig",
     "SpinQuantPreprocessor",
     "TrainableRMSNorm",
@@ -90,7 +109,16 @@ __all__ = [
     "remove_spinquant_hooks",
     # -- Input rotation wrapper (utility, used for rotation-only save/load) --
     "InputRotationWrapperHadamard",
-    # -- Legacy helpers --
+    # -- Trainer (⚠️ experimental: training loop not fully validated) --
+    "RotationTrainer",
+    "RotationTrainerConfig",
+    "RotationTrainerCallback",
+    "LossLogger",
+    "OrthogonalityMonitor",
+    # -- Optimiser core (Cayley) --
+    "AdamAndSGDG",
+    "SGDG",
+    # -- Training hooks (⚠️ experimental) --
     "SpinQuantTrainingHook",
     "SpinQuantState",
     "create_spinquant_optimizer",

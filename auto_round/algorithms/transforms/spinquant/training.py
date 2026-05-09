@@ -1,6 +1,11 @@
 """
 Training utilities for SpinQuant in AutoRound.
 
+⚠️  **Experimental**: These training utilities provide hooks and helpers for
+integrating SpinQuant training into AutoRound's calibration pipeline, but the
+training path has NOT been validated end-to-end. For production use, prefer
+QuaRot mode (fixed Hadamard, no training) via ``SpinQuantPreprocessor``.
+
 Provides hooks, callbacks, and helper functions for integrating
 SpinQuant training into AutoRound's calibration pipeline.
 
