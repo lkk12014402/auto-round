@@ -984,9 +984,33 @@ bash examples/run_rotation_scheme_matrix_v2.sh tuning
 See `examples/test_three_way_comparison.py` for side-by-side framework comparison
 using identical rotation configurations and quantization settings.
 
+> **Note:** `test_three_way_comparison.py` uses the legacy `SpinQuantPreprocessor` API
+> with `rotation_size=128` (block rotation). This still works after refactoring — no
+> modifications needed. However, with v2's known Hadamard matrices, block rotation is
+> no longer required for Qwen3-0.6B (intermediate_size=3072 = 12×256 is handled natively).
+> To compare full-dimension rotation across frameworks, change `rotation_size=128` to
+> `rotation_size=None` in the script.
+
 ---
 
-## Appendix A: Module Structure
+## Appendix A: Test Scripts Summary
+
+| Script | API | Description |
+|--------|-----|-------------|
+| `test_rotation_scheme_matrix.py` | Legacy (`SpinQuantPreprocessor`) | v1: Rotation × quantization accuracy matrix |
+| `test_rotation_scheme_matrix_v2.py` | Unified (`apply_rotation`) | v2: Same as above, adds R1+R2+R3, mmlu, non-pow2 support |
+| `run_rotation_scheme_matrix.sh` | — | v1 shell wrapper (modes: quick/full/full-matrix/...) |
+| `run_rotation_scheme_matrix_v2.sh` | — | v2 shell wrapper (adds tuning/tuning-matrix modes) |
+| `test_three_way_comparison.py` | Legacy (`SpinQuantPreprocessor`) | Auto-Round vs Quark vs llm-compressor comparison |
+| `test_reference_equivalence.py` | Legacy | Numerical equivalence vs Quark reference |
+| `test_quark_comparison.py` | Legacy | Side-by-side Quark vs auto-round rotation |
+| `test_rotation_levels.py` | Legacy | Per-level rotation correctness (no quantization) |
+
+All legacy-API scripts are **fully compatible** with the refactored code — `SpinQuantConfig`
+and `SpinQuantPreprocessor` are unchanged. The unified API (`apply_rotation`) is recommended
+for new scripts.
+
+## Appendix B: Module Structure
 
 ```
 auto_round/algorithms/transforms/
@@ -1010,7 +1034,7 @@ auto_round/algorithms/transforms/
         └── apply.py         # register_spinquant_hooks, apply_spinquant_in_place
 ```
 
-## Appendix B: Migration from v1 API
+## Appendix C: Migration from v1 API
 
 ```python
 # ──── v1 (still works, not deprecated) ────

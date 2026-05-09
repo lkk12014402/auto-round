@@ -1,0 +1,101 @@
+{
+  "locations": {
+    "/workspace": {
+      "tool_approvals": [
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "pip install"
+          ]
+        },
+        {
+          "kind": "write"
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "timeout"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "pip show"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "nvidia-smi"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "xargs"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "chmod"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "bash"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "sort"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "sed"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python3"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "rm"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "find"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "tee"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "awk"
+          ]
+        }
+      ]
+    }
+  }
+}
