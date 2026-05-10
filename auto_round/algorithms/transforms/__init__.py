@@ -19,8 +19,11 @@ quantisation step to improve numerical properties.
 
 Current algorithms
 ------------------
-* **hadamard** – Block-diagonal Hadamard rotations (QuaRot / SpinQuant style).
+* **hadamard** – Simple Hadamard rotations.
   See :mod:`auto_round.algorithms.transforms.rotation`.
+* **spinquant** – SpinQuant/QuaRot multi-level rotation (R1–R4) with optional
+  online hooks, trainable rotations, and known Hadamard matrices for non-pow2.
+  See :mod:`auto_round.algorithms.transforms.spinquant`.
 
 Adding a new algorithm
 -----------------------
@@ -80,7 +83,8 @@ def normalize_rotation_config(
 
     Args:
         config: One of: ``None``, :class:`RotationConfig`, a ``dict`` with
-                an ``"algorithm"`` key, or a plain Hadamard shorthand string.
+                an ``"algorithm"`` key, or a plain Hadamard shorthand string
+                (including ``"quarot"`` / ``"spinquant"``).
 
     Returns:
         The appropriate :class:`BaseRotationConfig` subclass, or ``None``
@@ -96,12 +100,29 @@ def normalize_rotation_config(
         alg = config.get("algorithm", "hadamard")
         if alg == "hadamard":
             return RotationConfig.model_validate(config)
+        if alg == "spinquant":
+            from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig
+
+            # Filter to only valid SpinQuantConfig fields
+            import dataclasses
+
+            valid_fields = {f.name for f in dataclasses.fields(SpinQuantConfig)}
+            filtered = {k: v for k, v in config.items() if k != "algorithm" and k in valid_fields}
+            return SpinQuantConfig(**filtered)
         raise ValueError(
             f"Unknown rotation algorithm: {alg!r}. " f"Registered algorithms: {sorted(BaseRotation._REGISTRY)}"
         )
 
     if isinstance(config, str):
-        # String shorthand → treat as Hadamard config.
+        key = config.strip().lower()
+        if key in ("spinquant", "quarot"):
+            from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig
+
+            # "quarot" → QuaRot defaults (no training)
+            if key == "quarot":
+                return SpinQuantConfig(trainable_rotation=False, trainable_smooth=False)
+            return SpinQuantConfig()
+        # Otherwise treat as Hadamard config.
         return RotationConfig.model_validate(_normalize_hadamard_config(config))
 
     raise TypeError(
