@@ -1,0 +1,6 @@
+rotation,scheme,random_hadamard,quant_iters,rotation_size,api,status,total_time_s,hellaswag,piqa,avg_accuracy
+none,FP16,False,0,,pipeline_v2,success,206.7,0.4732,0.6763,0.5747
+R1,MXFP4,False,0,,pipeline_v2,success,1065.3,0.3909,0.6143,0.5026
+R1+R2,MXFP4,False,0,,pipeline_v2,success,1068.4,0.3846,0.6088,0.4967
+R1+R2+R3,MXFP4,False,0,,pipeline_v2,success,1241.1,0.3869,0.6007,0.4938
+R1+R2+R3+R4,MXFP4,False,0,,pipeline_v2,success,1305.7,0.3609,0.6066,0.4838

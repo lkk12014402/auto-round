@@ -1,0 +1,45 @@
+═══════════════════════════════════════════════════════════════
+  Rotation × Scheme Matrix Test (v2 — pipeline API)
+  Model:            Qwen/Qwen3-8B
+  Device:           cuda:2
+  Mode:             full
+  rotation_size:    auto (known Hadamard)
+  rotation_sizes:   16,32,64,128,auto
+═══════════════════════════════════════════════════════════════
+Running full eval (no limit, common schemes, 5 tasks)...
+/usr/local/lib/python3.12/dist-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+13:59:45 [INFO] 
+══════════════════════════════════════════════════════════════════════
+13:59:45 [INFO]   ROTATION × QUANTIZATION ACCURACY MATRIX (v2)
+13:59:45 [INFO] ══════════════════════════════════════════════════════════════════════
+13:59:45 [INFO]   Model:          Qwen/Qwen3-8B
+13:59:45 [INFO]   Device:         cuda:2
+13:59:45 [INFO]   Rotations:      ['none', 'R1', 'R1+R2', 'R1+R2+R3', 'R1+R2+R3+R4']
+13:59:45 [INFO]   Schemes:        ['MXFP4', 'MXFP4', 'NVFP4']
+13:59:45 [INFO]   Total combos:   64
+13:59:45 [INFO]   Tasks:          ['hellaswag', 'piqa', 'winogrande', 'lambada_openai', 'mmlu']
+13:59:45 [INFO]   Eval limit:     full
+13:59:45 [INFO]   Quant iters:    0 (RTN)
+13:59:45 [INFO]   rotation_sizes: ['16', '32', '64', '128', 'auto']
+13:59:45 [INFO]   Hadamard type:  Deterministic
+13:59:45 [INFO]   Online R1:      True
+13:59:45 [INFO]   API:            AutoRound(rotation_config=...) pipeline (v2)
+13:59:45 [INFO]   Output dir:     results_v2_Qwen3-8B_rtn_rs16_32_64_128_auto_20260510_135945
+13:59:45 [INFO] ══════════════════════════════════════════════════════════════════════
+
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/config.json "HTTP/1.1 200 OK"
+13:59:52 [INFO] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/config.json "HTTP/1.1 200 OK"
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/tokenizer_config.json "HTTP/1.1 200 OK"
+13:59:53 [INFO] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/tokenizer_config.json "HTTP/1.1 200 OK"
+13:59:54 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+13:59:54 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+13:59:54 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/vocab.json "HTTP/1.1 307 Temporary Redirect"
+13:59:55 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/vocab.json "HTTP/1.1 200 OK"
+13:59:55 [INFO] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/vocab.json "HTTP/1.1 200 OK"
+13:59:57 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/merges.txt "HTTP/1.1 307 Temporary Redirect"
+13:59:57 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/merges.txt "HTTP/1.1 200 OK"
+13:59:57 [INFO] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/merges.txt "HTTP/1.1 200 OK"
+13:59:58 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json "HTTP/1.1 302 Found"

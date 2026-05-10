@@ -1,0 +1,44 @@
+═══════════════════════════════════════════════════════════════
+  Rotation × Scheme Matrix Test (v2 — pipeline API)
+  Model:            Qwen/Qwen3-8B
+  Device:           cuda:3
+  Mode:             tuning
+  rotation_size:    auto (known Hadamard)
+  rotation_sizes:   16,32,64,128,auto
+═══════════════════════════════════════════════════════════════
+Running with auto-round tuning (iters=200), common schemes...
+/usr/local/lib/python3.12/dist-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+13:59:46 [INFO] 
+══════════════════════════════════════════════════════════════════════
+13:59:46 [INFO]   ROTATION × QUANTIZATION ACCURACY MATRIX (v2)
+13:59:46 [INFO] ══════════════════════════════════════════════════════════════════════
+13:59:46 [INFO]   Model:          Qwen/Qwen3-8B
+13:59:46 [INFO]   Device:         cuda:3
+13:59:46 [INFO]   Rotations:      ['none', 'R1', 'R1+R2', 'R1+R2+R3', 'R1+R2+R3+R4']
+13:59:46 [INFO]   Schemes:        ['W4A16', 'MXFP4', 'NVFP4']
+13:59:46 [INFO]   Total combos:   64
+13:59:46 [INFO]   Tasks:          ['hellaswag', 'piqa', 'winogrande', 'lambada_openai', 'mmlu']
+13:59:46 [INFO]   Eval limit:     full
+13:59:46 [INFO]   Quant iters:    200 (auto-round tuning)
+13:59:46 [INFO]   rotation_sizes: ['16', '32', '64', '128', 'auto']
+13:59:46 [INFO]   Hadamard type:  Deterministic
+13:59:46 [INFO]   Online R1:      True
+13:59:46 [INFO]   API:            AutoRound(rotation_config=...) pipeline (v2)
+13:59:46 [INFO]   Output dir:     results_v2_Qwen3-8B_iters200_rs16_32_64_128_auto_20260510_135946
+13:59:46 [INFO] ══════════════════════════════════════════════════════════════════════
+
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+13:59:52 [WARNING] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/config.json "HTTP/1.1 200 OK"
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/tokenizer_config.json "HTTP/1.1 200 OK"
+13:59:54 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+13:59:54 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+13:59:54 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/vocab.json "HTTP/1.1 307 Temporary Redirect"
+13:59:55 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/vocab.json "HTTP/1.1 200 OK"
+13:59:57 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/merges.txt "HTTP/1.1 307 Temporary Redirect"
+13:59:57 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/merges.txt "HTTP/1.1 200 OK"
+13:59:58 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json "HTTP/1.1 302 Found"
+13:59:58 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/xet-read-token/b968826d9c46dd6066d109eabc6255188de91218 "HTTP/1.1 200 OK"

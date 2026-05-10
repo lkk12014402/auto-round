@@ -1,0 +1,53 @@
+═══════════════════════════════════════════════════════════════
+  Rotation × Scheme Matrix Test (v2 — pipeline API)
+  Model:            Qwen/Qwen3-0.6B
+  Device:           cuda:1
+  Mode:             tuning
+  rotation_size:    auto (known Hadamard)
+  rotation_sizes:   16,32,64,128,auto
+═══════════════════════════════════════════════════════════════
+Running with auto-round tuning (iters=200), common schemes...
+/usr/local/lib/python3.12/dist-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+13:59:44 [INFO] 
+══════════════════════════════════════════════════════════════════════
+13:59:44 [INFO]   ROTATION × QUANTIZATION ACCURACY MATRIX (v2)
+13:59:44 [INFO] ══════════════════════════════════════════════════════════════════════
+13:59:44 [INFO]   Model:          Qwen/Qwen3-0.6B
+13:59:44 [INFO]   Device:         cuda:1
+13:59:44 [INFO]   Rotations:      ['none', 'R1', 'R1+R2', 'R1+R2+R3', 'R1+R2+R3+R4']
+13:59:44 [INFO]   Schemes:        ['W4A16', 'MXFP4', 'NVFP4']
+13:59:44 [INFO]   Total combos:   64
+13:59:44 [INFO]   Tasks:          ['hellaswag', 'piqa', 'winogrande', 'lambada_openai', 'mmlu']
+13:59:44 [INFO]   Eval limit:     full
+13:59:44 [INFO]   Quant iters:    200 (auto-round tuning)
+13:59:44 [INFO]   rotation_sizes: ['16', '32', '64', '128', 'auto']
+13:59:44 [INFO]   Hadamard type:  Deterministic
+13:59:44 [INFO]   Online R1:      True
+13:59:44 [INFO]   API:            AutoRound(rotation_config=...) pipeline (v2)
+13:59:44 [INFO]   Output dir:     results_v2_Qwen3-0.6B_iters200_rs16_32_64_128_auto_20260510_135944
+13:59:44 [INFO] ══════════════════════════════════════════════════════════════════════
+
+13:59:51 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+13:59:51 [WARNING] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+13:59:51 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/config.json "HTTP/1.1 200 OK"
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json "HTTP/1.1 200 OK"
+13:59:52 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+13:59:53 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+13:59:53 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+13:59:53 [INFO] 
+======================================================================
+13:59:53 [INFO]   FP16 BASELINE (no rotation, no quantization)
+13:59:53 [INFO] ======================================================================
+13:59:54 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:54 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/config.json "HTTP/1.1 200 OK"
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  50%|████▉     | 155/311 [00:00<00:00, 1523.81it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 2142.34it/s]
+13:59:57 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/generation_config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:57 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json "HTTP/1.1 200 OK"
+13:59:58 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/custom_generate/generate.py "HTTP/1.1 404 Not Found"
+13:59:58 [WARNING] `pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way.
+13:59:58 [WARNING] Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration
+13:59:58 [INFO] Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+13:59:58 [INFO] Using pre-initialized model

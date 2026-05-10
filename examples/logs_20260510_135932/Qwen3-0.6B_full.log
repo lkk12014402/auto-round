@@ -1,0 +1,48 @@
+═══════════════════════════════════════════════════════════════
+  Rotation × Scheme Matrix Test (v2 — pipeline API)
+  Model:            Qwen/Qwen3-0.6B
+  Device:           cuda:0
+  Mode:             full
+  rotation_size:    auto (known Hadamard)
+  rotation_sizes:   16,32,64,128,auto
+═══════════════════════════════════════════════════════════════
+Running full eval (no limit, common schemes, 5 tasks)...
+/usr/local/lib/python3.12/dist-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+13:59:46 [INFO] 
+══════════════════════════════════════════════════════════════════════
+13:59:46 [INFO]   ROTATION × QUANTIZATION ACCURACY MATRIX (v2)
+13:59:46 [INFO] ══════════════════════════════════════════════════════════════════════
+13:59:46 [INFO]   Model:          Qwen/Qwen3-0.6B
+13:59:46 [INFO]   Device:         cuda:0
+13:59:46 [INFO]   Rotations:      ['none', 'R1', 'R1+R2', 'R1+R2+R3', 'R1+R2+R3+R4']
+13:59:46 [INFO]   Schemes:        ['MXFP4', 'MXFP4', 'NVFP4']
+13:59:46 [INFO]   Total combos:   64
+13:59:46 [INFO]   Tasks:          ['hellaswag', 'piqa', 'winogrande', 'lambada_openai', 'mmlu']
+13:59:46 [INFO]   Eval limit:     full
+13:59:46 [INFO]   Quant iters:    0 (RTN)
+13:59:46 [INFO]   rotation_sizes: ['16', '32', '64', '128', 'auto']
+13:59:46 [INFO]   Hadamard type:  Deterministic
+13:59:46 [INFO]   Online R1:      True
+13:59:46 [INFO]   API:            AutoRound(rotation_config=...) pipeline (v2)
+13:59:46 [INFO]   Output dir:     results_v2_Qwen3-0.6B_rtn_rs16_32_64_128_auto_20260510_135946
+13:59:46 [INFO] ══════════════════════════════════════════════════════════════════════
+
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+13:59:52 [WARNING] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+13:59:52 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/config.json "HTTP/1.1 200 OK"
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:53 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer_config.json "HTTP/1.1 200 OK"
+13:59:53 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+13:59:54 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+13:59:54 [INFO] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+13:59:54 [INFO] 
+======================================================================
+13:59:54 [INFO]   FP16 BASELINE (no rotation, no quantization)
+13:59:54 [INFO] ======================================================================
+13:59:55 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:55 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/config.json "HTTP/1.1 200 OK"
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  42%|████▏     | 130/311 [00:00<00:00, 1298.46it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 2045.71it/s]
+13:59:58 [INFO] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/generation_config.json "HTTP/1.1 307 Temporary Redirect"
+13:59:59 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json "HTTP/1.1 200 OK"
