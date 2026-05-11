@@ -22,10 +22,10 @@ Feature Status
    - ``RotationTrainer.fuse()`` does not handle online R1 mode fully
    - No pre-trained rotation matrices are shipped
 
-⚠️  **Model save/load after rotation** — Not yet implemented.
-   Rotated models with online hooks (R1/R3/R4) cannot be saved/loaded
-   with standard ``model.save_pretrained()`` because hooks are not
-   serialized. A rotation-config-aware save/load is planned.
+⚠️  **Model save/load after rotation** — Implemented via Plan A+C.
+   Rotated + quantized models are saved with rotation buffers injected into
+   QuantLinear modules. Use :func:`inject_spinquant_buffers` before save and
+   :func:`rebuild_spinquant_online` after load. See ``serialize.py`` for details.
 
 Main API::
 
@@ -97,6 +97,11 @@ from auto_round.algorithms.transforms.spinquant.trainer import (
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     InputRotationWrapperHadamard,
 )
+from auto_round.algorithms.transforms.spinquant.serialize import (
+    inject_spinquant_buffers,
+    rebuild_spinquant_online,
+    save_spinquant_config,
+)
 from auto_round.algorithms.transforms.spinquant.training import (
     SpinQuantState,
     SpinQuantTrainingHook,
@@ -117,6 +122,10 @@ __all__ = [
     "remove_spinquant_hooks",
     # -- Input rotation wrapper (utility, used for rotation-only save/load) --
     "InputRotationWrapperHadamard",
+    # -- Serialization (save/load rotated+quantized models) --
+    "inject_spinquant_buffers",
+    "rebuild_spinquant_online",
+    "save_spinquant_config",
     # -- Trainer (⚠️ experimental: training loop not fully validated) --
     "RotationTrainer",
     "RotationTrainerConfig",

@@ -304,6 +304,9 @@ class SpinQuantPreprocessor:
         # Step 8: cleanup training artefacts
         self._cleanup()
 
+        # Store config on model for downstream serialization (export pipeline)
+        self.model._spinquant_config = self.config
+
         # Print per-layer transformation summary table
         self._print_transformation_summary()
 
