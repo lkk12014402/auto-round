@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """Cayley optimizer for Stiefel manifold optimization.
 
 Adapted from AMD Quark's implementation for SpinQuant rotation matrix training.
@@ -157,9 +160,7 @@ class AdamAndSGDG(torch.optim.Optimizer):
         super().__init__(params, defaults={"lr": learning_rate})
 
         if self._has_adam:
-            self.adam_optimizer = torch.optim.Adam(
-                actual_adam, lr=smooth_learning_rate, betas=adam_betas, eps=adam_eps
-            )
+            self.adam_optimizer = torch.optim.Adam(actual_adam, lr=smooth_learning_rate, betas=adam_betas, eps=adam_eps)
         else:
             self.adam_optimizer = None
 
@@ -214,4 +215,3 @@ class AdamAndSGDG(torch.optim.Optimizer):
         if self.sgdg_optimizer and "sgdg" in state_dict:
             self.sgdg_optimizer.load_state_dict(state_dict["sgdg"])
         super().load_state_dict(state_dict["super"])
-

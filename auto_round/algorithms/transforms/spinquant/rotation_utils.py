@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """
 SpinQuant / QuaRot rotation utilities.
 
@@ -20,6 +23,7 @@ import torch.nn as nn
 # version incompatibilities that may produce unnormalized / low-precision
 # matrices).
 # ---------------------------------------------------------------------------
+
 
 def deterministic_hadamard_matrix(
     size: int, dtype: torch.dtype = torch.float32, device: torch.device = torch.device("cpu")
@@ -129,7 +133,7 @@ def matmul_hadU(X: torch.Tensor, hadamard_K: Optional[torch.Tensor] = None, K: O
         output[:, :, 0, :] = inp[:, :, 0, :] + inp[:, :, 1, :]
         output[:, :, 1, :] = inp[:, :, 0, :] - inp[:, :, 1, :]
         output = output.view(inp.shape[0], inp.shape[1], -1)
-        (inp, output) = (output, inp)
+        inp, output = (output, inp)
     del output
 
     # Apply the K×K Hadamard block (if K > 1)
@@ -197,6 +201,7 @@ __all__ = [
 # Matches Quark's ``InputRotationWrapperHadamard`` semantics.
 # ---------------------------------------------------------------------------
 
+
 class InputRotationWrapperHadamard(nn.Module):
     """nn.Module wrapper that applies Hadamard rotation to input before Linear.
 
@@ -236,8 +241,7 @@ class InputRotationWrapperHadamard(nn.Module):
 
         if not isinstance(original_module, nn.Linear):
             raise ValueError(
-                f"InputRotationWrapperHadamard only supports nn.Linear, "
-                f"got {type(original_module).__name__}"
+                f"InputRotationWrapperHadamard only supports nn.Linear, " f"got {type(original_module).__name__}"
             )
 
         self._rotation_size = rotation_size
@@ -247,9 +251,9 @@ class InputRotationWrapperHadamard(nn.Module):
         # Take ownership of weight and bias from the original module.
         # The original module is NOT stored as a submodule — this prevents
         # auto-round from discovering it via named_modules() and wrapping it.
-        self.weight = original_module.weight      # nn.Parameter, auto-registered
+        self.weight = original_module.weight  # nn.Parameter, auto-registered
         if original_module.bias is not None:
-            self.bias = original_module.bias       # nn.Parameter
+            self.bias = original_module.bias  # nn.Parameter
         else:
             self.register_parameter("bias", None)
 
@@ -258,10 +262,7 @@ class InputRotationWrapperHadamard(nn.Module):
         elif self._in_features % rotation_size == 0:
             self._use_butterfly = False
         else:
-            raise ValueError(
-                f"rotation_size={rotation_size} not compatible with "
-                f"in_features={self._in_features}"
-            )
+            raise ValueError(f"rotation_size={rotation_size} not compatible with " f"in_features={self._in_features}")
 
         # Compute / store Hadamard matrix
         if hadamard_K is None or K is None:
@@ -359,7 +360,7 @@ def rotate_in_channels_(
         rotated_modules.add(layer)
 
     W = layer.weight.data
-    R = (R_in if R_in is not None else rotation_matrix)
+    R = R_in if R_in is not None else rotation_matrix
     if R is None:
         return
 
@@ -376,10 +377,7 @@ def rotate_in_channels_(
         w_rotated = w_reshaped @ R_f64.T
         layer.weight.data = w_rotated.reshape(W.shape).to(W.dtype)
     else:
-        raise ValueError(
-            f"rotate_in_channels_: rotation_size={rot_size} does not divide "
-            f"weight dim={W.shape[-1]}"
-        )
+        raise ValueError(f"rotate_in_channels_: rotation_size={rot_size} does not divide " f"weight dim={W.shape[-1]}")
 
     # input-side rotation does NOT affect bias:
     # y = (W @ R.T) @ (R @ x) + b = W @ x + b
@@ -437,10 +435,7 @@ def rotate_out_channels_(
         wt_rotated = wt_reshaped @ R_f64
         layer.weight.data = wt_rotated.reshape(WT.shape).T.contiguous().to(W.dtype)
     else:
-        raise ValueError(
-            f"rotate_out_channels_: rotation_size={rot_size} does not divide "
-            f"output dim={out_dim}"
-        )
+        raise ValueError(f"rotate_out_channels_: rotation_size={rot_size} does not divide " f"output dim={out_dim}")
 
     # Rotate bias if present
     if layer.bias is not None:
@@ -453,8 +448,7 @@ def rotate_out_channels_(
             layer.bias.data = b_rotated.to(layer.bias.dtype)
         else:
             raise ValueError(
-                f"rotate_out_channels_: rotation_size={rot_size} does not divide "
-                f"bias dim={bias_f64.shape[0]}"
+                f"rotate_out_channels_: rotation_size={rot_size} does not divide " f"bias dim={bias_f64.shape[0]}"
             )
 
 
@@ -468,6 +462,7 @@ def fuse_rmsnorm_in_model(model: nn.Module) -> None:
     # Attempt to use AutoRound's model_config layer discovery if available.
     try:
         from auto_round.algorithms.transforms.rotation.inplace.model_config import get_scaling_layers
+
         layer_paths = get_scaling_layers(model.config.model_type if hasattr(model, "config") else "")
         if layer_paths:
             # Model-config-driven fusion (supports GPT-2, OPT, etc.)
@@ -601,8 +596,9 @@ def apply_hadamard_to_linear(
             to input channels (columns).
     """
     # Support both nn.Linear and InputRotationWrapperHadamard
-    assert isinstance(module, (nn.Linear, InputRotationWrapperHadamard)), \
-        f"module must be nn.Linear or InputRotationWrapperHadamard, got {type(module).__name__}"
+    assert isinstance(
+        module, (nn.Linear, InputRotationWrapperHadamard)
+    ), f"module must be nn.Linear or InputRotationWrapperHadamard, got {type(module).__name__}"
     in_features = module.in_features
     out_features = module.out_features
 
@@ -628,23 +624,21 @@ def apply_hadamard_to_linear(
             # Apply H per had_dim chunk on the output (row) dimension
             # W shape: [out_features, in_features]
             # Reshape to [out_features // had_dim, had_dim, in_features]
-            assert out_features % had_dim == 0, \
-                f"out_features={out_features} not divisible by had_dim={had_dim}"
+            assert out_features % had_dim == 0, f"out_features={out_features} not divisible by had_dim={had_dim}"
             n_chunks = out_features // had_dim
             W_reshaped = W.reshape(n_chunks, had_dim, in_features)
             # Apply H to each chunk: H @ chunk (along dim 1)
-            W_reshaped = torch.einsum('ij,kjl->kil', H, W_reshaped)
+            W_reshaped = torch.einsum("ij,kjl->kil", H, W_reshaped)
             W = W_reshaped.reshape(out_features, in_features)
         else:
             # Apply H per had_dim chunk on the input (column) dimension
             # W shape: [out_features, in_features]
             # Reshape to [out_features, in_features // had_dim, had_dim]
-            assert in_features % had_dim == 0, \
-                f"in_features={in_features} not divisible by had_dim={had_dim}"
+            assert in_features % had_dim == 0, f"in_features={in_features} not divisible by had_dim={had_dim}"
             n_chunks = in_features // had_dim
             W_reshaped = W.reshape(out_features, n_chunks, had_dim)
             # Apply H to each chunk: chunk @ H.T (along last dim)
-            W_reshaped = torch.einsum('ijk,lk->ijl', W_reshaped, H)
+            W_reshaped = torch.einsum("ijk,lk->ijl", W_reshaped, H)
             W = W_reshaped.reshape(out_features, in_features)
 
     module.weight.data = W.to(dtype)
@@ -656,7 +650,7 @@ def apply_hadamard_to_linear(
             b = H @ b
         else:
             b_reshaped = b.view(n_chunks, had_dim)
-            b_reshaped = torch.einsum('ij,kj->ki', H, b_reshaped)
+            b_reshaped = torch.einsum("ij,kj->ki", H, b_reshaped)
             b = b_reshaped.view(-1)
         module.bias.data = b.to(module.bias.dtype)
 
@@ -676,9 +670,7 @@ def get_model_arch_info(model: nn.Module) -> dict:
         info["num_q_heads"] = getattr(cfg, "num_attention_heads", 0)
         info["num_kv_heads"] = getattr(cfg, "num_key_value_heads", info["num_q_heads"])
         info["intermediate_size"] = getattr(cfg, "intermediate_size", 0)
-        info["head_dim"] = getattr(
-            cfg, "head_dim", info["hidden_size"] // max(info["num_q_heads"], 1)
-        )
+        info["head_dim"] = getattr(cfg, "head_dim", info["hidden_size"] // max(info["num_q_heads"], 1))
         if all(v for v in [info["hidden_size"], info["head_dim"], info["intermediate_size"]]):
             return info
 
@@ -724,7 +716,7 @@ def get_model_arch_info(model: nn.Module) -> dict:
             q_proj = getattr(attn, "q_proj", None)
             if q_proj is not None:
                 out_dim = q_proj.weight.shape[0]  # hidden_size
-                in_dim = q_proj.weight.shape[1]   # hidden_size
+                in_dim = q_proj.weight.shape[1]  # hidden_size
                 info.setdefault("hidden_size", out_dim)
                 # Infer head count from output projection if available
                 o_proj = getattr(attn, "o_proj", None)
@@ -737,7 +729,7 @@ def get_model_arch_info(model: nn.Module) -> dict:
                 kv_dim = k_proj.weight.shape[0]
                 # num_kv_heads = hidden_size // head_dim (approximate)
                 # We'll set head_dim = hidden_size // num_q_heads if we can find it
-        
+
         # MLP intermediate size
         mlp = getattr(first_layer, "mlp", None)
         if mlp is None:
@@ -764,6 +756,7 @@ def get_attention_layers(model: nn.Module):
     """Yield attention modules using model_config if available, else fall back."""
     try:
         from auto_round.algorithms.transforms.rotation.inplace.model_config import get_attention_layers as _get
+
         return _get(model)
     except ImportError:
         pass

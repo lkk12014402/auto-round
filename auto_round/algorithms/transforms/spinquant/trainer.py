@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """
 SpinQuant / QuaRot Trainer for AutoRound.
 
@@ -75,18 +78,18 @@ class RotationTrainerConfig:
     r3: bool = True
     r4: bool = True
 
-    trainable_rotation: bool = True   # False = fixed Hadamard (QuaRot)
-    trainable_smooth: bool = True     # joint SmoothQuant training
+    trainable_rotation: bool = True  # False = fixed Hadamard (QuaRot)
+    trainable_smooth: bool = True  # joint SmoothQuant training
     online_r1_rotation: bool = False
 
     # ----------  Optimiser  ----------
-    lr: float = 1e-4                  # SGDG lr  (rotation matrices)
-    smooth_lr: float = 1e-3           # Adam lr  (smooth values)
+    lr: float = 1e-4  # SGDG lr  (rotation matrices)
+    smooth_lr: float = 1e-3  # Adam lr  (smooth values)
     iters: int = 200
     batch_size: int = 1
 
     # ----------  Loss  ----------
-    loss_type: str = "kl_top"          # kl_top | kl_full | mse
+    loss_type: str = "kl_top"  # kl_top | kl_full | mse
     kl_top_k: int = 1000
 
     # ----------  Pipeline  ----------
@@ -96,9 +99,9 @@ class RotationTrainerConfig:
     # ----------  Misc  ----------
     dtype: torch.dtype = torch.float32
     device: Optional[str] = None
-    log_interval: int = 50            # print every N steps
-    eval_interval: int = 0            # 0 = never
-    save_interval: int = 0            # 0 = never
+    log_interval: int = 50  # print every N steps
+    eval_interval: int = 0  # 0 = never
+    save_interval: int = 0  # 0 = never
     checkpoint_dir: Optional[str] = None
 
     def __post_init__(self):
@@ -253,9 +256,7 @@ class RotationTrainer:
         self._loss_buffer: list[float] = []
 
         # SpinQuant preprocessor (reused for init / fusion)
-        self._preprocessor = SpinQuantPreprocessor(
-            model, self._to_sq_config(self.config)
-        )
+        self._preprocessor = SpinQuantPreprocessor(model, self._to_sq_config(self.config))
 
     # ------------------------------------------------------------------
     # Public API
@@ -344,7 +345,8 @@ class RotationTrainer:
                 logits_ori = out_ori.logits if hasattr(out_ori, "logits") else out_ori
 
                 loss = compute_rotation_loss(
-                    logits_rot, logits_ori,
+                    logits_rot,
+                    logits_ori,
                     loss_type=self.config.loss_type,
                     kl_top_k=self.config.kl_top_k,
                 )
@@ -375,12 +377,10 @@ class RotationTrainer:
             "step": self.state["step"],
             "config": self.config,
             "rotation_params": {
-                n: p.data.cpu() for n, p in self.model.named_parameters()
-                if p.requires_grad and "spinquant_R" in n
+                n: p.data.cpu() for n, p in self.model.named_parameters() if p.requires_grad and "spinquant_R" in n
             },
             "smooth_params": {
-                n: p.data.cpu() for n, p in self.model.named_parameters()
-                if p.requires_grad and "smooth_values" in n
+                n: p.data.cpu() for n, p in self.model.named_parameters() if p.requires_grad and "smooth_values" in n
             },
         }
         torch.save(ckpt, path)
@@ -426,14 +426,17 @@ class RotationTrainer:
         # 4. Register online hooks (R3 / R4)
         if cfg.r3 or cfg.r4:
             self._hook_handles = register_spinquant_hooks(
-                self.model, self._to_sq_config(cfg),
+                self.model,
+                self._to_sq_config(cfg),
                 head_dim=self.head_dim,
                 intermediate_size=self.intermediate_size,
             )
 
         # 5. Create dual optimiser (shared helper)
         self.optimizer = create_dual_optimizer(
-            self.model, lr=cfg.lr, smooth_lr=cfg.smooth_lr,
+            self.model,
+            lr=cfg.lr,
+            smooth_lr=cfg.smooth_lr,
         )
 
         # 6. Clone original model for KL reference (shared helper)
@@ -467,7 +470,8 @@ class RotationTrainer:
             loss = self.compute_loss_fn(logits_rot, logits_ori, self.config)
         else:
             loss = compute_rotation_loss(
-                logits_rot, logits_ori,
+                logits_rot,
+                logits_ori,
                 loss_type=self.config.loss_type,
                 kl_top_k=self.config.kl_top_k,
             )
@@ -526,4 +530,3 @@ class RotationTrainer:
             dtype=cfg.dtype,
             device=cfg.device,
         )
-

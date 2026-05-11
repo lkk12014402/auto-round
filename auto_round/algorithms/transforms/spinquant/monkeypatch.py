@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """
 SpinQuant / QuaRot monkeypatch utilities for online rotations.
 
@@ -120,6 +123,7 @@ class QKRotationWrapper(nn.Module):
 
         if self._had_matrix is not None:
             from auto_round.algorithms.transforms.spinquant.rotation_utils import matmul_hadU
+
             # Apply Hadamard on last dimension (head_dim)
             orig_dtype = q.dtype
             q = matmul_hadU(q.float()).to(orig_dtype)
@@ -145,7 +149,5 @@ def add_qk_rotation_after_rope(
     Returns:
         The QKRotationWrapper instance (call ``.set_hadamard()`` to activate).
     """
-    wrapper = add_wrapper_after_function_call_in_method(
-        attn_module, "forward", rope_function_name, QKRotationWrapper
-    )
+    wrapper = add_wrapper_after_function_call_in_method(attn_module, "forward", rope_function_name, QKRotationWrapper)
     return wrapper

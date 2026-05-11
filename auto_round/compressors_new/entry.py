@@ -9,9 +9,9 @@ import torch
 from auto_round.algorithms.alg_config import AlgConfig
 from auto_round.algorithms.quantization.rtn.config import RTNConfig
 from auto_round.algorithms.quantization.sign_round.config import SignRoundConfig
-from auto_round.algorithms.transforms.rotation.config import RotationConfig as _NewArchRotationConfig
 from auto_round.algorithms.transforms import normalize_rotation_config as _normalize_any_rotation_config
 from auto_round.algorithms.transforms.base import BaseRotationConfig as _BaseRotationConfig
+from auto_round.algorithms.transforms.rotation.config import RotationConfig as _NewArchRotationConfig
 from auto_round.auto_scheme.gen_auto_scheme import AutoScheme
 from auto_round.compressors_new.calib import CalibCompressor, CalibratedRTNCompressor
 from auto_round.compressors_new.utils import check_need_act_calibration

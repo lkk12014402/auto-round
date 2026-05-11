@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """
 SpinQuant in-place application sub-package.
 
@@ -15,4 +18,3 @@ __all__ = [
     "register_spinquant_hooks",
     "remove_spinquant_hooks",
 ]
-

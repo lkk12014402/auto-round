@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """SpinQuant / QuaRot mixin for AutoRound compressors.
 
 .. deprecated::
@@ -123,8 +126,7 @@ class SpinQuantMixin:
             return model
 
         warnings.warn(
-            "preprocess_with_spinquant() is deprecated.  Use "
-            "apply_rotation(model, SpinQuantConfig(...)) instead.",
+            "preprocess_with_spinquant() is deprecated.  Use " "apply_rotation(model, SpinQuantConfig(...)) instead.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -150,9 +152,7 @@ class SpinQuantMixin:
             dataloader=dataloader,
         )
 
-        self.spinquant_state.rotation_names = [
-            n for n, _ in model.named_parameters() if "spinquant" in n
-        ]
+        self.spinquant_state.rotation_names = [n for n, _ in model.named_parameters() if "spinquant" in n]
         return result
 
     def get_spinquant_summary(self) -> dict[str, Any]:
@@ -167,8 +167,7 @@ def patch_compressor_for_spinquant(compressor_class: type) -> type:
         Use ``rotation_configs=["quarot"]`` in :class:`AutoRound` instead.
     """
     warnings.warn(
-        "patch_compressor_for_spinquant() is deprecated.  Use "
-        "rotation_configs=['quarot'] in AutoRound instead.",
+        "patch_compressor_for_spinquant() is deprecated.  Use " "rotation_configs=['quarot'] in AutoRound instead.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -189,4 +188,3 @@ def patch_compressor_for_spinquant(compressor_class: type) -> type:
         compressor_class.get_spinquant_summary = SpinQuantMixin.get_spinquant_summary  # type: ignore[method-assign]
 
     return compressor_class
-
