@@ -61,10 +61,13 @@ In auto-round, both share the same codebase. The difference is a config flag:
 ```python
 from auto_round import AutoRound
 
-# "quarot" applies R1+R2+R3+R4 with fixed Hadamard, then quantizes
+# "quarot" applies R1+R2 with fixed Hadamard, then quantizes
 autoround = AutoRound(model, tokenizer, rotation_config="quarot", scheme="W4A16", iters=0)
 autoround.quantize()
 ```
+
+> **Default:** `"quarot"` and `"spinquant"` enable **R1+R2 only**. To enable R3/R4,
+> use `SpinQuantConfig(r3=True, r4=True)` explicitly.
 
 ### Full Control — SpinQuantConfig
 
@@ -73,7 +76,7 @@ from auto_round import AutoRound
 from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
 
 cfg = SpinQuantConfig(
-    r1=True, r2=True, r3=True, r4=True,
+    r1=True, r2=True, r3=True, r4=True,  # Enable all levels explicitly
     trainable_rotation=False,    # QuaRot (fixed Hadamard)
     trainable_smooth=False,
     online_r1_rotation=True,     # Online R1 (recommended)
@@ -96,8 +99,8 @@ model = apply_rotation(model, "quarot")
 
 | Value | Description |
 |-------|-------------|
-| `"quarot"` | QuaRot defaults: R1+R2+R3+R4, fixed Hadamard |
-| `"spinquant"` | SpinQuant defaults: R1+R2+R3+R4, with learnable rotations |
+| `"quarot"` | QuaRot defaults: R1+R2, fixed Hadamard |
+| `"spinquant"` | SpinQuant defaults: R1+R2, with learnable rotations |
 | `"hadamard"` | Simple Hadamard rotation (original auto-round) |
 | `SpinQuantConfig(...)` | Full control over all parameters |
 | `{"algorithm": "spinquant", "r1": True, ...}` | Dict-based config |
@@ -282,8 +285,8 @@ This is less effective than full-dimensional rotation but works for any size div
 |-------|------|---------|-------------|
 | `r1` | bool | True | Enable R1 (residual stream rotation) |
 | `r2` | bool | True | Enable R2 (attention head rotation) |
-| `r3` | bool | True | Enable R3 (Q/K rotation after RoPE) |
-| `r4` | bool | True | Enable R4 (MLP activation rotation) |
+| `r3` | bool | False | Enable R3 (Q/K rotation after RoPE) |
+| `r4` | bool | False | Enable R4 (MLP activation rotation) |
 | `online_r1_rotation` | bool | True | Use online R1 (hook) vs offline (weight fusion) |
 | `trainable_rotation` | bool | True | Learn rotation matrices (SpinQuant) vs fixed (QuaRot) |
 | `trainable_smooth` | bool | True | Learn smooth parameters (SpinQuant only) |
@@ -294,22 +297,22 @@ This is less effective than full-dimensional rotation but works for any size div
 ### Common Presets
 
 ```python
-# QuaRot (recommended for most users)
+# QuaRot R1+R2 (default — recommended for most users)
 SpinQuantConfig(
-    r1=True, r2=True, r3=True, r4=True,
     trainable_rotation=False, trainable_smooth=False,
     online_r1_rotation=True,
 )
 
-# QuaRot R1+R2 only (faster, simpler)
+# QuaRot R1+R2+R3+R4 (full rotation, best for weight+activation quantization)
 SpinQuantConfig(
-    r1=True, r2=True, r3=False, r4=False,
+    r3=True, r4=True,
     trainable_rotation=False, trainable_smooth=False,
+    online_r1_rotation=True,
 )
 
 # QuaRot with random Hadamard for R1/R2 (offline R1 only)
 SpinQuantConfig(
-    r1=True, r2=True, r3=False, r4=False,
+    r1=True, r2=True,
     trainable_rotation=False, trainable_smooth=False,
     online_r1_rotation=False,  # Must be offline for random to take effect
     random_r1=True, random_r2=True,
@@ -317,7 +320,6 @@ SpinQuantConfig(
 
 # SpinQuant (learnable rotations)
 SpinQuantConfig(
-    r1=True, r2=True, r3=True, r4=True,
     trainable_rotation=True, trainable_smooth=True,
 )
 ```
@@ -385,7 +387,7 @@ When you pass `rotation_config` to `AutoRound`, here's what happens internally:
 
 ```
 AutoRound(rotation_config="quarot")
-  → normalize_rotation_config("quarot") → SpinQuantConfig(...)
+  → normalize_rotation_config("quarot") → SpinQuantConfig(r1=True, r2=True)
   → BaseCompressor.__init__(config=[QuantConfig, SpinQuantConfig])
   → BaseCompressor.quantize()
     → Phase 4.5: _apply_rotations()

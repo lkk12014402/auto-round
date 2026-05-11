@@ -94,7 +94,7 @@ case "$MODE" in
             $RS_FLAG $RSS_FLAG \
             --rotations "none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4" \
             --schemes "MXFP4,MXFP4,NVFP4" \
-            --tasks "hellaswag,piqa,winogrande,lambada_openai,mmlu"
+            --tasks "hellaswag,piqa,winogrande,lambada_openai"
         ;;
 
     full-matrix)
@@ -163,7 +163,7 @@ case "$MODE" in
             --rotations "none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4" \
             --schemes "W4A16,MXFP4,NVFP4" \
             --quant-iters 200 \
-            --tasks "hellaswag,piqa,winogrande,lambada_openai,mmlu" \
+            --tasks "hellaswag,piqa,winogrande,lambada_openai" \
             ${2:+--limit $2}
         ;;
 

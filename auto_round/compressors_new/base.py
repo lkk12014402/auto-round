@@ -870,6 +870,7 @@ class BaseCompressor(object):
         if not self.rotation_configs:
             return
         logger.info("Applying Hadamard transform to the model.")
+        print(self.rotation_configs)
         for rotation_cfg in self.rotation_configs:
             self.model_context.model = apply_rotation(
                 self.model_context.model,
