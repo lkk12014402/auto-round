@@ -235,20 +235,23 @@ def _inject_spinquant_buffers_on_layer(layer_name, qlayer, model):
 
     try:
         from auto_round.algorithms.transforms.spinquant.serialize import (
-            _inject_rotation_buffers,
-            _get_stored_rotation,
-            _get_hidden_size,
-            _get_intermediate_size,
             _R1_PREFIX,
             _R4_PREFIX,
+            _get_hidden_size,
+            _get_intermediate_size,
+            _get_stored_rotation,
+            _inject_rotation_buffers,
         )
 
         if spinquant_config.r1 and spinquant_config.online_r1_rotation and short_name in r1_proj_names:
             hidden_size = _get_hidden_size(model)
             r1_size = spinquant_config.rotation_size or hidden_size
             _inject_rotation_buffers(
-                qlayer, _R1_PREFIX, r1_size,
-                random=spinquant_config.random_r1, is_trained=False,
+                qlayer,
+                _R1_PREFIX,
+                r1_size,
+                random=spinquant_config.random_r1,
+                is_trained=False,
                 rotation_matrix=_get_stored_rotation(model, "spinquant_R1"),
             )
 
@@ -256,8 +259,11 @@ def _inject_spinquant_buffers_on_layer(layer_name, qlayer, model):
             intermediate_size = _get_intermediate_size(model)
             r4_size = spinquant_config.rotation_size or intermediate_size
             _inject_rotation_buffers(
-                qlayer, _R4_PREFIX, r4_size,
-                random=False, is_trained=False,
+                qlayer,
+                _R4_PREFIX,
+                r4_size,
+                random=False,
+                is_trained=False,
                 rotation_matrix=None,
             )
     except Exception as e:
@@ -410,15 +416,15 @@ def _inject_spinquant_rotation_buffers(model, quantization_config):
         from auto_round.algorithms.transforms.spinquant.serialize import (
             inject_spinquant_buffers,
         )
+
         n = inject_spinquant_buffers(model, spinquant_config)
         if n > 0:
             # Also embed spinquant_config in quantization_config for persistence
             from auto_round.algorithms.transforms.spinquant.serialize import (
                 _config_to_serializable,
             )
-            quantization_config["spinquant_config"] = _config_to_serializable(
-                spinquant_config, model
-            )
+
+            quantization_config["spinquant_config"] = _config_to_serializable(spinquant_config, model)
     except Exception as e:
         logger.warning(f"Failed to inject SpinQuant buffers: {e}")
 
@@ -433,6 +439,7 @@ def _save_spinquant_config_to_dir(model, save_dir):
         from auto_round.algorithms.transforms.spinquant.serialize import (
             save_spinquant_config,
         )
+
         save_spinquant_config(model, save_dir, spinquant_config)
     except Exception as e:
         logger.warning(f"Failed to save SpinQuant config: {e}")

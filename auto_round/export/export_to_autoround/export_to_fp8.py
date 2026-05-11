@@ -185,6 +185,7 @@ def pack_layer(layer_name, model, data_type, device=None, unsqueeze=False):
     # Inject SpinQuant rotation buffers right after packing so that
     # ShardWriter.save_module() captures them before offloading to meta.
     from auto_round.export.export_to_autoround.export import _inject_spinquant_buffers_on_layer
+
     _inject_spinquant_buffers_on_layer(layer_name, my_linear, model)
 
     # Note: release weight and bias explicitly, in case they are referenced elsewhere
@@ -261,6 +262,7 @@ def save_quantized_as_autoround(
         _inject_spinquant_rotation_buffers,
         _save_spinquant_config_to_dir,
     )
+
     _inject_spinquant_rotation_buffers(model, quantization_config)
 
     if hasattr(model, "config"):

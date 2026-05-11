@@ -774,6 +774,7 @@ def _rebuild_spinquant_if_needed(model: nn.Module) -> None:
         from auto_round.algorithms.transforms.spinquant.serialize import (
             rebuild_spinquant_online,
         )
+
         rebuild_spinquant_online(model)
     except Exception as e:
         logger.warning(f"Failed to rebuild SpinQuant rotations: {e}")
@@ -889,6 +890,7 @@ def convert_hf_model(model: nn.Module, target_device: str = "cpu") -> tuple[nn.M
             from auto_round.algorithms.transforms.spinquant.serialize import (
                 preregister_spinquant_buffers,
             )
+
             preregister_spinquant_buffers(model, spinquant_config)
         except Exception as e:
             logger.warning(f"Failed to pre-register SpinQuant buffers: {e}")
