@@ -1,6 +1,3 @@
-# # Copyright (C) 2026 Intel Corporation
-# # SPDX-License-Identifier: Apache-2.0
-
 """
 SpinQuant / QuaRot monkeypatch utilities for online rotations.
 
@@ -110,24 +107,34 @@ class QKRotationWrapper(nn.Module):
     def __init__(self, original_func: Callable[..., Any]):
         super().__init__()
         self.original_func = original_func
-        self._had_matrix: torch.Tensor | None = None
+        self._had_K: torch.Tensor | None = None
+        self._K: int = 1
         self._head_dim: int = 0
 
-    def set_hadamard(self, had_matrix: torch.Tensor, head_dim: int) -> None:
-        """Set the Hadamard matrix to use for rotation."""
-        self._had_matrix = had_matrix
+    def set_hadamard(self, had_matrix: Any, head_dim: int) -> None:
+        """Pre-compute and cache the Hadamard decomposition for head_dim.
+
+        The ``had_matrix`` parameter is accepted for API compatibility but
+        ignored — the decomposition is always computed from ``head_dim``.
+
+        This avoids recomputing ``get_hadamard_K(head_dim)`` on every forward
+        pass and removes the runtime dependency on scipy.
+        """
+        from auto_round.algorithms.transforms.spinquant.rotation_utils import get_hadamard_K
         self._head_dim = head_dim
+        had_K, K = get_hadamard_K(head_dim)
+        self._had_K = had_K
+        self._K = K
 
     def forward(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
         q, k = self.original_func(*args, **kwargs)
 
-        if self._had_matrix is not None:
+        if self._had_K is not None:
             from auto_round.algorithms.transforms.spinquant.rotation_utils import matmul_hadU
-
-            # Apply Hadamard on last dimension (head_dim)
             orig_dtype = q.dtype
-            q = matmul_hadU(q.float()).to(orig_dtype)
-            k = matmul_hadU(k.float()).to(orig_dtype)
+            had_K = self._had_K.to(device=q.device, dtype=torch.float32)
+            q = matmul_hadU(q.float(), hadamard_K=had_K, K=self._K).to(orig_dtype)
+            k = matmul_hadU(k.float(), hadamard_K=had_K, K=self._K).to(orig_dtype)
 
         return q, k
 
@@ -149,5 +156,7 @@ def add_qk_rotation_after_rope(
     Returns:
         The QKRotationWrapper instance (call ``.set_hadamard()`` to activate).
     """
-    wrapper = add_wrapper_after_function_call_in_method(attn_module, "forward", rope_function_name, QKRotationWrapper)
+    wrapper = add_wrapper_after_function_call_in_method(
+        attn_module, "forward", rope_function_name, QKRotationWrapper
+    )
     return wrapper

@@ -1,6 +1,3 @@
-# # Copyright (C) 2026 Intel Corporation
-# # SPDX-License-Identifier: Apache-2.0
-
 """
 SpinQuant preprocessor for Intel AutoRound.
 
@@ -29,14 +26,6 @@ import torch
 import torch.nn as nn
 
 from auto_round.algorithms.transforms.base import BaseRotationConfig
-
-# ---------------------------------------------------------------------------
-# Delegate online-hook registration to the inplace sub-package.
-# ---------------------------------------------------------------------------
-from auto_round.algorithms.transforms.spinquant.inplace.apply import (
-    register_spinquant_hooks,
-    remove_spinquant_hooks,
-)
 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     apply_hadamard_to_linear,
     create_block_diag_from_head_matrix,
@@ -50,6 +39,14 @@ from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     rotate_in_channels_,
     rotate_out_channels_,
     untie_word_embeddings_if_needed,
+)
+
+# ---------------------------------------------------------------------------
+# Delegate online-hook registration to the inplace sub-package.
+# ---------------------------------------------------------------------------
+from auto_round.algorithms.transforms.spinquant.inplace.apply import (
+    register_spinquant_hooks,
+    remove_spinquant_hooks,
 )
 
 logger = logging.getLogger("autoround.spinquant")
@@ -81,10 +78,10 @@ class SpinQuantConfig(BaseRotationConfig):
     algorithm: str = "spinquant"
 
     # Rotation dimensions
-    r1: bool = True  # R1: hidden_size rotation (offline fused)
-    r2: bool = True  # R2: head_dim rotation (offline fused)
-    r3: bool = False  # R3: Q/K online rotation
-    r4: bool = False  # R4: MLP activation online rotation
+    r1: bool = True                    # R1: hidden_size rotation (offline fused)
+    r2: bool = True                    # R2: head_dim rotation (offline fused)
+    r3: bool = False                   # R3: Q/K online rotation
+    r4: bool = False                   # R4: MLP activation online rotation
 
     # Rotation size override (None = use full dimension from model config)
     # When set, R1 uses rotation_size instead of hidden_size,
@@ -105,18 +102,18 @@ class SpinQuantConfig(BaseRotationConfig):
     # ⚠️ trainable_rotation=True (SpinQuant mode) is experimental — training
     #    loop exists but not validated end-to-end. Use trainable_rotation=False
     #    (QuaRot mode) for production use.
-    trainable_rotation: bool = True  # Learn R via Cayley SGD (False = QuaRot fixed Hadamard)
-    trainable_smooth: bool = True  # Learn smooth_values via Adam (joint SmoothQuant)
-    online_r1_rotation: bool = True  # Online R1: rotate target weights + hook (Quark default)
+    trainable_rotation: bool = True    # Learn R via Cayley SGD (False = QuaRot fixed Hadamard)
+    trainable_smooth: bool = True      # Learn smooth_values via Adam (joint SmoothQuant)
+    online_r1_rotation: bool = True    # Online R1: rotate target weights + hook (Quark default)
 
     # Training hyperparameters
-    iters: int = 200  # Training iterations
-    lr: float = 1e-4  # SGDG learning rate (rotation matrices)
-    smooth_lr: float = 1e-3  # Adam learning rate (smooth values)
+    iters: int = 200                   # Training iterations
+    lr: float = 1e-4                   # SGDG learning rate (rotation matrices)
+    smooth_lr: float = 1e-3            # Adam learning rate (smooth values)
     batch_size: int = 1
 
     # Loss
-    loss_type: str = "kl_top"  # "kl_top" | "kl_full" | "mse"
+    loss_type: str = "kl_top"          # "kl_top" | "kl_full" | "mse"
     kl_top_k: int = 1000
 
     # Pipeline steps
@@ -294,8 +291,7 @@ class SpinQuantPreprocessor:
         if self.config.r3 or self.config.r4:
             logger.info("[SpinQuant] Registering online rotation hooks...")
             self._hook_handles = register_spinquant_hooks(
-                self.model,
-                self.config,
+                self.model, self.config,
                 head_dim=self.head_dim,
                 intermediate_size=self.intermediate_size,
                 r4_rotation_size=self.r4_rotation_size,
@@ -362,7 +358,8 @@ class SpinQuantPreprocessor:
                 _, K = get_hadamard_K(inter)
             except ValueError:
                 logger.warning(
-                    f"[SpinQuant] R4 cannot find Hadamard decomposition for " f"r4_rotation_size={inter}. Disabling R4."
+                    f"[SpinQuant] R4 cannot find Hadamard decomposition for "
+                    f"r4_rotation_size={inter}. Disabling R4."
                 )
                 self.config.r4 = False
                 K = 0
@@ -390,7 +387,9 @@ class SpinQuantPreprocessor:
 
         for layer in layers:
             if hasattr(layer, "input_layernorm"):
-                layer.input_layernorm = TrainableRMSNorm(layer.input_layernorm, trainable=self.config.trainable_smooth)
+                layer.input_layernorm = TrainableRMSNorm(
+                    layer.input_layernorm, trainable=self.config.trainable_smooth
+                )
                 if self.config.trainable_smooth:
                     self.smooth_params.append(layer.input_layernorm.smooth_values)
 
@@ -480,9 +479,7 @@ class SpinQuantPreprocessor:
         if self.config.r2 and self.head_dim > 0:
             if self.config.trainable_rotation:
                 R2_head = nn.Parameter(torch.eye(self.head_dim, device=model_device, dtype=dtype))
-                logger.info(
-                    f"[SpinQuant] R2: Trainable per-head rotation [{self.head_dim}×{self.head_dim}] (identity init)"
-                )
+                logger.info(f"[SpinQuant] R2: Trainable per-head rotation [{self.head_dim}×{self.head_dim}] (identity init)")
             else:
                 if self.config.random_r2:
                     R2_head = nn.Parameter(
@@ -496,18 +493,14 @@ class SpinQuantPreprocessor:
                         requires_grad=False,
                     )
                     matrix_type = "Deterministic Hadamard"
-                logger.info(
-                    f"[SpinQuant] R2: {matrix_type} [{self.head_dim}×{self.head_dim}] per head (fixed, offline fuse)"
-                )
+                logger.info(f"[SpinQuant] R2: {matrix_type} [{self.head_dim}×{self.head_dim}] per head (fixed, offline fuse)")
             self._register_rotation("spinquant_R2_head", R2_head)
 
         # R3_head: always deterministic Hadamard (online, uses matmul_hadU butterfly)
         if self.config.r3 and self.head_dim > 0:
             R3 = deterministic_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
             self.model.register_buffer("spinquant_R3_head", R3)
-            logger.info(
-                f"[SpinQuant] R3: Deterministic Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (online, butterfly)"
-            )
+            logger.info(f"[SpinQuant] R3: Deterministic Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (online, butterfly)")
 
         # R4: always deterministic Hadamard (online, uses matmul_hadU butterfly)
         if self.config.r4 and self.r4_rotation_size > 0:
@@ -523,7 +516,10 @@ class SpinQuantPreprocessor:
                     f"{self.intermediate_size // r4_size} rotation blocks on down_proj"
                 )
             else:
-                logger.info(f"[SpinQuant] R4: Hadamard K={K}, " f"rotation_size={r4_size} (offline fuse + online hook)")
+                logger.info(
+                    f"[SpinQuant] R4: Hadamard K={K}, "
+                    f"rotation_size={r4_size} (offline fuse + online hook)"
+                )
 
     def _register_rotation(self, name: str, param: nn.Parameter) -> None:
         self.model.register_parameter(name, param)
@@ -549,9 +545,7 @@ class SpinQuantPreprocessor:
         )
 
         optimizer = create_dual_optimizer(
-            self.model,
-            lr=self.config.lr,
-            smooth_lr=self.config.smooth_lr,
+            self.model, lr=self.config.lr, smooth_lr=self.config.smooth_lr,
         )
         if optimizer is None:
             return
@@ -640,8 +634,21 @@ class SpinQuantPreprocessor:
         WrapperLinear.forward runs ``orig_layer._forward_pre_hooks`` before
         the linear computation, and WrapperWALayer steals & runs them at
         inference time.
+
+        .. warning::
+            Hook-based online R1 is **not serializable** — ``save_pretrained()``
+            will NOT save the activation hooks.  If you need to save and reload
+            the rotated model, use offline R1 instead
+            (``SpinQuantConfig(online_r1_rotation=False)``).
         """
         r1_size = self.r1_rotation_size
+
+        logger.warning(
+            "[SpinQuant] Online R1 uses forward_pre_hooks which are NOT saved by "
+            "save_pretrained(). The saved model will lose activation rotation hooks. "
+            "Use SpinQuantConfig(online_r1_rotation=False) for offline R1 if you "
+            "need to save/reload the model."
+        )
 
         # Pre-compute the Hadamard matrix for the rotation
         hadamard_K, K = get_hadamard_K(r1_size)
@@ -677,7 +684,9 @@ class SpinQuantPreprocessor:
 
                 if r1_size == in_features:
                     # Full rotation via matmul_hadU (butterfly algorithm)
-                    module.weight.data = matmul_hadU(module.weight.data, hadamard_K=had_K_local, K=K).to(dtype)
+                    module.weight.data = matmul_hadU(
+                        module.weight.data, hadamard_K=had_K_local, K=K
+                    ).to(dtype)
                 elif in_features % r1_size == 0:
                     # Block rotation: get_hadamard_K returns unnormalized matrix,
                     # so we must normalize by 1/√r1_size to get an orthogonal matrix.
@@ -692,12 +701,15 @@ class SpinQuantPreprocessor:
                     rotate_in_channels_(module, R_in=R_block)
                 else:
                     raise ValueError(
-                        f"Online R1: in_features={in_features} not compatible " f"with r1_rotation_size={r1_size}"
+                        f"Online R1: in_features={in_features} not compatible "
+                        f"with r1_rotation_size={r1_size}"
                     )
                 n_rotated += 1
 
                 # Register forward_pre_hook for online activation rotation
-                hook = self._make_online_r1_hook(r1_size, in_features, had_K_local, K)
+                hook = self._make_online_r1_hook(
+                    r1_size, in_features, had_K_local, K
+                )
                 hook._spinquant_hook = True  # tag for selective removal
                 handle = module.register_forward_pre_hook(hook)
                 self._r1_hook_handles.append(handle)
@@ -718,7 +730,6 @@ class SpinQuantPreprocessor:
                 x = args[0]
                 x = matmul_hadU(x, hadamard_K=hadamard_K.to(x.device), K=K)
                 return (x,) + args[1:]
-
         else:
             # Block rotation — normalize by 1/√r1_size for orthogonal matrix
             R_block = hadamard_K.to(torch.float64)
@@ -773,7 +784,9 @@ class SpinQuantPreprocessor:
                     w_reshaped = W_f64.reshape(*W_f64.shape[:-1], -1, r1_size)
                     new_w = (w_reshaped @ R_f64).reshape(W_f64.shape)
                 else:
-                    raise ValueError(f"embed_tokens dim={W_f64.shape[-1]} not divisible by R1 size={r1_size}")
+                    raise ValueError(
+                        f"embed_tokens dim={W_f64.shape[-1]} not divisible by R1 size={r1_size}"
+                    )
                 embed.weight.data = new_w.to(embed.weight.dtype)
 
         # Transformer layers
@@ -808,9 +821,7 @@ class SpinQuantPreprocessor:
                 rotate_out_channels_(mlp.down_proj, R_out=R1_local, rotated_modules=self._rotated_modules)
             n_layers += 1
 
-        logger.info(
-            f"[SpinQuant] R1 fused into {n_layers} layers (embed_tokens, q/k/v/o_proj, gate/up/down_proj, lm_head)"
-        )
+        logger.info(f"[SpinQuant] R1 fused into {n_layers} layers (embed_tokens, q/k/v/o_proj, gate/up/down_proj, lm_head)")
 
         # LM head: in-channel uses R1_inv (→ W @ R1)
         lm_head = self._get_lm_head()
@@ -827,9 +838,13 @@ class SpinQuantPreprocessor:
     def _fuse_r2_rotation(self) -> None:
         """Fuse R2 per-head rotation into v_proj and o_proj.
 
-        Following the reference implementation, R2 applies a per-head Hadamard
-        to v_proj's output channels and o_proj's input channels. This is done
-        using block-diagonal Hadamard application (had_dim=head_dim).
+        Uses the stored ``spinquant_R2_head`` matrix (which may be deterministic
+        Hadamard, random Hadamard, or a trained orthogonal matrix) to rotate
+        v_proj output channels and o_proj input channels per attention head.
+
+        Math:
+            v_rotated = v @ R2  per head  →  fuse into v_proj: W_new = R2^T @ W
+            o_proj input is R2-rotated    →  fuse into o_proj: W_new = W @ R2^T
         """
         if not self.config.r2 or self.head_dim <= 0:
             return
@@ -838,19 +853,35 @@ class SpinQuantPreprocessor:
         if R2_head is None:
             return
 
+        R2 = R2_head.data.to(torch.float64)
+        R2_T = R2.t()
+
         n_fused = 0
         for layer in self._get_layers():
             if not hasattr(layer, "self_attn"):
                 continue
             attn = layer.self_attn
 
-            # v_proj: apply per-head rotation on output (each head_dim chunk of rows)
+            # v_proj: W_new = R2^T @ W per head on output dimension
             if hasattr(attn, "v_proj"):
-                apply_hadamard_to_linear(attn.v_proj, had_dim=self.head_dim, output=True)
+                W = attn.v_proj.weight.data
+                dtype = W.dtype
+                W = W.to(torch.float64)
+                n_heads = W.shape[0] // self.head_dim
+                W_reshaped = W.reshape(n_heads, self.head_dim, W.shape[1])
+                W_reshaped = torch.einsum('ij,kjl->kil', R2_T, W_reshaped)
+                attn.v_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
 
-            # o_proj: apply per-head rotation on input (each head_dim chunk of columns)
+            # o_proj: W_new = W @ R2^T per head on input dimension
             if hasattr(attn, "o_proj"):
-                apply_hadamard_to_linear(attn.o_proj, had_dim=self.head_dim, output=False)
+                W = attn.o_proj.weight.data
+                dtype = W.dtype
+                W = W.to(torch.float64)
+                n_heads = W.shape[1] // self.head_dim
+                W_reshaped = W.reshape(W.shape[0], n_heads, self.head_dim)
+                W_reshaped = torch.einsum('ijk,lk->ijl', W_reshaped, R2)
+                attn.o_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
+
             n_fused += 1
 
         logger.info(f"[SpinQuant] R2 fused into {n_fused} layers (v_proj out + o_proj in, head_dim={self.head_dim})")
@@ -947,21 +978,15 @@ class SpinQuantPreprocessor:
         # Untie embeddings
         tied = getattr(self.model.config, "tie_word_embeddings", False) if hasattr(self.model, "config") else "unknown"
         if self.config.online_r1_rotation:
-            lines.append(
-                f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings (skipped: online R1)':<50} {'- n/a'}"
-            )
+            lines.append(f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings (skipped: online R1)':<50} {'- n/a'}")
         else:
-            lines.append(
-                f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} {'✓ untied' if not tied else '✗ still tied'}"
-            )
+            lines.append(f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} {'✓ untied' if not tied else '✗ still tied'}")
 
         # RMSNorm fusion
         if self.config.online_r1_rotation:
             lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma (skipped: online R1)':<50} {'- n/a'}")
         else:
-            lines.append(
-                f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}"
-            )
+            lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}")
 
         # R1
         if self.config.r1:
@@ -1094,9 +1119,7 @@ class SpinQuantPreprocessor:
         total_hooks = r1_hooks + r3_hooks + r4_hooks
         lines.append(f"  Online hooks:         {total_hooks} total ({r1_hooks} R1 + {r3_hooks} R3 + {r4_hooks} R4)")
         lines.append(f"  Inference overhead:   R1={'O(seq×hidden×log₂H) per module' if r1_hooks > 0 else 'none'}")
-        lines.append(
-            f"                        R3={'O(seq×heads×d_head×log₂d_head) per layer' if r3_hooks > 0 else 'none'}"
-        )
+        lines.append(f"                        R3={'O(seq×heads×d_head×log₂d_head) per layer' if r3_hooks > 0 else 'none'}")
         lines.append(f"                        R4={'O(seq×inter×log₂K) per layer' if r4_hooks > 0 else 'none'}")
         lines.append("=" * 100)
 
@@ -1105,12 +1128,16 @@ class SpinQuantPreprocessor:
 
 
 def remove_spinquant_hooks_from_model(model: nn.Module) -> None:
-    """Remove only SpinQuant-tagged forward hooks / pre-hooks from a model.
+    """Remove all SpinQuant hooks and R3 monkeypatches from a model.
 
-    Only removes hooks that were tagged with ``_spinquant_hook = True`` during
-    registration, leaving hooks from other frameworks untouched.
+    Removes:
+    - Forward hooks / pre-hooks tagged with ``_spinquant_hook = True`` (R1/R4)
+    - R3 monkeypatches on attention modules (tagged with ``_spinquant_r3_patched``)
+
+    Hooks from other frameworks are left untouched.
     """
     for module in model.modules():
+        # Remove tagged forward hooks (R4) and pre-hooks (R1 online)
         if hasattr(module, "_forward_hooks"):
             for hook_id in list(module._forward_hooks.keys()):
                 hook = module._forward_hooks[hook_id]
@@ -1121,3 +1148,10 @@ def remove_spinquant_hooks_from_model(model: nn.Module) -> None:
                 hook = module._forward_pre_hooks[hook_id]
                 if getattr(hook, "_spinquant_hook", False):
                     del module._forward_pre_hooks[hook_id]
+
+        # Remove R3 monkeypatches (instance-level forward override)
+        if getattr(module, "_spinquant_r3_patched", False):
+            if "forward" in module.__dict__:
+                del module.__dict__["forward"]
+            delattr(module, "_spinquant_r3_patched")
+
