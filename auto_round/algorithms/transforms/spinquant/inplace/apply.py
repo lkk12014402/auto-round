@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """
 SpinQuant in-place application utilities.
 
@@ -111,7 +114,9 @@ def register_spinquant_hooks(
                             logger.warning(f"[SpinQuant] R3 monkeypatch failed for '{name}': {e}")
 
             if r3_count > 0:
-                logger.info(f"[SpinQuant] R3: Applied Hadamard(head_dim={head_dim}) after RoPE on {r3_count} attention layers")
+                logger.info(
+                    f"[SpinQuant] R3: Applied Hadamard(head_dim={head_dim}) after RoPE on {r3_count} attention layers"
+                )
 
     # ------------------------------------------------------------------
     # R4: MLP activation rotation (intermediate_size Hadamard)
@@ -125,11 +130,11 @@ def register_spinquant_hooks(
             from auto_round.algorithms.transforms.spinquant.rotation_utils import (
                 get_hadamard_K,
             )
+
             had_K_mat, had_K_val = get_hadamard_K(r4_size)
         except ValueError:
             logger.warning(
-                f"[SpinQuant] R4: no Hadamard decomposition for r4_rotation_size={r4_size}. "
-                f"Skipping R4 rotation."
+                f"[SpinQuant] R4: no Hadamard decomposition for r4_rotation_size={r4_size}. " f"Skipping R4 rotation."
             )
             had_K_mat, had_K_val = None, None
 
@@ -138,7 +143,7 @@ def register_spinquant_hooks(
             had_K_mat = had_K_mat.to(device=compute_device, dtype=torch.float32)
 
             # Determine if we need block rotation (r4_size < intermediate_size)
-            need_block_rotation = (r4_size < intermediate_size)
+            need_block_rotation = r4_size < intermediate_size
 
             def _make_r4_hook(had_mat, k_val, rot_size, block_mode):
                 def hook(module, args):
@@ -152,6 +157,7 @@ def register_spinquant_hooks(
                     else:
                         x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
                     return (x,) + args[1:]
+
                 return hook
 
             r4_count = 0
@@ -228,4 +234,3 @@ def apply_spinquant_in_place(
 
     preprocessor = SpinQuantPreprocessor(model, config)
     return preprocessor.preprocess(dataloader)
-

@@ -27,7 +27,6 @@ from auto_round.algorithms.transforms.spinquant.preprocessor import (
 
 from ...helpers import generate_prompt, get_model_path
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Config Tests
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -95,21 +94,28 @@ class TestNormalizeRotationConfig:
         assert isinstance(cfg, BaseRotationConfig)
 
     def test_dict_spinquant(self):
-        cfg = normalize_rotation_config({
-            "algorithm": "spinquant",
-            "r1": True, "r2": True, "r3": False, "r4": False,
-        })
+        cfg = normalize_rotation_config(
+            {
+                "algorithm": "spinquant",
+                "r1": True,
+                "r2": True,
+                "r3": False,
+                "r4": False,
+            }
+        )
         assert isinstance(cfg, SpinQuantConfig)
         assert cfg.r1 is True
         assert cfg.r3 is False
 
     def test_dict_extra_keys_ignored(self):
         """Unknown keys in dict should be silently filtered."""
-        cfg = normalize_rotation_config({
-            "algorithm": "spinquant",
-            "r1": True,
-            "unknown_field": 42,
-        })
+        cfg = normalize_rotation_config(
+            {
+                "algorithm": "spinquant",
+                "r1": True,
+                "unknown_field": 42,
+            }
+        )
         assert isinstance(cfg, SpinQuantConfig)
         assert cfg.r1 is True
 
@@ -145,8 +151,7 @@ class TestBaseRotationRegistry:
         assert "hadamard" in BaseRotation._REGISTRY
 
     def test_from_config_spinquant(self):
-        cfg = SpinQuantConfig(r1=True, r2=False, r3=False, r4=False,
-                              trainable_rotation=False, trainable_smooth=False)
+        cfg = SpinQuantConfig(r1=True, r2=False, r3=False, r4=False, trainable_rotation=False, trainable_smooth=False)
         rotation = BaseRotation.from_config(cfg)
         assert rotation is not None
 
@@ -173,9 +178,13 @@ class TestHookLifecycle:
     def test_online_r1_hooks_tagged(self, model):
         """Online R1 hooks should have _spinquant_hook=True."""
         cfg = SpinQuantConfig(
-            r1=True, r2=False, r3=False, r4=False,
+            r1=True,
+            r2=False,
+            r3=False,
+            r4=False,
             online_r1_rotation=True,
-            trainable_rotation=False, trainable_smooth=False,
+            trainable_rotation=False,
+            trainable_smooth=False,
         )
         model = apply_rotation(model, cfg)
 
@@ -204,9 +213,13 @@ class TestHookLifecycle:
 
         # Apply spinquant rotation (adds tagged hooks)
         cfg = SpinQuantConfig(
-            r1=True, r2=False, r3=False, r4=False,
+            r1=True,
+            r2=False,
+            r3=False,
+            r4=False,
             online_r1_rotation=True,
-            trainable_rotation=False, trainable_smooth=False,
+            trainable_rotation=False,
+            trainable_smooth=False,
         )
         model = apply_rotation(model, cfg)
 
@@ -214,14 +227,12 @@ class TestHookLifecycle:
         remove_spinquant_hooks_from_model(model)
 
         # Foreign hook should still exist
-        assert handle.id in first_linear._forward_pre_hooks, \
-            "Foreign hook was incorrectly removed"
+        assert handle.id in first_linear._forward_pre_hooks, "Foreign hook was incorrectly removed"
 
         # SpinQuant hooks should be gone
         for module in model.modules():
             for hook in module._forward_pre_hooks.values():
-                assert not getattr(hook, "_spinquant_hook", False), \
-                    "SpinQuant hook was not removed"
+                assert not getattr(hook, "_spinquant_hook", False), "SpinQuant hook was not removed"
 
         handle.remove()
 
@@ -263,14 +274,20 @@ class TestRotationCorrectness:
     def test_r1_only(self, model_and_tokenizer):
         """R1-only rotation should produce valid logits."""
         model_name = get_model_path("Qwen/Qwen3-0.6B")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16, trust_remote_code=True
-        ).cuda().eval()
+        model = (
+            AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, trust_remote_code=True)
+            .cuda()
+            .eval()
+        )
 
         cfg = SpinQuantConfig(
-            r1=True, r2=False, r3=False, r4=False,
+            r1=True,
+            r2=False,
+            r3=False,
+            r4=False,
             online_r1_rotation=True,
-            trainable_rotation=False, trainable_smooth=False,
+            trainable_rotation=False,
+            trainable_smooth=False,
         )
         model = apply_rotation(model, cfg)
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -285,14 +302,20 @@ class TestRotationCorrectness:
     def test_r1_r2(self, model_and_tokenizer):
         """R1+R2 rotation should produce valid logits."""
         model_name = get_model_path("Qwen/Qwen3-0.6B")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16, trust_remote_code=True
-        ).cuda().eval()
+        model = (
+            AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, trust_remote_code=True)
+            .cuda()
+            .eval()
+        )
 
         cfg = SpinQuantConfig(
-            r1=True, r2=True, r3=False, r4=False,
+            r1=True,
+            r2=True,
+            r3=False,
+            r4=False,
             online_r1_rotation=True,
-            trainable_rotation=False, trainable_smooth=False,
+            trainable_rotation=False,
+            trainable_smooth=False,
         )
         model = apply_rotation(model, cfg)
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -306,14 +329,20 @@ class TestRotationCorrectness:
     def test_r1_r2_r3_r4(self, model_and_tokenizer):
         """Full R1+R2+R3+R4 rotation should produce valid logits."""
         model_name = get_model_path("Qwen/Qwen3-0.6B")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16, trust_remote_code=True
-        ).cuda().eval()
+        model = (
+            AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, trust_remote_code=True)
+            .cuda()
+            .eval()
+        )
 
         cfg = SpinQuantConfig(
-            r1=True, r2=True, r3=True, r4=True,
+            r1=True,
+            r2=True,
+            r3=True,
+            r4=True,
             online_r1_rotation=True,
-            trainable_rotation=False, trainable_smooth=False,
+            trainable_rotation=False,
+            trainable_smooth=False,
         )
         model = apply_rotation(model, cfg)
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -350,13 +379,9 @@ class TestPipelineIntegration:
             scheme="W4A16",
             rotation_config="quarot",
         )
-        compressed_model, quantized_model_path = ar.quantize_and_save(
-            output_dir=self.save_dir, format="auto_round"
-        )
+        compressed_model, quantized_model_path = ar.quantize_and_save(output_dir=self.save_dir, format="auto_round")
 
-        model = AutoModelForCausalLM.from_pretrained(
-            quantized_model_path, torch_dtype="auto", device_map="cuda"
-        )
+        model = AutoModelForCausalLM.from_pretrained(quantized_model_path, torch_dtype="auto", device_map="cuda")
         tokenizer = AutoTokenizer.from_pretrained(quantized_model_path)
         generate_prompt(model, tokenizer)
 
@@ -364,8 +389,12 @@ class TestPipelineIntegration:
         """AutoRound(rotation_config=SpinQuantConfig(...)) should work."""
         model_name = get_model_path("Qwen/Qwen3-0.6B")
         cfg = SpinQuantConfig(
-            r1=True, r2=True, r3=False, r4=False,
-            trainable_rotation=False, trainable_smooth=False,
+            r1=True,
+            r2=True,
+            r3=False,
+            r4=False,
+            trainable_rotation=False,
+            trainable_smooth=False,
             online_r1_rotation=True,
         )
         ar = AutoRound(
@@ -390,8 +419,12 @@ class TestPipelineIntegration:
             scheme="W4A16",
             rotation_config={
                 "algorithm": "spinquant",
-                "r1": True, "r2": True, "r3": False, "r4": False,
-                "trainable_rotation": False, "trainable_smooth": False,
+                "r1": True,
+                "r2": True,
+                "r3": False,
+                "r4": False,
+                "trainable_rotation": False,
+                "trainable_smooth": False,
             },
         )
         compressed_model, quantized_model_path = ar.quantize_and_save(
