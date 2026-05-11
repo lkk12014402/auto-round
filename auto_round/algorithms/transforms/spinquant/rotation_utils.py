@@ -70,15 +70,16 @@ def get_hadamard_K(n: int) -> Tuple[torch.Tensor, int]:
     Returns:
         (hadamard_K, K): The K×K Hadamard matrix and the value K.
     """
-    from scipy.linalg import hadamard as scipy_hadamard
-
     from auto_round.algorithms.transforms.spinquant.known_hadamard import (
         KNOWN_HADAMARD_MATRICES,
     )
 
     if is_pow2(n):
-        had = torch.Tensor(scipy_hadamard(n))
-        return had, 1
+        # Sylvester construction (unnormalized) — replaces scipy.linalg.hadamard
+        H = torch.ones(1, 1)
+        while H.shape[0] < n:
+            H = torch.cat([torch.cat([H, H], dim=1), torch.cat([H, -H], dim=1)], dim=0)
+        return H, 1
     else:
         # Search known Hadamard matrices: find K such that n % K == 0 and n/K is pow2
         for size in KNOWN_HADAMARD_MATRICES:

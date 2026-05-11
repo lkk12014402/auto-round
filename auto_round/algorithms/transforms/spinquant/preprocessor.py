@@ -634,8 +634,21 @@ class SpinQuantPreprocessor:
         WrapperLinear.forward runs ``orig_layer._forward_pre_hooks`` before
         the linear computation, and WrapperWALayer steals & runs them at
         inference time.
+
+        .. warning::
+            Hook-based online R1 is **not serializable** — ``save_pretrained()``
+            will NOT save the activation hooks.  If you need to save and reload
+            the rotated model, use offline R1 instead
+            (``SpinQuantConfig(online_r1_rotation=False)``).
         """
         r1_size = self.r1_rotation_size
+
+        logger.warning(
+            "[SpinQuant] Online R1 uses forward_pre_hooks which are NOT saved by "
+            "save_pretrained(). The saved model will lose activation rotation hooks. "
+            "Use SpinQuantConfig(online_r1_rotation=False) for offline R1 if you "
+            "need to save/reload the model."
+        )
 
         # Pre-compute the Hadamard matrix for the rotation
         hadamard_K, K = get_hadamard_K(r1_size)
@@ -825,9 +838,13 @@ class SpinQuantPreprocessor:
     def _fuse_r2_rotation(self) -> None:
         """Fuse R2 per-head rotation into v_proj and o_proj.
 
-        Following the reference implementation, R2 applies a per-head Hadamard
-        to v_proj's output channels and o_proj's input channels. This is done
-        using block-diagonal Hadamard application (had_dim=head_dim).
+        Uses the stored ``spinquant_R2_head`` matrix (which may be deterministic
+        Hadamard, random Hadamard, or a trained orthogonal matrix) to rotate
+        v_proj output channels and o_proj input channels per attention head.
+
+        Math:
+            v_rotated = v @ R2  per head  →  fuse into v_proj: W_new = R2^T @ W
+            o_proj input is R2-rotated    →  fuse into o_proj: W_new = W @ R2^T
         """
         if not self.config.r2 or self.head_dim <= 0:
             return
@@ -836,19 +853,35 @@ class SpinQuantPreprocessor:
         if R2_head is None:
             return
 
+        R2 = R2_head.data.to(torch.float64)
+        R2_T = R2.t()
+
         n_fused = 0
         for layer in self._get_layers():
             if not hasattr(layer, "self_attn"):
                 continue
             attn = layer.self_attn
 
-            # v_proj: apply per-head rotation on output (each head_dim chunk of rows)
+            # v_proj: W_new = R2^T @ W per head on output dimension
             if hasattr(attn, "v_proj"):
-                apply_hadamard_to_linear(attn.v_proj, had_dim=self.head_dim, output=True)
+                W = attn.v_proj.weight.data
+                dtype = W.dtype
+                W = W.to(torch.float64)
+                n_heads = W.shape[0] // self.head_dim
+                W_reshaped = W.reshape(n_heads, self.head_dim, W.shape[1])
+                W_reshaped = torch.einsum('ij,kjl->kil', R2_T, W_reshaped)
+                attn.v_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
 
-            # o_proj: apply per-head rotation on input (each head_dim chunk of columns)
+            # o_proj: W_new = W @ R2^T per head on input dimension
             if hasattr(attn, "o_proj"):
-                apply_hadamard_to_linear(attn.o_proj, had_dim=self.head_dim, output=False)
+                W = attn.o_proj.weight.data
+                dtype = W.dtype
+                W = W.to(torch.float64)
+                n_heads = W.shape[1] // self.head_dim
+                W_reshaped = W.reshape(W.shape[0], n_heads, self.head_dim)
+                W_reshaped = torch.einsum('ijk,lk->ijl', W_reshaped, R2)
+                attn.o_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
+
             n_fused += 1
 
         logger.info(f"[SpinQuant] R2 fused into {n_fused} layers (v_proj out + o_proj in, head_dim={self.head_dim})")
@@ -1095,12 +1128,16 @@ class SpinQuantPreprocessor:
 
 
 def remove_spinquant_hooks_from_model(model: nn.Module) -> None:
-    """Remove only SpinQuant-tagged forward hooks / pre-hooks from a model.
+    """Remove all SpinQuant hooks and R3 monkeypatches from a model.
 
-    Only removes hooks that were tagged with ``_spinquant_hook = True`` during
-    registration, leaving hooks from other frameworks untouched.
+    Removes:
+    - Forward hooks / pre-hooks tagged with ``_spinquant_hook = True`` (R1/R4)
+    - R3 monkeypatches on attention modules (tagged with ``_spinquant_r3_patched``)
+
+    Hooks from other frameworks are left untouched.
     """
     for module in model.modules():
+        # Remove tagged forward hooks (R4) and pre-hooks (R1 online)
         if hasattr(module, "_forward_hooks"):
             for hook_id in list(module._forward_hooks.keys()):
                 hook = module._forward_hooks[hook_id]
@@ -1111,4 +1148,10 @@ def remove_spinquant_hooks_from_model(model: nn.Module) -> None:
                 hook = module._forward_pre_hooks[hook_id]
                 if getattr(hook, "_spinquant_hook", False):
                     del module._forward_pre_hooks[hook_id]
+
+        # Remove R3 monkeypatches (instance-level forward override)
+        if getattr(module, "_spinquant_r3_patched", False):
+            if "forward" in module.__dict__:
+                del module.__dict__["forward"]
+            delattr(module, "_spinquant_r3_patched")
 

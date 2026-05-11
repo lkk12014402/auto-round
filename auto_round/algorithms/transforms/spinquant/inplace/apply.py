@@ -95,10 +95,8 @@ def register_spinquant_hooks(
                             module,
                             rope_function_name="apply_rotary_pos_emb",
                         )
-                        wrapper.set_hadamard(
-                            torch.empty(0),  # matmul_hadU auto-computes
-                            head_dim,
-                        )
+                        wrapper.set_hadamard(None, head_dim)
+                        module._spinquant_r3_patched = True
                         handles.append(("r3_monkeypatch", name, module, wrapper))
                         r3_count += 1
                     except ValueError as e:
@@ -179,15 +177,14 @@ def remove_spinquant_hooks(handles: list[Any]) -> None:
     for h in handles:
         try:
             if isinstance(h, tuple) and h[0] == "r3_monkeypatch":
-                # Restore original forward method globals
                 _, name, module, wrapper = h
-                # The monkeypatch replaced the forward method; we need to restore
-                # by removing the patched method (falls back to class method)
-                if hasattr(module, "forward") and not isinstance(module.forward, type(module).forward):
-                    try:
-                        delattr(module, "forward")
-                    except AttributeError:
-                        pass
+                # The monkeypatch replaced the forward method via globals
+                # patching; remove the instance-level override so it falls
+                # back to the original class method.
+                if "forward" in module.__dict__:
+                    del module.__dict__["forward"]
+                if hasattr(module, "_spinquant_r3_patched"):
+                    delattr(module, "_spinquant_r3_patched")
             elif isinstance(h, tuple) and h[0] == "r3_patch":
                 # Legacy: restore original forward
                 _, name, module = h

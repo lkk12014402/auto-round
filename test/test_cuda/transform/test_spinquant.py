@@ -40,8 +40,8 @@ class TestSpinQuantConfig:
         cfg = SpinQuantConfig()
         assert cfg.r1 is True
         assert cfg.r2 is True
-        assert cfg.r3 is True
-        assert cfg.r4 is True
+        assert cfg.r3 is False
+        assert cfg.r4 is False
         assert cfg.online_r1_rotation is True
         assert cfg.trainable_rotation is True
         assert cfg.trainable_smooth is True

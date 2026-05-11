@@ -281,9 +281,12 @@ def run_llmcompressor(model_name, tokenizer, rotation_flags, device, nsamples=12
     from llmcompressor.modifiers.transform import SpinQuantModifier
     from llmcompressor.modifiers.quantization import QuantizationModifier
 
+    # MXFP4 observer requires float32 scales (compressed-tensors asserts
+    # scale_dtype is torch.float32).  Use .to(device) instead of device_map
+    # to guarantee all tensors land on the same GPU.
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=torch.float16, device_map=device, trust_remote_code=True
-    )
+        model_name, dtype=torch.float32, trust_remote_code=True
+    ).to(device).eval()
 
     recipe = []
 
@@ -304,7 +307,8 @@ def run_llmcompressor(model_name, tokenizer, rotation_flags, device, nsamples=12
     ))
 
     oneshot(model=model, recipe=recipe, pipeline="datafree")
-    model.eval()
+    # oneshot() may scatter tensors across GPUs; consolidate back
+    model = model.to(device).eval()
     return model
 
 

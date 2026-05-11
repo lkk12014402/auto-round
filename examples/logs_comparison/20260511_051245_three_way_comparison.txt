@@ -1,0 +1,10 @@
+Model: Qwen/Qwen3-0.6B
+Frameworks: ['quark']
+Rotations: ['R1', 'R1+R2', 'R1+R2+R4', 'R1+R2+R3+R4']
+Limit: full
+Rotation size: 128
+
+quark/R1: {'error': "No module named 'torch.ao.quantization.pt2e'"}
+quark/R1+R2: {'error': "No module named 'torch.ao.quantization.pt2e'"}
+quark/R1+R2+R4: {'error': "No module named 'torch.ao.quantization.pt2e'"}
+quark/R1+R2+R3+R4: {'error': "No module named 'torch.ao.quantization.pt2e'"}

@@ -376,5 +376,100 @@
     },
     "status": "success",
     "total_time_s": 2144.2
+  },
+  {
+    "rotation": "R1+R2 (rs=32)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2 (rs=32) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 32,
+    "api": "pipeline_v2",
+    "setup_time_s": 237.3,
+    "metrics": {
+      "hellaswag": 0.707,
+      "lambada_openai": 0.601,
+      "piqa": 0.7459,
+      "winogrande": 0.6654
+    },
+    "status": "success",
+    "total_time_s": 2110.7
+  },
+  {
+    "rotation": "R1+R2 (rs=32)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2 (rs=32) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 32,
+    "api": "pipeline_v2",
+    "setup_time_s": 333.7,
+    "metrics": {
+      "hellaswag": 0.7264,
+      "lambada_openai": 0.6175,
+      "piqa": 0.7541,
+      "winogrande": 0.6638
+    },
+    "status": "success",
+    "total_time_s": 2305.6
+  },
+  {
+    "rotation": "R1+R2+R3 (rs=32)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2+R3 (rs=32) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 32,
+    "api": "pipeline_v2",
+    "setup_time_s": 264.5,
+    "metrics": {
+      "hellaswag": 0.7097,
+      "lambada_openai": 0.6031,
+      "piqa": 0.7579,
+      "winogrande": 0.6551
+    },
+    "status": "success",
+    "total_time_s": 2409.6
+  },
+  {
+    "rotation": "R1+R2+R3 (rs=32)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2+R3 (rs=32) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 32,
+    "api": "pipeline_v2",
+    "setup_time_s": 242.4,
+    "metrics": {
+      "hellaswag": 0.7097,
+      "lambada_openai": 0.6031,
+      "piqa": 0.7579,
+      "winogrande": 0.6551
+    },
+    "status": "success",
+    "total_time_s": 2395.8
+  },
+  {
+    "rotation": "R1+R2+R3 (rs=32)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2+R3 (rs=32) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 32,
+    "api": "pipeline_v2",
+    "setup_time_s": 335.7,
+    "metrics": {
+      "hellaswag": 0.7264,
+      "lambada_openai": 0.6119,
+      "piqa": 0.765,
+      "winogrande": 0.6717
+    },
+    "status": "success",
+    "total_time_s": 2604.9
   }
 ]

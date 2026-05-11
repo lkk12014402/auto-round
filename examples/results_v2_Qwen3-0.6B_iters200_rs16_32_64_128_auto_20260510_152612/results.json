@@ -699,5 +699,176 @@
     },
     "status": "success",
     "total_time_s": 1731.9
+  },
+  {
+    "rotation": "R1+R2+R3+R4 (rs=64)",
+    "scheme": "W4A16",
+    "scheme_str": "W4A16",
+    "label": "R1+R2+R3+R4 (rs=64) + W4A16",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 246.1,
+    "metrics": {
+      "hellaswag": 0.4566,
+      "lambada_openai": 0.3598,
+      "piqa": 0.6567,
+      "winogrande": 0.5635
+    },
+    "status": "success",
+    "total_time_s": 946.4
+  },
+  {
+    "rotation": "R1+R2+R3+R4 (rs=64)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2+R3+R4 (rs=64) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 397.6,
+    "metrics": {
+      "hellaswag": 0.418,
+      "lambada_openai": 0.2767,
+      "piqa": 0.6284,
+      "winogrande": 0.5288
+    },
+    "status": "success",
+    "total_time_s": 1721.7
+  },
+  {
+    "rotation": "R1+R2+R3+R4 (rs=64)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2+R3+R4 (rs=64) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 354.1,
+    "metrics": {
+      "hellaswag": 0.4316,
+      "lambada_openai": 0.2956,
+      "piqa": 0.6387,
+      "winogrande": 0.5328
+    },
+    "status": "success",
+    "total_time_s": 1881.7
+  },
+  {
+    "rotation": "R1 (rs=128)",
+    "scheme": "W4A16",
+    "scheme_str": "W4A16",
+    "label": "R1 (rs=128) + W4A16",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 144.7,
+    "metrics": {
+      "hellaswag": 0.4569,
+      "lambada_openai": 0.3821,
+      "piqa": 0.661,
+      "winogrande": 0.547
+    },
+    "status": "success",
+    "total_time_s": 556.4
+  },
+  {
+    "rotation": "R1 (rs=128)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1 (rs=128) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 328.7,
+    "metrics": {
+      "hellaswag": 0.4171,
+      "lambada_openai": 0.2818,
+      "piqa": 0.6246,
+      "winogrande": 0.5343
+    },
+    "status": "success",
+    "total_time_s": 1371.8
+  },
+  {
+    "rotation": "R1 (rs=128)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1 (rs=128) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 304.0,
+    "metrics": {
+      "hellaswag": 0.4316,
+      "lambada_openai": 0.3095,
+      "piqa": 0.6371,
+      "winogrande": 0.5446
+    },
+    "status": "success",
+    "total_time_s": 1550.7
+  },
+  {
+    "rotation": "R1+R2 (rs=128)",
+    "scheme": "W4A16",
+    "scheme_str": "W4A16",
+    "label": "R1+R2 (rs=128) + W4A16",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 156.6,
+    "metrics": {
+      "hellaswag": 0.4568,
+      "lambada_openai": 0.3794,
+      "piqa": 0.6616,
+      "winogrande": 0.5541
+    },
+    "status": "success",
+    "total_time_s": 565.8
+  },
+  {
+    "rotation": "R1+R2 (rs=128)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2 (rs=128) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 350.9,
+    "metrics": {
+      "hellaswag": 0.4146,
+      "lambada_openai": 0.2808,
+      "piqa": 0.6137,
+      "winogrande": 0.5517
+    },
+    "status": "success",
+    "total_time_s": 1403.0
+  },
+  {
+    "rotation": "R1+R2 (rs=128)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2 (rs=128) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 200,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 294.1,
+    "metrics": {
+      "hellaswag": 0.4314,
+      "lambada_openai": 0.2971,
+      "piqa": 0.6469,
+      "winogrande": 0.5446
+    },
+    "status": "success",
+    "total_time_s": 1521.3
   }
 ]

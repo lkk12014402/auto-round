@@ -680,5 +680,195 @@
     },
     "status": "success",
     "total_time_s": 1302.0
+  },
+  {
+    "rotation": "R1+R2+R3 (rs=64)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2+R3 (rs=64) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 103.1,
+    "metrics": {
+      "hellaswag": 0.4318,
+      "lambada_openai": 0.2837,
+      "piqa": 0.6066,
+      "winogrande": 0.5312
+    },
+    "status": "success",
+    "total_time_s": 1589.7
+  },
+  {
+    "rotation": "R1+R2+R3+R4 (rs=64)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2+R3+R4 (rs=64) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 46.8,
+    "metrics": {
+      "hellaswag": 0.3969,
+      "lambada_openai": 0.2435,
+      "piqa": 0.6077,
+      "winogrande": 0.5193
+    },
+    "status": "success",
+    "total_time_s": 1391.1
+  },
+  {
+    "rotation": "R1+R2+R3+R4 (rs=64)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2+R3+R4 (rs=64) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 44.0,
+    "metrics": {
+      "hellaswag": 0.3969,
+      "lambada_openai": 0.2435,
+      "piqa": 0.6077,
+      "winogrande": 0.5193
+    },
+    "status": "success",
+    "total_time_s": 1381.7
+  },
+  {
+    "rotation": "R1+R2+R3+R4 (rs=64)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2+R3+R4 (rs=64) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 64,
+    "api": "pipeline_v2",
+    "setup_time_s": 99.4,
+    "metrics": {
+      "hellaswag": 0.4197,
+      "lambada_openai": 0.2841,
+      "piqa": 0.6017,
+      "winogrande": 0.5328
+    },
+    "status": "success",
+    "total_time_s": 1618.8
+  },
+  {
+    "rotation": "R1 (rs=128)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1 (rs=128) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 37.2,
+    "metrics": {
+      "hellaswag": 0.3909,
+      "lambada_openai": 0.2228,
+      "piqa": 0.6055,
+      "winogrande": 0.532
+    },
+    "status": "success",
+    "total_time_s": 1108.3
+  },
+  {
+    "rotation": "R1 (rs=128)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1 (rs=128) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 42.8,
+    "metrics": {
+      "hellaswag": 0.3909,
+      "lambada_openai": 0.2228,
+      "piqa": 0.6055,
+      "winogrande": 0.532
+    },
+    "status": "success",
+    "total_time_s": 1084.8
+  },
+  {
+    "rotation": "R1 (rs=128)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1 (rs=128) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 111.6,
+    "metrics": {
+      "hellaswag": 0.4187,
+      "lambada_openai": 0.2678,
+      "piqa": 0.6246,
+      "winogrande": 0.5241
+    },
+    "status": "success",
+    "total_time_s": 1347.9
+  },
+  {
+    "rotation": "R1+R2 (rs=128)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2 (rs=128) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 44.7,
+    "metrics": {
+      "hellaswag": 0.3981,
+      "lambada_openai": 0.2424,
+      "piqa": 0.5963,
+      "winogrande": 0.5367
+    },
+    "status": "success",
+    "total_time_s": 1088.7
+  },
+  {
+    "rotation": "R1+R2 (rs=128)",
+    "scheme": "MXFP4",
+    "scheme_str": "MXFP4_RCEIL",
+    "label": "R1+R2 (rs=128) + MXFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 62.9,
+    "metrics": {
+      "hellaswag": 0.3981,
+      "lambada_openai": 0.2424,
+      "piqa": 0.5963,
+      "winogrande": 0.5367
+    },
+    "status": "success",
+    "total_time_s": 1102.2
+  },
+  {
+    "rotation": "R1+R2 (rs=128)",
+    "scheme": "NVFP4",
+    "scheme_str": "NVFP4",
+    "label": "R1+R2 (rs=128) + NVFP4",
+    "random_hadamard": false,
+    "quant_iters": 0,
+    "rotation_size": 128,
+    "api": "pipeline_v2",
+    "setup_time_s": 131.3,
+    "metrics": {
+      "hellaswag": 0.4275,
+      "lambada_openai": 0.3,
+      "piqa": 0.623,
+      "winogrande": 0.532
+    },
+    "status": "success",
+    "total_time_s": 1365.9
   }
 ]
