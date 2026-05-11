@@ -506,7 +506,8 @@ class SpinQuantPreprocessor:
             R3 = deterministic_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
             self.model.register_buffer("spinquant_R3_head", R3)
             logger.info(
-                f"[SpinQuant] R3: Deterministic Hadamard [{self.head_dim}×{self.head_dim}] after RoPE (online, butterfly)"
+                f"[SpinQuant] R3: Deterministic Hadamard "
+                f"[{self.head_dim}×{self.head_dim}] after RoPE (online, butterfly)"
             )
 
         # R4: always deterministic Hadamard (online, uses matmul_hadU butterfly)
@@ -985,7 +986,8 @@ class SpinQuantPreprocessor:
             )
         else:
             lines.append(
-                f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} {'✓ untied' if not tied else '✗ still tied'}"
+                f"  {'embed_tokens / lm_head':<30} {'Untie word embeddings':<50} "
+                f"{'✓ untied' if not tied else '✗ still tied'}"
             )
 
         # RMSNorm fusion
@@ -993,7 +995,8 @@ class SpinQuantPreprocessor:
             lines.append(f"  {'All RMSNorm layers':<30} {'Fuse gamma (skipped: online R1)':<50} {'- n/a'}")
         else:
             lines.append(
-                f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} {'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}"
+                f"  {'All RMSNorm layers':<30} {'Fuse gamma into linear weights':<50} "
+                f"{'✓ fused' if self.config.fuse_rmsnorm else '✗ skipped'}"
             )
 
         # R1

@@ -317,7 +317,7 @@ class InputRotationWrapperHadamard(nn.Module):
             R = self.rotation_matrix.to(x.device, dtype=x.dtype)
             x = x.reshape(*shape[:-1], -1, self._rotation_size)
             x = (x @ R).reshape(shape).to(dtype)
-        return nn.functional.linear(x, self.weight, self.bias)
+        return nn.functional.linear(x, self.weight, self.bias)  # pylint: disable=not-callable
 
     def __repr__(self) -> str:
         return (
