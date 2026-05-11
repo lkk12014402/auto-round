@@ -26,7 +26,7 @@ from auto_round.algorithms.transforms.spinquant.rotation_utils import (
     matmul_hadU,
 )
 
-logger = logging.getLogger("auto_round.spinquant")
+logger = logging.getLogger("autoround.spinquant")
 
 
 def register_spinquant_hooks(

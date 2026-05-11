@@ -49,7 +49,7 @@ from auto_round.algorithms.transforms.spinquant.inplace.apply import (
     remove_spinquant_hooks,
 )
 
-logger = logging.getLogger("auto_round.spinquant")
+logger = logging.getLogger("autoround.spinquant")
 
 
 # NOTE: Online R1 uses forward_pre_hook on target modules. Hooks are
@@ -80,8 +80,8 @@ class SpinQuantConfig(BaseRotationConfig):
     # Rotation dimensions
     r1: bool = True                    # R1: hidden_size rotation (offline fused)
     r2: bool = True                    # R2: head_dim rotation (offline fused)
-    r3: bool = True                    # R3: Q/K online rotation
-    r4: bool = True                    # R4: MLP activation online rotation
+    r3: bool = False                   # R3: Q/K online rotation
+    r4: bool = False                   # R4: MLP activation online rotation
 
     # Rotation size override (None = use full dimension from model config)
     # When set, R1 uses rotation_size instead of hidden_size,

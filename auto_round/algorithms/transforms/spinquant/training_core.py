@@ -36,7 +36,7 @@ import torch.nn.functional as F
 
 from auto_round.algorithms.transforms.spinquant.cayley_optimizer import AdamAndSGDG
 
-logger = logging.getLogger("auto_round.spinquant")
+logger = logging.getLogger("autoround.spinquant")
 
 
 # ---------------------------------------------------------------------------
