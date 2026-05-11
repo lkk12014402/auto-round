@@ -583,9 +583,26 @@ def _inject_rotation_buffers(
 
 
 def _is_quantlinear(module: nn.Module) -> bool:
-    """Check if a module is any variant of QuantLinear."""
+    """Check if a module is any variant of quantized linear layer.
+
+    Covers:
+    - QuantLinear (INT W4A16/W3A16/W8A16 from export.py / qlinear_int.py / qlinear_fp.py)
+    - NVFP4QuantLinear, MXFP4QuantLinear, MXFP8QuantLinear, MXINT4QuantLinear (from qmodules)
+    - WeightFP8ActFP8StaticQuantLinear (FP8 static)
+    - Any class with 'QuantLinear' in its name or inheriting QModuleBase
+    """
     cls_name = type(module).__name__
-    return cls_name == "QuantLinear" and hasattr(module, "bits")
+    # Direct name match for standard QuantLinear
+    if cls_name == "QuantLinear":
+        return True
+    # Match FP-family quantized linears (NVFP4QuantLinear, MXFP4QuantLinear, etc.)
+    if "QuantLinear" in cls_name:
+        return True
+    # Match QModuleBase subclasses (FP8/MXFP/NVFP inference modules)
+    for base in type(module).__mro__:
+        if base.__name__ == "QModuleBase":
+            return True
+    return False
 
 
 def _has_spinquant_buffers(module: nn.Module) -> bool:
