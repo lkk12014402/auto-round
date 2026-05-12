@@ -225,8 +225,9 @@ def register_spinquant_hooks(
                         r4_count += 1
 
                 logger.info(
-                    f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, K={had_K_val}, "
-                    f"mode=deterministic butterfly, block_rotation={need_block_rotation}) on {r4_count} down_proj layers"
+                    f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, "
+                    f"K={had_K_val}, mode=deterministic butterfly, "
+                    f"block_rotation={need_block_rotation}) on {r4_count} down_proj layers"
                 )
 
     return handles
