@@ -371,7 +371,5 @@ def rebuild_rotation_if_needed(model: torch.nn.Module) -> None:
             try:
                 temp.rebuild_online(model)
             except Exception as e:
-                _dispatch_logger.warning(
-                    f"Failed to rebuild {name} rotations: {e}"
-                )
+                _dispatch_logger.warning(f"Failed to rebuild {name} rotations: {e}")
             return  # Only one rotation method expected per model
