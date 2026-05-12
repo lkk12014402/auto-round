@@ -214,60 +214,14 @@ def pack_layer(layer_name, model, backend, device=None):
         qlayer.pack(layer, scale, zp, None, device=device)
     qlayer.to(orig_device)
 
-    # Inject SpinQuant rotation buffers right after packing so that
+    # Inject rotation buffers right after packing so that
     # ShardWriter.save_module() captures them before offloading to meta.
-    _inject_spinquant_buffers_on_layer(layer_name, qlayer, model)
+    if hasattr(model, "_rotation_config"):
+        from auto_round.algorithms.transforms import inject_rotation_buffers_on_layer
+        inject_rotation_buffers_on_layer(layer_name, qlayer, model)
 
     # Note: release weight and bias explicitly, in case they are referenced elsewhere
     release_layer_safely(layer)
-
-
-def _inject_spinquant_buffers_on_layer(layer_name, qlayer, model):
-    """Inject SpinQuant rotation buffers onto a single QuantLinear after packing."""
-    spinquant_config = getattr(model, "_spinquant_config", None)
-    if spinquant_config is None:
-        return
-
-    short_name = layer_name.split(".")[-1]
-
-    r1_proj_names = ("q_proj", "k_proj", "v_proj", "gate_proj", "up_proj")
-    r4_proj_names = ("down_proj",)
-
-    try:
-        from auto_round.algorithms.transforms.spinquant.serialize import (
-            _R1_PREFIX,
-            _R4_PREFIX,
-            _get_hidden_size,
-            _get_intermediate_size,
-            _get_stored_rotation,
-            _inject_rotation_buffers,
-        )
-
-        if spinquant_config.r1 and spinquant_config.online_r1_rotation and short_name in r1_proj_names:
-            hidden_size = _get_hidden_size(model)
-            r1_size = spinquant_config.rotation_size or hidden_size
-            _inject_rotation_buffers(
-                qlayer,
-                _R1_PREFIX,
-                r1_size,
-                random=spinquant_config.random_r1,
-                is_trained=False,
-                rotation_matrix=_get_stored_rotation(model, "spinquant_R1"),
-            )
-
-        if spinquant_config.r4 and short_name in r4_proj_names:
-            intermediate_size = _get_intermediate_size(model)
-            r4_size = spinquant_config.rotation_size or intermediate_size
-            _inject_rotation_buffers(
-                qlayer,
-                _R4_PREFIX,
-                r4_size,
-                random=False,
-                is_trained=False,
-                rotation_matrix=None,
-            )
-    except Exception as e:
-        logger.warning(f"Failed to inject SpinQuant buffers on {layer_name}: {e}")
 
 
 def save_quantized_as_autoround(
@@ -364,11 +318,13 @@ def save_quantized_as_autoround(
             pack_layer(name, model, backend, device)
     filter_quantization_config(quantization_config)
 
-    # Inject SpinQuant rotation buffers into QuantLinear modules (if applicable).
+    # Inject rotation buffers into QuantLinear modules (if applicable).
     # For shard-based saving the buffers are already injected per-layer in
     # pack_layer(); this call handles the non-shard path where modules are
     # still alive on a real device.
-    _inject_spinquant_rotation_buffers(model, quantization_config)
+    if hasattr(model, "_rotation_config"):
+        from auto_round.algorithms.transforms import inject_rotation_buffers_bulk
+        inject_rotation_buffers_bulk(model, quantization_config)
 
     if hasattr(model, "config"):
         model.config.quantization_config = quantization_config
@@ -400,46 +356,9 @@ def save_quantized_as_autoround(
         dtype = None
     save_model(model, model_output_dir, safe_serialization=safe_serialization, dtype=dtype)
 
-    # Save SpinQuant config to config.json for load-time reconstruction
-    _save_spinquant_config_to_dir(model, model_output_dir)
+    # Save rotation config to config.json for load-time reconstruction
+    if hasattr(model, "_rotation_config"):
+        from auto_round.algorithms.transforms import save_rotation_config
+        save_rotation_config(model, model_output_dir)
 
     return model
-
-
-def _inject_spinquant_rotation_buffers(model, quantization_config):
-    """Inject SpinQuant rotation buffers if the model was preprocessed with SpinQuant."""
-    spinquant_config = getattr(model, "_spinquant_config", None)
-    if spinquant_config is None:
-        return
-
-    try:
-        from auto_round.algorithms.transforms.spinquant.serialize import (
-            inject_spinquant_buffers,
-        )
-
-        n = inject_spinquant_buffers(model, spinquant_config)
-        if n > 0:
-            # Also embed spinquant_config in quantization_config for persistence
-            from auto_round.algorithms.transforms.spinquant.serialize import (
-                _config_to_serializable,
-            )
-
-            quantization_config["spinquant_config"] = _config_to_serializable(spinquant_config, model)
-    except Exception as e:
-        logger.warning(f"Failed to inject SpinQuant buffers: {e}")
-
-
-def _save_spinquant_config_to_dir(model, save_dir):
-    """Save SpinQuant config to config.json if applicable."""
-    spinquant_config = getattr(model, "_spinquant_config", None)
-    if spinquant_config is None:
-        return
-
-    try:
-        from auto_round.algorithms.transforms.spinquant.serialize import (
-            save_spinquant_config,
-        )
-
-        save_spinquant_config(model, save_dir, spinquant_config)
-    except Exception as e:
-        logger.warning(f"Failed to save SpinQuant config: {e}")

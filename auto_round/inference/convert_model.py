@@ -753,31 +753,10 @@ def post_init(model: torch.nn.Module, used_backends: list[str]) -> None:
 
     # Rebuild SpinQuant online rotations after weights are loaded.
     # Buffers were pre-registered in convert_hf_model() and populated by
-    # HuggingFace's state_dict loader. Now patch QuantLinear.forward()
-    # to apply the rotations and rebuild R3 monkeypatch from config.
-    _rebuild_spinquant_if_needed(model)
-
-
-def _rebuild_spinquant_if_needed(model: nn.Module) -> None:
-    """Rebuild SpinQuant online rotations if the model has spinquant buffers."""
-    # Quick check: any QuantLinear with spinquant buffers?
-    has_spinquant = False
-    for _, module in model.named_modules():
-        if hasattr(module, "spinquant_r1_type") or hasattr(module, "spinquant_r4_type"):
-            has_spinquant = True
-            break
-
-    if not has_spinquant:
-        return
-
-    try:
-        from auto_round.algorithms.transforms.spinquant.serialize import (
-            rebuild_spinquant_online,
-        )
-
-        rebuild_spinquant_online(model)
-    except Exception as e:
-        logger.warning(f"Failed to rebuild SpinQuant rotations: {e}")
+    # HuggingFace's state_dict loader. Now rebuild online rotations
+    # (forward patching + R3 monkeypatch) via the generic dispatch.
+    from auto_round.algorithms.transforms import rebuild_rotation_if_needed
+    rebuild_rotation_if_needed(model)
 
 
 def disable_moe_conversion_mapping(model):
@@ -879,21 +858,14 @@ def convert_hf_model(model: nn.Module, target_device: str = "cpu") -> tuple[nn.M
             data_type=quantization_config.data_type,
         )
 
-    # Rebuild SpinQuant online rotations: pre-register empty buffers on QuantLinear
-    # so HuggingFace's state_dict loader can populate them from safetensors.
-    # The actual forward patching happens in post_init() after weights are loaded.
-    spinquant_config = getattr(quantization_config, "spinquant_config", None)
-    if spinquant_config is None and isinstance(quantization_config, dict):
-        spinquant_config = quantization_config.get("spinquant_config")
-    if spinquant_config is not None and spinquant_config:
-        try:
-            from auto_round.algorithms.transforms.spinquant.serialize import (
-                preregister_spinquant_buffers,
-            )
-
-            preregister_spinquant_buffers(model, spinquant_config)
-        except Exception as e:
-            logger.warning(f"Failed to pre-register SpinQuant buffers: {e}")
+    # Pre-register rotation buffers on QuantLinear modules so HuggingFace's
+    # state_dict loader can populate them from safetensors.
+    # Uses generic dispatch — supports SpinQuant and future rotation methods.
+    try:
+        from auto_round.algorithms.transforms import preregister_rotation_buffers
+        preregister_rotation_buffers(model, quantization_config)
+    except Exception as e:
+        logger.warning(f"Failed to pre-register rotation buffers: {e}")
 
     # Suggest a better backend if available
     if backend == "auto":

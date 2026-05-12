@@ -305,7 +305,8 @@ class SpinQuantPreprocessor:
         self._cleanup()
 
         # Store config on model for downstream serialization (export pipeline)
-        self.model._spinquant_config = self.config
+        self.model._rotation_config = self.config
+        self.model._spinquant_config = self.config  # legacy alias
 
         # Print per-layer transformation summary table
         self._print_transformation_summary()
