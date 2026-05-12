@@ -78,6 +78,8 @@ import gc
 import json
 import logging
 import os
+import random
+import shutil
 import sys
 import time
 from collections import OrderedDict
@@ -93,11 +95,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from auto_round import AutoRound
 from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
+
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Rotation and scheme definitions
@@ -159,6 +171,8 @@ def build_rotation_config(
     online_r1: bool = True,
     random_r1: bool = False,
     random_r2: bool = False,
+    random_r3: bool = False,
+    random_r4: bool = False,
 ) -> SpinQuantConfig | None:
     """Build a SpinQuantConfig for the given rotation flags.
 
@@ -168,11 +182,12 @@ def build_rotation_config(
 
     Args:
         rotation_flags: dict with r1, r2, r3, r4 booleans.
-        rotation_size: Optional custom rotation dimension. With v2, this is
-            rarely needed — known Hadamard matrices handle most non-pow2 sizes.
+        rotation_size: Optional custom rotation dimension.
         online_r1: Use online R1 (recommended).
         random_r1: Use random Hadamard for R1.
         random_r2: Use random Hadamard for R2.
+        random_r3: Use random Hadamard for R3.
+        random_r4: Use random Hadamard for R4.
 
     Returns:
         SpinQuantConfig or None.
@@ -187,6 +202,8 @@ def build_rotation_config(
         trainable_smooth=False,
         random_r1=random_r1,
         random_r2=random_r2,
+        random_r3=random_r3,
+        random_r4=random_r4,
     )
 
 
@@ -210,7 +227,32 @@ def evaluate_model(
     )
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
-        acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
+        if acc is not None:
+            metrics[task_name] = round(acc, 4)
+    return metrics
+
+
+def evaluate_model_from_path(
+    model_path: str,
+    tasks: str | list[str],
+    batch_size: int = 8,
+    limit: int | None = None,
+    device: str = "cuda:0",
+) -> dict[str, float]:
+    """Load a saved model from disk and evaluate using lm_eval."""
+    from lm_eval.evaluator import simple_evaluate
+    from lm_eval.models.huggingface import HFLM
+
+    lm = HFLM(pretrained=model_path, batch_size=batch_size, device=device)
+    task_list = [t.strip() for t in tasks.split(",")] if isinstance(tasks, str) else tasks
+
+    results = simple_evaluate(
+        model=lm, tasks=task_list, batch_size=batch_size, limit=limit, device=device
+    )
+    metrics = {}
+    for task_name, task_results in results.get("results", {}).items():
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
     return metrics
@@ -225,16 +267,38 @@ def run_single_combination(
     scheme_str: str,
     args,
     rotation_size: int | None = None,
+    random_override: tuple[bool, bool, bool, bool] | None = None,
+    matrix_mode: str = "det",
 ) -> dict[str, Any]:
     """Run one rotation × scheme combination via AutoRound pipeline.
 
     Uses ``AutoRound(rotation_config=...)`` so that rotation is applied
     automatically at Phase 4.5, before layer-wise quantization.
+
+    When ``args.save_load`` is True, also saves the model to disk, loads it
+    back, and evaluates from disk for roundtrip verification.
+
+    Args:
+        random_override: If provided, overrides args.random_r1/r2/r3/r4.
+            Used by --compare-random to run det and random variants.
+        matrix_mode: "det" or "random" — recorded in results for grouping.
     """
-    label = f"{rotation_name} + {scheme_name}" if rotation_name != "none" else f"{scheme_name} only"
+    if random_override is not None:
+        rr1, rr2, rr3, rr4 = random_override
+    else:
+        rr1 = args.random_r1
+        rr2 = args.random_r2
+        rr3 = args.random_r3
+        rr4 = args.random_r4
+
+    is_random = rr1 or rr2 or rr3 or rr4
+    rot_mode = "random" if is_random else "deterministic"
+    label = (f"{rotation_name} + {scheme_name} ({rot_mode})"
+             if rotation_name != "none" else f"{scheme_name} only")
     logger.info(f"\n{'='*70}")
     logger.info(f"  {label}")
-    logger.info(f"  Rotation: {rotation_name} | Scheme: {scheme_name} ({scheme_str})")
+    logger.info(f"  Rotation: {rotation_name} | Scheme: {scheme_name} "
+                f"({scheme_str}) | Mode: {rot_mode}")
     logger.info(f"{'='*70}")
 
     result = {
@@ -242,7 +306,12 @@ def run_single_combination(
         "scheme": scheme_name,
         "scheme_str": scheme_str,
         "label": label,
-        "random_hadamard": args.random_hadamard,
+        "rotation_mode": rot_mode,
+        "matrix_mode": matrix_mode,
+        "random_r1": rr1,
+        "random_r2": rr2,
+        "random_r3": rr3,
+        "random_r4": rr4,
         "quant_iters": args.quant_iters,
         "rotation_size": rotation_size,
         "api": "pipeline_v2",
@@ -252,24 +321,32 @@ def run_single_combination(
     rotation_config = build_rotation_config(
         rotation_flags, rotation_size,
         online_r1=args.online_r1,
-        random_r1=args.random_hadamard,
-        random_r2=args.random_hadamard,
+        random_r1=rr1,
+        random_r2=rr2,
+        random_r3=rr3,
+        random_r4=rr4,
     )
 
     t0 = time.time()
     model = None
+    save_dir = None
     try:
         model = load_model(model_name, args.device)
 
         # ── Pipeline: rotation_config + quantization in one call ──
         if rotation_config is not None:
-            logger.info(f"  rotation_config = SpinQuantConfig("
-                        f"r1={rotation_config.r1}, r2={rotation_config.r2}, "
-                        f"r3={rotation_config.r3}, r4={rotation_config.r4}, "
-                        f"online_r1={rotation_config.online_r1_rotation}, "
-                        f"random_r1={rotation_config.random_r1})")
+            logger.info(
+                f"  rotation_config = SpinQuantConfig("
+                f"r1={rotation_config.r1}, r2={rotation_config.r2}, "
+                f"r3={rotation_config.r3}, r4={rotation_config.r4}, "
+                f"online_r1={rotation_config.online_r1_rotation}, "
+                f"random_r1={rotation_config.random_r1}, "
+                f"random_r2={rotation_config.random_r2}, "
+                f"random_r3={rotation_config.random_r3}, "
+                f"random_r4={rotation_config.random_r4})"
+            )
         else:
-            logger.info(f"  rotation_config = None (no rotation)")
+            logger.info("  rotation_config = None (no rotation)")
 
         logger.info(f"  AutoRound(rotation_config=..., scheme={scheme_str}, "
                     f"iters={args.quant_iters})")
@@ -291,21 +368,74 @@ def run_single_combination(
 
         pipeline_time = time.time() - t0
         result["setup_time_s"] = round(pipeline_time, 1)
-        logger.info(f"  Pipeline (rotation+quantization) done in {pipeline_time:.1f}s")
+        logger.info(f"  Pipeline (rotation+quantization) done in "
+                    f"{pipeline_time:.1f}s")
 
-        # Evaluate
-        logger.info(f"  Evaluating on tasks: {args.tasks}")
+        # ── In-memory evaluation ──
+        logger.info(f"  Evaluating in-memory on tasks: {args.tasks}")
         metrics = evaluate_model(
             model, tokenizer, args.tasks,
             batch_size=args.batch_size, limit=args.limit, device=args.device,
         )
-
         result["metrics"] = metrics
-        result["status"] = "success"
-        result["total_time_s"] = round(time.time() - t0, 1)
-
+        logger.info("  In-memory results:")
         for task, acc in sorted(metrics.items()):
             logger.info(f"    {task}: {acc:.4f}")
+
+        # ── Save/Load roundtrip ──
+        if args.save_load:
+            # Save
+            safe_rot_name = rotation_name.replace("+", "_").replace(
+                " ", "_").replace("(", "").replace(")", "").replace("=", "")
+            save_dir = os.path.join(
+                args.output_dir or ".",
+                f"_tmp_{safe_rot_name}_{scheme_name}_{rot_mode}"
+            )
+            logger.info(f"  Saving model to {save_dir} ...")
+            ar.save_quantized(save_dir)
+
+            # Free in-memory model
+            del model, ar
+            model = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Load from disk and evaluate
+            logger.info(f"  Loading from disk and evaluating ...")
+            metrics_disk = evaluate_model_from_path(
+                save_dir, args.tasks,
+                batch_size=args.batch_size, limit=args.limit,
+                device=args.device,
+            )
+            result["metrics_disk"] = metrics_disk
+
+            # Compare
+            match = True
+            logger.info("  From-disk results:")
+            for task in sorted(set(list(metrics.keys())
+                                   + list(metrics_disk.keys()))):
+                mem_val = metrics.get(task)
+                disk_val = metrics_disk.get(task)
+                if mem_val is not None and disk_val is not None:
+                    diff = abs(mem_val - disk_val)
+                    status = "✓" if diff < 1e-4 else "✗"
+                    logger.info(f"    {task}: mem={mem_val:.4f} "
+                                f"disk={disk_val:.4f} diff={diff:.6f} "
+                                f"{status}")
+                    if diff >= 1e-4:
+                        match = False
+                else:
+                    logger.info(f"    {task}: mem={mem_val} disk={disk_val}")
+            result["roundtrip_match"] = match
+
+            # Cleanup saved model
+            if args.cleanup and save_dir and os.path.exists(save_dir):
+                shutil.rmtree(save_dir, ignore_errors=True)
+                logger.info(f"  Cleaned up {save_dir}")
+
+        result["status"] = "success"
+        result["total_time_s"] = round(time.time() - t0, 1)
 
     except Exception as e:
         logger.error(f"  FAILED: {e}")
@@ -321,6 +451,10 @@ def run_single_combination(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        # Cleanup on error too
+        if (args.save_load and args.cleanup and save_dir
+                and os.path.exists(save_dir)):
+            shutil.rmtree(save_dir, ignore_errors=True)
 
     return result
 
@@ -375,8 +509,22 @@ def run_fp16_baseline(model_name: str, tokenizer, args) -> dict[str, Any]:
 # Results formatting
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def print_results_matrix(all_results: list[dict], tasks: list[str]):
-    """Print results as a rotation × scheme matrix table."""
+def _compute_avg(metrics: dict) -> float | None:
+    """Compute average of numeric values in a metrics dict."""
+    vals = [v for v in metrics.values() if isinstance(v, (int, float))]
+    return sum(vals) / len(vals) if vals else None
+
+
+def print_results_matrix(all_results: list[dict], tasks: list[str],
+                         has_disk: bool = False,
+                         compare_random: bool = False):
+    """Print results as a rotation × scheme matrix table.
+
+    When compare_random=True, shows deterministic and random side by side
+    with Δ(bp) columns for each scheme.
+
+    When has_disk=True, shows roundtrip match table.
+    """
     task_list = sorted(tasks)
 
     rotations_seen = []
@@ -389,31 +537,290 @@ def print_results_matrix(all_results: list[dict], tasks: list[str]):
         if sch not in schemes_seen:
             schemes_seen.append(sch)
 
+    # Build lookup: (rotation, scheme, matrix_mode) → result
     lookup = {}
     for r in all_results:
-        key = (r["rotation"], r["scheme"])
+        mm = r.get("matrix_mode", "det")
+        key = (r["rotation"], r["scheme"], mm)
         lookup[key] = r
+        # Also store with plain key for non-compare-random mode
+        lookup[(r["rotation"], r["scheme"])] = r
+
+    def _fmt(val):
+        if val is None:
+            return "—"
+        return f"{val:.4f}"
+
+    def _fmt_delta(det_val, rand_val):
+        if det_val is None or rand_val is None:
+            return "—"
+        bp = round((rand_val - det_val) * 10000)
+        return f"{bp:+d}"
+
+    if compare_random:
+        _print_compare_random_tables(
+            all_results, task_list, rotations_seen, schemes_seen,
+            lookup, has_disk, _fmt, _fmt_delta)
+    else:
+        _print_standard_tables(
+            all_results, task_list, rotations_seen, schemes_seen,
+            lookup, has_disk, _fmt)
+
+
+def _print_compare_random_tables(
+    all_results, task_list, rotations_seen, schemes_seen,
+    lookup, has_disk, _fmt, _fmt_delta,
+):
+    """Print det vs random side-by-side tables."""
+    col_w = 8  # width for each value column
+
+    def _header_line(schemes, label_width=26):
+        h = f"  {'Rotation':<{label_width}}"
+        for sch in schemes:
+            h += f" │ {sch:^26}"
+        return h
+
+    def _sub_header(schemes, label_width=26):
+        h = f"  {'':<{label_width}}"
+        for _ in schemes:
+            h += f" │ {'det':>{col_w}} {'rand':>{col_w}} {'Δ(bp)':>{col_w}}"
+        return h
+
+    def _sep(schemes, label_width=26, char="─"):
+        s = f"  {char*label_width}"
+        for _ in schemes:
+            s += f"─┼─{char*(3*col_w+2)}"
+        return s
+
+    def _get_task_acc(r, task):
+        if r and r.get("status") == "success":
+            return r.get("metrics", {}).get(task)
+        return None
+
+    def _get_avg(r):
+        if r and r.get("status") == "success" and r.get("metrics"):
+            return _compute_avg(r["metrics"])
+        return None
+
+    def _is_none_rot(rot):
+        """Check if this rotation is a 'none' variant."""
+        return rot == "none" or rot.startswith("FP16")
+
+    # ── Per-task tables ──
+    for task in task_list:
+        print(f"\n{'═'*120}")
+        print(f"  Task: {task}  (det vs random)")
+        print(f"{'═'*120}")
+        print(_header_line(schemes_seen))
+        print(_sub_header(schemes_seen))
+        print(_sep(schemes_seen))
+
+        for rot in rotations_seen:
+            row = f"  {rot:<26}"
+            for sch in schemes_seen:
+                r_det = lookup.get((rot, sch, "det"))
+                r_rand = lookup.get((rot, sch, "random"))
+                det_v = _get_task_acc(r_det, task)
+                rand_v = _get_task_acc(r_rand, task)
+                if _is_none_rot(rot):
+                    rand_v = None  # no random for none/FP16
+                row += (f" │ {_fmt(det_v):>{col_w}}"
+                        f" {_fmt(rand_v):>{col_w}}"
+                        f" {_fmt_delta(det_v, rand_v):>{col_w}}")
+            print(row)
+
+    # ── Average accuracy table ──
+    print(f"\n{'═'*120}")
+    print(f"  Average Accuracy  (det vs random, Δ in basis points)")
+    print(f"{'═'*120}")
+    print(_header_line(schemes_seen))
+    print(_sub_header(schemes_seen))
+    print(_sep(schemes_seen))
+
+    for rot in rotations_seen:
+        row = f"  {rot:<26}"
+        for sch in schemes_seen:
+            r_det = lookup.get((rot, sch, "det"))
+            r_rand = lookup.get((rot, sch, "random"))
+            det_v = _get_avg(r_det)
+            rand_v = _get_avg(r_rand)
+            if _is_none_rot(rot):
+                rand_v = None
+            row += (f" │ {_fmt(det_v):>{col_w}}"
+                    f" {_fmt(rand_v):>{col_w}}"
+                    f" {_fmt_delta(det_v, rand_v):>{col_w}}")
+        print(row)
+
+    # ── Roundtrip table ──
+    if has_disk:
+        print(f"\n{'═'*120}")
+        print(f"  Roundtrip Save/Load  (det / random)")
+        print(f"{'═'*120}")
+        h = f"  {'Rotation':<26}"
+        for sch in schemes_seen:
+            h += f" │ {'det':>8} {'rand':>8}"
+        print(h)
+        print(_sep(schemes_seen))
+
+        for rot in rotations_seen:
+            row = f"  {rot:<26}"
+            for sch in schemes_seen:
+                for mm in ("det", "random"):
+                    r = lookup.get((rot, sch, mm))
+                    if _is_none_rot(rot) and mm == "random":
+                        row += f" {'—':>8}"
+                    elif r and r.get("status") == "success":
+                        m = r.get("roundtrip_match")
+                        sym = "✓" if m is True else (
+                            "✗" if m is False else "N/A")
+                        row += f" {sym:>8}"
+                    elif r and r.get("status") == "error":
+                        row += f" {'ERR':>8}"
+                    else:
+                        row += f" {'—':>8}"
+                row += " │" if sch != schemes_seen[-1] else ""
+            print(row)
+
+    # ── Timing table ──
+    print(f"\n{'═'*120}")
+    print(f"  Timing (seconds)  (det / random)")
+    print(f"{'═'*120}")
+    h = f"  {'Rotation':<26}"
+    for sch in schemes_seen:
+        h += f" │ {'det':>8} {'rand':>8}"
+    print(h)
+    print(_sep(schemes_seen))
+
+    for rot in rotations_seen:
+        row = f"  {rot:<26}"
+        for sch in schemes_seen:
+            for mm in ("det", "random"):
+                r = lookup.get((rot, sch, mm))
+                if _is_none_rot(rot) and mm == "random":
+                    row += f" {'—':>8}"
+                elif r and "total_time_s" in r:
+                    row += f" {r['total_time_s']:>7.0f}s"
+                else:
+                    row += f" {'—':>8}"
+            row += " │" if sch != schemes_seen[-1] else ""
+        print(row)
+
+
+def _print_standard_tables(
+    all_results, task_list, rotations_seen, schemes_seen,
+    lookup, has_disk, _fmt,
+):
+    """Print standard (non-compare-random) tables."""
+    def _fmt_acc(val):
+        if val is None:
+            return f"{'N/A':>10}"
+        return f"{val:>10.4f}"
 
     # Per-task matrix
     for task in task_list:
-        print(f"\n{'═'*90}")
+        print(f"\n{'═'*120}")
         print(f"  Task: {task}")
-        print(f"{'═'*90}")
+        print(f"{'═'*120}")
 
-        header = f"  {'Rotation':<20}"
-        for sch in schemes_seen:
-            header += f" | {sch:>12}"
-        print(header)
-        print(f"  {'─'*20}" + "─┼─".join(["─" * 12] * len(schemes_seen)))
+        if has_disk:
+            header = f"  {'Rotation':<20}"
+            for sch in schemes_seen:
+                header += f" | {sch+' mem':>14} {sch+' disk':>14}"
+            print(header)
+        else:
+            header = f"  {'Rotation':<20}"
+            for sch in schemes_seen:
+                header += f" | {sch:>12}"
+            print(header)
 
         for rot in rotations_seen:
             row = f"  {rot:<20}"
             for sch in schemes_seen:
                 r = lookup.get((rot, sch))
                 if r and r.get("status") == "success":
-                    acc = r["metrics"].get(task, None)
-                    if acc is not None:
-                        row += f" | {acc:>12.4f}"
+                    mem_acc = r["metrics"].get(task)
+                    if has_disk:
+                        disk_acc = r.get("metrics_disk", {}).get(task)
+                        row += (f" | {_fmt_acc(mem_acc)}"
+                                f" {_fmt_acc(disk_acc)}")
+                    else:
+                        row += f" | {_fmt_acc(mem_acc):>12}"
+                elif r and r.get("status") == "error":
+                    err_w = " | " + f"{'ERROR':>12}"
+                    if has_disk:
+                        err_w += f" {'':>14}"
+                    row += err_w
+                else:
+                    dash_w = " | " + f"{'—':>12}"
+                    if has_disk:
+                        dash_w += f" {'':>14}"
+                    row += dash_w
+            print(row)
+
+    # Average accuracy matrix
+    print(f"\n{'═'*120}")
+    title = "Average Accuracy"
+    if has_disk:
+        title += " (mem = in-memory, disk = from saved model)"
+    print(f"  {title}")
+    print(f"{'═'*120}")
+
+    if has_disk:
+        header = f"  {'Rotation':<20}"
+        for sch in schemes_seen:
+            header += f" | {sch+' mem':>14} {sch+' disk':>14}"
+        print(header)
+    else:
+        header = f"  {'Rotation':<20}"
+        for sch in schemes_seen:
+            header += f" | {sch:>12}"
+        print(header)
+
+    for rot in rotations_seen:
+        row = f"  {rot:<20}"
+        for sch in schemes_seen:
+            r = lookup.get((rot, sch))
+            if r and r.get("status") == "success" and r.get("metrics"):
+                avg_mem = _compute_avg(r["metrics"])
+                if has_disk and r.get("metrics_disk"):
+                    avg_disk = _compute_avg(r["metrics_disk"])
+                    row += (f" | {_fmt_acc(avg_mem)}"
+                            f" {_fmt_acc(avg_disk)}")
+                else:
+                    row += f" | {_fmt_acc(avg_mem):>12}"
+            elif r and r.get("status") == "error":
+                err_w = " | " + f"{'ERROR':>12}"
+                if has_disk:
+                    err_w += f" {'':>14}"
+                row += err_w
+            else:
+                dash_w = " | " + f"{'—':>12}"
+                if has_disk:
+                    dash_w += f" {'':>14}"
+                row += dash_w
+        print(row)
+
+    # Roundtrip match table
+    if has_disk:
+        print(f"\n{'═'*90}")
+        print(f"  Roundtrip Match "
+              f"(in-memory ≈ from-disk, threshold < 1e-4)")
+        print(f"{'═'*90}")
+        header = f"  {'Rotation':<20}"
+        for sch in schemes_seen:
+            header += f" | {sch:>12}"
+        print(header)
+
+        for rot in rotations_seen:
+            row = f"  {rot:<20}"
+            for sch in schemes_seen:
+                r = lookup.get((rot, sch))
+                if r and r.get("status") == "success":
+                    match = r.get("roundtrip_match")
+                    if match is True:
+                        row += f" | {'✓ PASS':>12}"
+                    elif match is False:
+                        row += f" | {'✗ FAIL':>12}"
                     else:
                         row += f" | {'N/A':>12}"
                 elif r and r.get("status") == "error":
@@ -421,33 +828,6 @@ def print_results_matrix(all_results: list[dict], tasks: list[str]):
                 else:
                     row += f" | {'—':>12}"
             print(row)
-
-    # Average accuracy matrix
-    print(f"\n{'═'*90}")
-    print(f"  Average Accuracy (across {len(task_list)} tasks)")
-    print(f"{'═'*90}")
-    header = f"  {'Rotation':<20}"
-    for sch in schemes_seen:
-        header += f" | {sch:>12}"
-    print(header)
-    print(f"  {'─'*20}" + "─┼─".join(["─" * 12] * len(schemes_seen)))
-
-    for rot in rotations_seen:
-        row = f"  {rot:<20}"
-        for sch in schemes_seen:
-            r = lookup.get((rot, sch))
-            if r and r.get("status") == "success" and r.get("metrics"):
-                vals = [v for v in r["metrics"].values() if isinstance(v, (int, float))]
-                if vals:
-                    avg = sum(vals) / len(vals)
-                    row += f" | {avg:>12.4f}"
-                else:
-                    row += f" | {'N/A':>12}"
-            elif r and r.get("status") == "error":
-                row += f" | {'ERROR':>12}"
-            else:
-                row += f" | {'—':>12}"
-        print(row)
 
     # Timing
     print(f"\n{'═'*90}")
@@ -457,7 +837,6 @@ def print_results_matrix(all_results: list[dict], tasks: list[str]):
     for sch in schemes_seen:
         header += f" | {sch:>12}"
     print(header)
-    print(f"  {'─'*20}" + "─┼─".join(["─" * 12] * len(schemes_seen)))
 
     for rot in rotations_seen:
         row = f"  {rot:<20}"
@@ -477,31 +856,60 @@ def save_results_json(all_results: list[dict], output_path: str):
     logger.info(f"Results saved to {output_path}")
 
 
-def save_results_csv(all_results: list[dict], tasks: list[str], output_path: str):
+def save_results_csv(all_results: list[dict], tasks: list[str],
+                     output_path: str, has_disk: bool = False):
     """Save results as CSV for spreadsheet import."""
     task_list = sorted(tasks)
+    # Build header
+    header = [
+        "rotation", "scheme", "rotation_mode", "matrix_mode",
+        "random_r1", "random_r2", "random_r3", "random_r4",
+        "quant_iters", "rotation_size", "status", "total_time_s",
+    ]
+    for t in task_list:
+        header.append(f"{t}_mem")
+    header.append("avg_mem")
+    if has_disk:
+        for t in task_list:
+            header.append(f"{t}_disk")
+        header.append("avg_disk")
+        header.append("roundtrip_match")
+
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "rotation", "scheme", "random_hadamard", "quant_iters",
-            "rotation_size", "api", "status", "total_time_s"
-        ] + task_list + ["avg_accuracy"])
+        writer.writerow(header)
 
         for r in all_results:
             metrics = r.get("metrics", {})
-            accs = [metrics.get(t, "") for t in task_list]
-            vals = [v for v in accs if isinstance(v, (int, float))]
-            avg = round(sum(vals) / len(vals), 4) if vals else ""
-            writer.writerow([
+            accs_mem = [metrics.get(t, "") for t in task_list]
+            vals_mem = [v for v in accs_mem if isinstance(v, (int, float))]
+            avg_mem = round(sum(vals_mem) / len(vals_mem), 4) if vals_mem else ""
+
+            row = [
                 r.get("rotation", ""),
                 r.get("scheme", ""),
-                r.get("random_hadamard", ""),
+                r.get("rotation_mode", "deterministic"),
+                r.get("matrix_mode", "det"),
+                r.get("random_r1", False),
+                r.get("random_r2", False),
+                r.get("random_r3", False),
+                r.get("random_r4", False),
                 r.get("quant_iters", ""),
                 r.get("rotation_size", ""),
-                r.get("api", "unified_v2"),
                 r.get("status", ""),
                 r.get("total_time_s", ""),
-            ] + accs + [avg])
+            ] + accs_mem + [avg_mem]
+
+            if has_disk:
+                metrics_d = r.get("metrics_disk", {})
+                accs_disk = [metrics_d.get(t, "") for t in task_list]
+                vals_disk = [v for v in accs_disk
+                             if isinstance(v, (int, float))]
+                avg_disk = (round(sum(vals_disk) / len(vals_disk), 4)
+                            if vals_disk else "")
+                row += accs_disk + [avg_disk, r.get("roundtrip_match", "")]
+
+            writer.writerow(row)
 
     logger.info(f"CSV saved to {output_path}")
 
@@ -582,10 +990,20 @@ Examples:
     parser.add_argument("--online-r1", action="store_true", default=True,
                         help="Use online R1 rotation (default: True, recommended)")
     parser.add_argument("--offline-r1", dest="online_r1", action="store_false",
-                        help="Use offline R1 rotation (⚠️ may degrade accuracy with quantization)")
+                        help="Use offline R1 rotation")
     parser.add_argument("--random-hadamard", action="store_true", default=False,
-                        help="Use random Hadamard (H×D) for R1/R2. "
-                             "R3/R4 always use deterministic regardless.")
+                        help="Use random Hadamard for ALL rotations (R1/R2/R3/R4). "
+                             "For per-rotation control, use --random-r1/r2/r3/r4.")
+    parser.add_argument("--random-r1", action="store_true", default=False,
+                        help="Use random Hadamard for R1 only")
+    parser.add_argument("--random-r2", action="store_true", default=False,
+                        help="Use random Hadamard for R2 only")
+    parser.add_argument("--random-r3", action="store_true", default=False,
+                        help="Use random Hadamard for R3 only")
+    parser.add_argument("--random-r4", action="store_true", default=False,
+                        help="Use random Hadamard for R4 only")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
 
     # Quantization config
     parser.add_argument("--schemes", type=str, default=",".join(COMMON_SCHEMES),
@@ -617,17 +1035,46 @@ Examples:
 
     # Output
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory for results (default: auto-generated with timestamp)")
+                        help="Output directory for results (default: auto-generated)")
     parser.add_argument("--no-baseline", action="store_true",
                         help="Skip FP16 baseline evaluation")
     parser.add_argument("--no-save", action="store_true",
                         help="Don't save results to files")
+    parser.add_argument("--save-load", action="store_true", default=False,
+                        help="Enable save/load roundtrip: save model to disk, "
+                             "load back, evaluate from disk, compare with "
+                             "in-memory results")
+    parser.add_argument("--compare-random", action="store_true", default=False,
+                        help="Run each rotation combo twice (deterministic + "
+                             "random Hadamard) for side-by-side comparison. "
+                             "Overrides --random-hadamard/--random-r* flags.")
+    parser.add_argument("--cleanup", action="store_true", default=True,
+                        help="Clean up saved model after roundtrip (default: True)")
+    parser.add_argument("--no-cleanup", dest="cleanup", action="store_false",
+                        help="Keep saved model after roundtrip")
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # Seed
+    set_seed(args.seed)
+
+    # --compare-random overrides individual random flags
+    if args.compare_random:
+        # Clear any random flags — we'll set them per-run in the loop
+        args.random_r1 = False
+        args.random_r2 = False
+        args.random_r3 = False
+        args.random_r4 = False
+        args.random_hadamard = False
+    elif args.random_hadamard:
+        args.random_r1 = True
+        args.random_r2 = True
+        args.random_r3 = True
+        args.random_r4 = True
 
     # Resolve presets
     if args.full_matrix:
@@ -653,7 +1100,8 @@ def main():
     # Validate scheme names
     for sn in scheme_names:
         if sn not in SCHEME_DEFS:
-            logger.error(f"Unknown scheme: '{sn}'. Available: {list(SCHEME_DEFS.keys())}")
+            logger.error(f"Unknown scheme: '{sn}'. "
+                         f"Available: {list(SCHEME_DEFS.keys())}")
             sys.exit(1)
 
     # Resolve rotation_sizes to sweep
@@ -673,20 +1121,57 @@ def main():
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_short = args.model.split("/")[-1]
-        iters_tag = f"_iters{args.quant_iters}" if args.quant_iters > 0 else "_rtn"
-        size_tag = f"_rs{'_'.join(str(s) if s else 'auto' for s in rotation_sizes)}" if multi_size else ""
-        args.output_dir = f"results_v2_{model_short}{iters_tag}{size_tag}_{timestamp}"
+        iters_tag = (f"_iters{args.quant_iters}"
+                     if args.quant_iters > 0 else "_rtn")
+        size_tag = ""
+        if multi_size:
+            parts = [str(s) if s else "auto" for s in rotation_sizes]
+            size_tag = f"_rs{'_'.join(parts)}"
+        cmp_tag = "_cmprand" if args.compare_random else ""
+        args.output_dir = (
+            f"results_v2_{model_short}{iters_tag}"
+            f"{size_tag}{cmp_tag}_{timestamp}"
+        )
 
     if not args.no_save:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    # Print test plan
-    # Calculate total combinations (deduplicate "none" across rotation_sizes)
+    # Determine matrix modes for this run
+    # "det" = deterministic, "random" = random Hadamard (H×diag(±1))
+    if args.compare_random:
+        matrix_modes = ["det", "random"]
+    elif (args.random_r1 or args.random_r2
+          or args.random_r3 or args.random_r4):
+        matrix_modes = ["random"]
+    else:
+        matrix_modes = ["det"]
+
+    # Calculate total combinations
     n_rot_with_size = len([r for r in rotation_names if r != "none"])
     n_none = 1 if "none" in rotation_names else 0
-    n_combos = (n_rot_with_size * len(rotation_sizes) + n_none) * len(scheme_names)
+    n_modes_per_rot = len(matrix_modes)
+    # "none" rotation: only 1 mode (det), never random
+    n_combos = (
+        (n_rot_with_size * len(rotation_sizes) * n_modes_per_rot
+         + n_none) * len(scheme_names)
+    )
     total_combos = n_combos + (0 if args.no_baseline else 1)
     task_list = [t.strip() for t in args.tasks.split(",")]
+
+    # Rotation mode display
+    if args.compare_random:
+        rot_mode_str = "compare (det vs random)"
+    elif args.random_hadamard:
+        rot_mode_str = "random (all)"
+    elif args.random_r1 or args.random_r2 or args.random_r3 or args.random_r4:
+        parts = []
+        for flag, name in [(args.random_r1, "R1"), (args.random_r2, "R2"),
+                           (args.random_r3, "R3"), (args.random_r4, "R4")]:
+            if flag:
+                parts.append(name)
+        rot_mode_str = f"random ({'+'.join(parts)})"
+    else:
+        rot_mode_str = "deterministic"
 
     logger.info(f"\n{'═'*70}")
     logger.info(f"  ROTATION × QUANTIZATION ACCURACY MATRIX (v2)")
@@ -695,34 +1180,42 @@ def main():
     logger.info(f"  Device:         {args.device}")
     logger.info(f"  Rotations:      {rotation_names}")
     logger.info(f"  Schemes:        {scheme_names}")
+    logger.info(f"  Matrix modes:   {matrix_modes}")
     logger.info(f"  Total combos:   {total_combos}")
     logger.info(f"  Tasks:          {task_list}")
     logger.info(f"  Eval limit:     {args.limit or 'full'}")
     logger.info(f"  Quant iters:    {args.quant_iters} "
                 f"({'RTN' if args.quant_iters == 0 else 'auto-round tuning'})")
     if multi_size:
-        rs_display = [str(s) if s is not None else "auto" for s in rotation_sizes]
+        rs_display = [str(s) if s is not None else "auto"
+                      for s in rotation_sizes]
         logger.info(f"  rotation_sizes: {rs_display}")
     else:
-        logger.info(f"  rotation_size:  {args.rotation_size or 'auto (known Hadamard)'}")
-    logger.info(f"  Hadamard type:  {'Random' if args.random_hadamard else 'Deterministic'}")
+        logger.info(f"  rotation_size:  "
+                    f"{args.rotation_size or 'auto (known Hadamard)'}")
+    logger.info(f"  Rotation mode:  {rot_mode_str}")
     logger.info(f"  Online R1:      {args.online_r1}")
-    logger.info(f"  API:            AutoRound(rotation_config=...) pipeline (v2)")
-    logger.info(f"  Output dir:     {args.output_dir if not args.no_save else 'disabled'}")
+    logger.info(f"  Save/Load:      {args.save_load}")
+    logger.info(f"  Compare random: {args.compare_random}")
+    logger.info(f"  Seed:           {args.seed}")
+    logger.info(f"  Output dir:     "
+                f"{args.output_dir if not args.no_save else 'disabled'}")
     logger.info(f"{'═'*70}\n")
 
     # Load tokenizer (shared across all runs)
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=True)
 
     all_results = []
     t_start = time.time()
 
-    # FP16 baseline
+    # FP16 baseline (always "det" mode)
     if not args.no_baseline:
         baseline = run_fp16_baseline(args.model, tokenizer, args)
+        baseline["matrix_mode"] = "det"
         all_results.append(baseline)
 
-    # Run all combinations
+    # Run all combinations: rotation_size × rotation × scheme × matrix_mode
     combo_idx = 0
     none_done = False
     for rs in rotation_sizes:
@@ -733,7 +1226,7 @@ def main():
             logger.info(f"{'─'*70}")
 
         for rot_name in rotation_names:
-            # Skip duplicate "none" runs — rotation_size is irrelevant for no-rotation
+            # Skip duplicate "none" runs across rotation_sizes
             if rot_name == "none" and none_done:
                 continue
             if rot_name == "none":
@@ -741,35 +1234,66 @@ def main():
 
             rot_flags = ROTATION_LEVELS[rot_name]
 
-            # Display name includes rotation_size when sweeping multiple sizes
+            # Display name includes rotation_size when sweeping
             rot_display = rot_name
             if multi_size and rot_name != "none":
                 rot_display = f"{rot_name} (rs={rs_label})"
 
-            for sch_name in scheme_names:
-                combo_idx += 1
-                sch_str, sch_desc, sch_cat = SCHEME_DEFS[sch_name]
+            # Determine which matrix modes to run for this rotation
+            if rot_name == "none":
+                modes_for_rot = ["det"]  # no random for "none"
+            else:
+                modes_for_rot = matrix_modes
 
-                logger.info(f"\n[{combo_idx}/{n_combos}] "
-                            f"{rot_display} × {sch_name} ({sch_desc})")
+            for mm in modes_for_rot:
+                # Build random override based on matrix mode
+                if mm == "random":
+                    random_override = (
+                        rot_flags.get("r1", False),
+                        rot_flags.get("r2", False),
+                        rot_flags.get("r3", False),
+                        rot_flags.get("r4", False),
+                    )
+                else:
+                    random_override = (False, False, False, False)
 
-                result = run_single_combination(
-                    args.model, tokenizer,
-                    rot_display, rot_flags,
-                    sch_name, sch_str,
-                    args,
-                    rotation_size=rs,
-                )
-                all_results.append(result)
+                for sch_name in scheme_names:
+                    combo_idx += 1
+                    sch_str, sch_desc, sch_cat = SCHEME_DEFS[sch_name]
 
-                # Save intermediate results
-                if not args.no_save:
-                    save_results_json(all_results, os.path.join(args.output_dir, "results.json"))
+                    mm_label = f" [{mm}]" if len(matrix_modes) > 1 else ""
+                    logger.info(
+                        f"\n[{combo_idx}/{n_combos}] "
+                        f"{rot_display} × {sch_name} "
+                        f"({sch_desc}){mm_label}"
+                    )
+
+                    result = run_single_combination(
+                        args.model, tokenizer,
+                        rot_display, rot_flags,
+                        sch_name, sch_str,
+                        args,
+                        rotation_size=rs,
+                        random_override=random_override,
+                        matrix_mode=mm,
+                    )
+                    all_results.append(result)
+
+                    # Save intermediate results
+                    if not args.no_save:
+                        save_results_json(
+                            all_results,
+                            os.path.join(args.output_dir, "results.json"),
+                        )
 
     total_time = time.time() - t_start
 
-    # Print summary
-    print_results_matrix(all_results, task_list)
+    # Print summary tables
+    print_results_matrix(
+        all_results, task_list,
+        has_disk=args.save_load,
+        compare_random=args.compare_random,
+    )
 
     print(f"\n{'═'*70}")
     print(f"  Total time: {total_time:.0f}s ({total_time/60:.1f} min)")
@@ -777,22 +1301,44 @@ def main():
     n_success = sum(1 for r in all_results if r.get("status") == "success")
     n_error = sum(1 for r in all_results if r.get("status") == "error")
     print(f"  Success: {n_success}, Errors: {n_error}")
-    print(f"  API: AutoRound(rotation_config=...) pipeline (v2)")
+    if args.save_load:
+        n_match = sum(1 for r in all_results
+                      if r.get("roundtrip_match") is True)
+        n_mismatch = sum(1 for r in all_results
+                         if r.get("roundtrip_match") is False)
+        print(f"  Roundtrip: {n_match} match, {n_mismatch} mismatch")
+    if args.compare_random:
+        n_det = sum(1 for r in all_results
+                    if r.get("matrix_mode") == "det"
+                    and r.get("status") == "success")
+        n_rand = sum(1 for r in all_results
+                     if r.get("matrix_mode") == "random"
+                     and r.get("status") == "success")
+        print(f"  Det runs: {n_det}, Random runs: {n_rand}")
     print(f"{'═'*70}")
 
     # Save final results
     if not args.no_save:
-        save_results_json(all_results, os.path.join(args.output_dir, "results.json"))
-        save_results_csv(all_results, task_list, os.path.join(args.output_dir, "results.csv"))
+        save_results_json(all_results,
+                          os.path.join(args.output_dir, "results.json"))
+        save_results_csv(all_results, task_list,
+                         os.path.join(args.output_dir, "results.csv"),
+                         has_disk=args.save_load)
 
         config_data = {
             "model": args.model, "device": args.device,
             "rotations": rotation_names, "schemes": scheme_names,
             "tasks": task_list, "limit": args.limit,
             "quant_iters": args.quant_iters,
-            "rotation_sizes": [str(s) if s is not None else "auto" for s in rotation_sizes],
-            "random_hadamard": args.random_hadamard, "online_r1": args.online_r1,
-            "api": "pipeline_v2",
+            "rotation_sizes": [str(s) if s is not None else "auto"
+                               for s in rotation_sizes],
+            "matrix_modes": matrix_modes,
+            "compare_random": args.compare_random,
+            "random_r1": args.random_r1, "random_r2": args.random_r2,
+            "random_r3": args.random_r3, "random_r4": args.random_r4,
+            "online_r1": args.online_r1,
+            "save_load": args.save_load,
+            "seed": args.seed,
             "total_time_s": round(total_time, 1),
             "timestamp": datetime.now().isoformat(),
         }

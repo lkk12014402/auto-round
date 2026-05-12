@@ -175,8 +175,8 @@ def evaluate_model_object(
                               limit=limit, device=device)
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
-        # Accuracy (acc_norm preferred, fallback to acc)
-        acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
+        # Accuracy (acc preferred, fallback to acc_norm)
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
         # Perplexity (word_perplexity or byte_perplexity for wikitext)
@@ -200,7 +200,7 @@ def evaluate_model_from_path(
                               limit=limit, device=device)
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
-        acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
         ppl = task_results.get("word_perplexity,none") or task_results.get("byte_perplexity,none")

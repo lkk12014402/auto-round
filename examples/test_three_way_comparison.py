@@ -71,7 +71,7 @@ def evaluate_model(model, tokenizer, tasks, batch_size=8, limit=None, device="cu
                               limit=limit, device=device)
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
-        acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
         if acc is not None:
             metrics[task_name] = acc
     return metrics

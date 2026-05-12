@@ -4,7 +4,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # 3 models × 2 modes (full, tuning) = 6 jobs, each on a separate GPU.
-# All jobs sweep rotation_sizes: 16, 32, 64, 128, auto
+# Both modes include: --compare-random --save-load
+#   → det vs random Hadamard side-by-side + save/load roundtrip
 #
 # GPU assignment:
 #   cuda:0  Qwen3-0.6B   full
@@ -22,14 +23,13 @@
 set -e
 cd "$(dirname "$0")"
 
-ROTATION_SIZES="16,32,64,128,auto"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="logs_${TIMESTAMP}"
 mkdir -p "$LOG_DIR"
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Multi-model Rotation Benchmark"
-echo "  rotation_sizes: $ROTATION_SIZES"
+echo "  Modes include: --compare-random --save-load"
 echo "  Log directory:  $LOG_DIR"
 echo "  Started at:     $(date)"
 echo "═══════════════════════════════════════════════════════════════"
@@ -47,7 +47,6 @@ launch() {
 
     DEVICE="cuda:${gpu}" \
     MODEL="$model" \
-    ROTATION_SIZES="$ROTATION_SIZES" \
     bash run_rotation_scheme_matrix_v2.sh "$mode" \
         > "$log_file" 2>&1 &
 

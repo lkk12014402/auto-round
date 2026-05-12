@@ -87,13 +87,15 @@ case "$MODE" in
         ;;
 
     full)
-        echo "Running full eval (no limit, common schemes, 5 tasks)..."
+        echo "Running full eval (no limit, common schemes, 4 tasks, det vs random, save/load)..."
         python test_rotation_scheme_matrix_v2.py \
             --model "$MODEL" \
             --device "$DEVICE" \
             $RS_FLAG $RSS_FLAG \
             --rotations "none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4" \
-            --schemes "MXFP4,MXFP4,NVFP4" \
+            --schemes "W4A16,MXFP4,NVFP4" \
+            --compare-random \
+            --save-load \
             --tasks "hellaswag,piqa,winogrande,lambada_openai"
         ;;
 
@@ -130,7 +132,8 @@ case "$MODE" in
         ;;
 
     random)
-        echo "Running with random Hadamard..."
+        echo "Note: 'random' mode is deprecated — use 'full' which now includes --compare-random."
+        echo "Running random-only for backward compatibility..."
         python test_rotation_scheme_matrix_v2.py \
             --model "$MODEL" \
             --device "$DEVICE" \
@@ -138,24 +141,27 @@ case "$MODE" in
             --rotations "none,R1,R1+R2,R1+R2+R3+R4" \
             --schemes "W4A16,MXFP4,NVFP4" \
             --random-hadamard \
-            --tasks "hellaswag,piqa,winogrande,lambada_openai,mmlu" \
+            --save-load \
+            --tasks "hellaswag,piqa,winogrande,lambada_openai" \
             ${2:+--limit $2}
         ;;
 
     size-sweep)
-        echo "Running rotation_size sweep (${ROTATION_SIZES:-16,32,64,128,auto})..."
+        echo "Running rotation_size sweep with det vs random (${ROTATION_SIZES:-16,64,128,auto})..."
         python test_rotation_scheme_matrix_v2.py \
             --model "$MODEL" \
             --device "$DEVICE" \
-            --rotation-sizes "${ROTATION_SIZES:-16,32,64,128,auto}" \
+            --rotation-sizes "${ROTATION_SIZES:-16,64,128,auto}" \
             --rotations "none,R1,R1+R2,R1+R2+R3+R4" \
             --schemes "W4A16,MXFP4,NVFP4" \
-            --tasks "hellaswag,piqa" \
+            --compare-random \
+            --save-load \
+            --tasks "hellaswag,piqa,winogrande,lambada_openai" \
             ${2:+--limit $2}
         ;;
 
     tuning)
-        echo "Running with auto-round tuning (iters=200), common schemes..."
+        echo "Running with auto-round tuning (iters=200), det vs random, save/load..."
         python test_rotation_scheme_matrix_v2.py \
             --model "$MODEL" \
             --device "$DEVICE" \
@@ -163,6 +169,8 @@ case "$MODE" in
             --rotations "none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4" \
             --schemes "W4A16,MXFP4,NVFP4" \
             --quant-iters 200 \
+            --compare-random \
+            --save-load \
             --tasks "hellaswag,piqa,winogrande,lambada_openai" \
             ${2:+--limit $2}
         ;;

@@ -143,7 +143,7 @@ def evaluate_model_object(
                               limit=limit, device=device)
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
-        acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
     return metrics
@@ -163,7 +163,7 @@ def evaluate_model_from_path(
                               limit=limit, device=device)
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
-        acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
+        acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
     return metrics
