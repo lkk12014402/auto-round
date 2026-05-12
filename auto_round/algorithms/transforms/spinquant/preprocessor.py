@@ -93,13 +93,17 @@ class SpinQuantConfig(BaseRotationConfig):
     # This follows the same convention as Quark's rotation_size.
     rotation_size: Optional[int] = None
 
-    # Rotation matrix type for R1 and R2 (R3/R4 always use deterministic Hadamard)
+    # Rotation matrix type for R1–R4
     # - False (default): deterministic Hadamard (same matrix every time, no need to persist)
     # - True: random Hadamard = H × D where D = diag(±1) random (must persist matrix)
     # Only relevant when trainable_rotation=False (QuaRot mode).
     # When trainable_rotation=True (SpinQuant mode), R1/R2 init from identity regardless.
+    # For online rotations (R1/R3/R4), random uses explicit x @ R instead of
+    # butterfly algorithm — slightly slower but functionally equivalent.
     random_r1: bool = False
     random_r2: bool = False
+    random_r3: bool = False
+    random_r4: bool = False
 
     # Training control
     # ⚠️ trainable_rotation=True (SpinQuant mode) is experimental — training
@@ -331,14 +335,6 @@ class SpinQuantPreprocessor:
                 )
                 self.config.r1 = False
 
-        # Warn if random_r1 is set but will be ignored in online mode
-        if self.config.r1 and self.config.random_r1 and self.config.online_r1_rotation:
-            logger.warning(
-                "[SpinQuant] random_r1=True is ignored in online R1 mode "
-                "(online R1 always uses deterministic Hadamard via butterfly algorithm). "
-                "Set online_r1_rotation=False to use random Hadamard."
-            )
-
         if self.config.r2 and self.head_dim > 0 and not is_pow2(self.head_dim):
             logger.warning(
                 f"[SpinQuant] R2 requires head_dim to be a power of 2, "
@@ -446,12 +442,11 @@ class SpinQuantPreprocessor:
         # R1: r1_rotation_size x r1_rotation_size
         if self.config.r1:
             r1_size = self.r1_rotation_size
-            if self.config.online_r1_rotation and not self.config.trainable_rotation:
-                # Online non-trainable R1 generates Hadamard on-the-fly via
-                # get_hadamard_K() in _apply_online_r1(); no need to store a
-                # spinquant_R1 buffer (it would be unused).
+            if self.config.online_r1_rotation and not self.config.trainable_rotation and not self.config.random_r1:
+                # Online deterministic R1: Hadamard computed on-the-fly via
+                # butterfly algorithm — no need to store a matrix buffer.
                 logger.info(
-                    f"[SpinQuant] R1: Online mode — Hadamard will be computed "
+                    f"[SpinQuant] R1: Online mode — deterministic Hadamard will be computed "
                     f"on-the-fly via butterfly algorithm (rotation_size={r1_size})"
                 )
             elif self.config.trainable_rotation and not self.config.online_r1_rotation:
@@ -471,13 +466,14 @@ class SpinQuantPreprocessor:
                         requires_grad=False,
                     )
                     matrix_type = "Deterministic Hadamard"
+                mode = "online" if self.config.online_r1_rotation else "offline fuse"
                 if r1_size < self.hidden_size:
                     logger.info(
                         f"[SpinQuant] R1: {matrix_type} [{r1_size}×{r1_size}] block rotation "
-                        f"({self.hidden_size // r1_size} blocks, fixed, offline fuse)"
+                        f"({self.hidden_size // r1_size} blocks, fixed, {mode})"
                     )
                 else:
-                    logger.info(f"[SpinQuant] R1: {matrix_type} [{r1_size}×{r1_size}] (fixed, offline fuse)")
+                    logger.info(f"[SpinQuant] R1: {matrix_type} [{r1_size}×{r1_size}] (fixed, {mode})")
                 self._register_rotation("spinquant_R1", R1)
 
         # R2_head: head_dim x head_dim
@@ -505,30 +501,50 @@ class SpinQuantPreprocessor:
                 )
             self._register_rotation("spinquant_R2_head", R2_head)
 
-        # R3_head: always deterministic Hadamard (online, uses matmul_hadU butterfly)
+        # R3_head: head_dim × head_dim (online, after RoPE on Q/K)
         if self.config.r3 and self.head_dim > 0:
-            R3 = deterministic_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
+            if self.config.random_r3:
+                R3 = random_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
+                matrix_type = "Random Hadamard"
+                mode_str = "online, x @ R"
+            else:
+                R3 = deterministic_hadamard_matrix(self.head_dim, dtype=dtype, device=model_device)
+                matrix_type = "Deterministic Hadamard"
+                mode_str = "online, butterfly"
             self.model.register_buffer("spinquant_R3_head", R3)
             logger.info(
-                f"[SpinQuant] R3: Deterministic Hadamard "
-                f"[{self.head_dim}×{self.head_dim}] after RoPE (online, butterfly)"
+                f"[SpinQuant] R3: {matrix_type} "
+                f"[{self.head_dim}×{self.head_dim}] after RoPE ({mode_str})"
             )
 
-        # R4: always deterministic Hadamard (online, uses matmul_hadU butterfly)
+        # R4: r4_rotation_size (online hook on down_proj + offline fuse)
         if self.config.r4 and self.r4_rotation_size > 0:
             r4_size = self.r4_rotation_size
+            if self.config.random_r4:
+                R4 = random_hadamard_matrix(r4_size, dtype=dtype, device=model_device)
+                self.model.register_buffer("spinquant_R4_matrix", R4)
+                matrix_type = "Random Hadamard"
+                mode_str = "online x @ R + offline fuse"
+            else:
+                matrix_type = "Deterministic Hadamard"
+                mode_str = "online butterfly + offline fuse"
+            # Always store Hadamard decomposition (needed for deterministic path
+            # and for backward compat with serialize.py buffer detection)
             had_K, K = get_hadamard_K(r4_size)
             had_K = had_K.to(dtype=dtype, device=model_device)
             self.model.register_buffer("spinquant_R4_had_K", had_K)
             self.model.register_buffer("spinquant_R4_K", torch.tensor(K, device=model_device))
             if r4_size < self.intermediate_size:
                 logger.info(
-                    f"[SpinQuant] R4: Hadamard K={K}, "
+                    f"[SpinQuant] R4: {matrix_type} K={K}, "
                     f"rotation_size={r4_size}, "
-                    f"{self.intermediate_size // r4_size} rotation blocks on down_proj"
+                    f"{self.intermediate_size // r4_size} rotation blocks on down_proj ({mode_str})"
                 )
             else:
-                logger.info(f"[SpinQuant] R4: Hadamard K={K}, " f"rotation_size={r4_size} (offline fuse + online hook)")
+                logger.info(
+                    f"[SpinQuant] R4: {matrix_type} K={K}, "
+                    f"rotation_size={r4_size} ({mode_str})"
+                )
 
     def _register_rotation(self, name: str, param: nn.Parameter) -> None:
         self.model.register_parameter(name, param)
@@ -631,12 +647,19 @@ class SpinQuantPreprocessor:
         ``forward_pre_hook`` s so the matching activation rotation is applied at
         runtime.
 
+        Supports two modes:
+        - **Deterministic Hadamard** (default): uses butterfly algorithm
+          (``matmul_hadU``) for both weight rotation and activation hooks —
+          no matrix needs to be stored.
+        - **Random Hadamard** (``random_r1=True``): uses the stored
+          ``spinquant_R1`` matrix for explicit ``x @ R`` in both weight
+          rotation and activation hooks.
+
         This matches Quark's ``apply_online_r1()`` behavior:
-        - Target modules (q/k/v_proj, gate/up_proj) get ``W_new = matmul_hadU(W)``
-          on their input channels (last dim of weight matrix)
-        - A ``forward_pre_hook`` on each target module applies the same Hadamard
+        - Target modules (q/k/v_proj, gate/up_proj) get their weights rotated
+        - A ``forward_pre_hook`` on each target module applies the same rotation
           to activations at runtime
-        - The two transforms cancel out: ``H(x) @ (W @ H).T = x @ W.T``
+        - The two transforms cancel out: ``R(x) @ (W @ R).T = x @ W.T``
         - prev_modules (embed_tokens, o_proj, down_proj) are NOT modified
         - RMSNorm gamma is NOT fused
         - lm_head is NOT modified (last_layer skipped, matching Quark)
@@ -653,6 +676,7 @@ class SpinQuantPreprocessor:
             (``SpinQuantConfig(online_r1_rotation=False)``).
         """
         r1_size = self.r1_rotation_size
+        use_random = self.config.random_r1
 
         logger.warning(
             "[SpinQuant] Online R1 uses forward_pre_hooks which are NOT saved by "
@@ -661,10 +685,23 @@ class SpinQuantPreprocessor:
             "need to save/reload the model."
         )
 
-        # Pre-compute the Hadamard matrix for the rotation
-        hadamard_K, K = get_hadamard_K(r1_size)
         model_device = next(self.model.parameters()).device
-        hadamard_K = hadamard_K.to(model_device)
+
+        # For random R1: use the stored full matrix
+        # For deterministic R1: use butterfly algorithm
+        if use_random:
+            R1_full = self._get_rotation_tensor("spinquant_R1")
+            if R1_full is None:
+                raise RuntimeError(
+                    "[SpinQuant] random_r1=True but spinquant_R1 buffer not found. "
+                    "Ensure _init_rotation_matrices() was called first."
+                )
+            R1_full = R1_full.data.to(torch.float64)
+            hadamard_K, K = None, None
+        else:
+            R1_full = None
+            hadamard_K, K = get_hadamard_K(r1_size)
+            hadamard_K = hadamard_K.to(model_device)
 
         n_rotated = 0
         n_hooked = 0
@@ -674,7 +711,6 @@ class SpinQuantPreprocessor:
                 continue
 
             layer_device = next(layer.parameters()).device
-            had_K_local = hadamard_K.to(layer_device)
 
             attn = layer.self_attn
             mlp = layer.mlp
@@ -693,52 +729,74 @@ class SpinQuantPreprocessor:
                 dtype = module.weight.data.dtype
                 in_features = module.weight.shape[-1]
 
-                if r1_size == in_features:
-                    # Full rotation via matmul_hadU (butterfly algorithm)
-                    module.weight.data = matmul_hadU(module.weight.data, hadamard_K=had_K_local, K=K).to(dtype)
-                elif in_features % r1_size == 0:
-                    # Block rotation: get_hadamard_K returns unnormalized matrix,
-                    # so we must normalize by 1/√r1_size to get an orthogonal matrix.
-                    R_block = had_K_local.to(torch.float64)
-                    if R_block.shape[0] != r1_size:
-                        had_1, _ = get_hadamard_K(r1_size // K)
-                        R_block = torch.kron(
-                            had_K_local.to(device="cpu", dtype=torch.float64),
-                            had_1.to(device="cpu", dtype=torch.float64),
+                if use_random:
+                    # Random R1: explicit matrix multiply
+                    R = R1_full.to(layer_device)
+                    if r1_size == in_features:
+                        W = module.weight.data.to(torch.float64)
+                        module.weight.data = (W @ R).to(dtype)
+                    elif in_features % r1_size == 0:
+                        rotate_in_channels_(module, R_in=R)
+                    else:
+                        raise ValueError(
+                            f"Online R1: in_features={in_features} not compatible "
+                            f"with r1_rotation_size={r1_size}"
                         )
-                    R_block = R_block / math.sqrt(r1_size)
-                    rotate_in_channels_(module, R_in=R_block)
                 else:
-                    raise ValueError(
-                        f"Online R1: in_features={in_features} not compatible " f"with r1_rotation_size={r1_size}"
-                    )
+                    # Deterministic Hadamard: butterfly algorithm
+                    had_K_local = hadamard_K.to(layer_device)
+                    if r1_size == in_features:
+                        module.weight.data = matmul_hadU(
+                            module.weight.data, hadamard_K=had_K_local, K=K
+                        ).to(dtype)
+                    elif in_features % r1_size == 0:
+                        R_block = had_K_local.to(torch.float64)
+                        if R_block.shape[0] != r1_size:
+                            had_1, _ = get_hadamard_K(r1_size // K)
+                            R_block = torch.kron(
+                                had_K_local.to(device="cpu", dtype=torch.float64),
+                                had_1.to(device="cpu", dtype=torch.float64),
+                            )
+                        R_block = R_block / math.sqrt(r1_size)
+                        rotate_in_channels_(module, R_in=R_block)
+                    else:
+                        raise ValueError(
+                            f"Online R1: in_features={in_features} not compatible "
+                            f"with r1_rotation_size={r1_size}"
+                        )
                 n_rotated += 1
 
                 # Register forward_pre_hook for online activation rotation
-                hook = self._make_online_r1_hook(r1_size, in_features, had_K_local, K)
+                if use_random:
+                    hook = self._make_online_r1_hook_matrix(
+                        R1_full.to(layer_device), r1_size, in_features
+                    )
+                else:
+                    hook = self._make_online_r1_hook_butterfly(
+                        r1_size, in_features, hadamard_K.to(layer_device), K
+                    )
                 hook._spinquant_hook = True  # tag for selective removal
                 handle = module.register_forward_pre_hook(hook)
                 self._r1_hook_handles.append(handle)
                 n_hooked += 1
 
+        mode_str = "random matrix (x @ R)" if use_random else "deterministic butterfly"
         logger.info(
             f"[SpinQuant] Online R1: rotated {n_rotated} target modules, "
             f"registered {n_hooked} activation hooks "
-            f"(rotation_size={r1_size}, lm_head/embed_tokens/o_proj/down_proj unchanged)"
+            f"(rotation_size={r1_size}, mode={mode_str}, "
+            f"lm_head/embed_tokens/o_proj/down_proj unchanged)"
         )
 
     @staticmethod
-    def _make_online_r1_hook(r1_size, in_features, hadamard_K, K):
-        """Create a forward_pre_hook that applies Hadamard rotation to input."""
+    def _make_online_r1_hook_butterfly(r1_size, in_features, hadamard_K, K):
+        """Create a forward_pre_hook using butterfly algorithm (deterministic Hadamard)."""
         if r1_size == in_features:
-            # Full rotation via butterfly
             def hook(module, args):
                 x = args[0]
                 x = matmul_hadU(x, hadamard_K=hadamard_K.to(x.device), K=K)
                 return (x,) + args[1:]
-
         else:
-            # Block rotation — normalize by 1/√r1_size for orthogonal matrix
             R_block = hadamard_K.to(torch.float64)
             if R_block.shape[0] != r1_size:
                 had_1, _ = get_hadamard_K(r1_size // K)
@@ -757,7 +815,28 @@ class SpinQuantPreprocessor:
                 x = x.reshape(*shape[:-1], -1, r1_size)
                 x = (x @ R).reshape(shape).to(dtype)
                 return (x,) + args[1:]
+        return hook
 
+    @staticmethod
+    def _make_online_r1_hook_matrix(R1_matrix, r1_size, in_features):
+        """Create a forward_pre_hook using stored full matrix (random/trained R1)."""
+        R1_f32 = R1_matrix.float()
+
+        if r1_size == in_features:
+            def hook(module, args):
+                x = args[0]
+                R = R1_f32.to(x.device, dtype=x.dtype)
+                x = x @ R
+                return (x,) + args[1:]
+        else:
+            def hook(module, args):
+                x = args[0]
+                dtype = x.dtype
+                shape = x.shape
+                R = R1_f32.to(x.device, dtype=x.dtype)
+                x = x.reshape(*shape[:-1], -1, r1_size)
+                x = (x @ R).reshape(shape).to(dtype)
+                return (x,) + args[1:]
         return hook
 
     # ------------------------------------------------------------------
@@ -895,17 +974,30 @@ class SpinQuantPreprocessor:
         logger.info(f"[SpinQuant] R2 fused into {n_fused} layers (v_proj out + o_proj in, head_dim={self.head_dim})")
 
     def _fuse_r4_rotation(self) -> None:
-        """Fuse R4 Hadamard into down_proj's input side.
+        """Fuse R4 rotation into down_proj's input side.
 
-        Uses :func:`matmul_hadU` (via :func:`get_hadamard_K`) to apply the
-        same decomposition that the online hook uses.  For non-power-of-2
-        intermediate sizes (e.g. 3072 = 12 × 256), the decomposition is
-        ``kron(H_12, butterfly_256)`` — matching Quark's approach.
+        For deterministic Hadamard: uses :func:`matmul_hadU` (butterfly algorithm).
+        For random Hadamard: uses the stored ``spinquant_R4_matrix`` buffer with
+        explicit ``W @ R`` matrix multiply.
+
+        The R4 hook applies ``x → x @ R`` on activations before down_proj.
+        To cancel this in the weight: ``(x @ R) @ W^T = x @ (W @ R)^T``,
+        so we fuse ``W_new = W @ R`` on the input dimension.
         """
         if not self.config.r4 or self.r4_rotation_size <= 0:
             return
 
         r4_size = self.r4_rotation_size
+        use_random = self.config.random_r4
+
+        # Get the rotation matrix
+        if use_random:
+            R4_matrix = getattr(self.model, "spinquant_R4_matrix", None)
+            if R4_matrix is None:
+                raise RuntimeError(
+                    "[SpinQuant] random_r4=True but spinquant_R4_matrix buffer not found."
+                )
+            R4 = R4_matrix.to(torch.float64)
 
         n_fused = 0
         for layer in self._get_layers():
@@ -915,24 +1007,37 @@ class SpinQuantPreprocessor:
             if hasattr(mlp, "down_proj"):
                 W = mlp.down_proj.weight.data
                 dtype = W.dtype
-                # matmul_hadU operates on the last dimension — for weight
-                # shape [out, in], last dim = in_features which is what
-                # we want to rotate (input channels of down_proj).
-                if r4_size == W.shape[1]:
-                    # Full-dimension rotation
-                    mlp.down_proj.weight.data = matmul_hadU(W).to(dtype)
+
+                if use_random:
+                    # Random: explicit W @ R per block
+                    W = W.to(torch.float64)
+                    if r4_size == W.shape[1]:
+                        mlp.down_proj.weight.data = (W @ R4).to(dtype)
+                    else:
+                        out_feat, in_feat = W.shape
+                        n_blocks = in_feat // r4_size
+                        W_reshaped = W.reshape(out_feat, n_blocks, r4_size)
+                        W_reshaped = torch.einsum("ijk,kl->ijl", W_reshaped, R4)
+                        mlp.down_proj.weight.data = W_reshaped.reshape(out_feat, in_feat).to(dtype)
                 else:
-                    # Block rotation: reshape to [..., n_blocks, r4_size]
-                    out_feat, in_feat = W.shape
-                    n_blocks = in_feat // r4_size
-                    W_reshaped = W.reshape(out_feat, n_blocks, r4_size)
-                    W_rotated = matmul_hadU(W_reshaped)
-                    mlp.down_proj.weight.data = W_rotated.reshape(out_feat, in_feat).to(dtype)
+                    # Deterministic: matmul_hadU (butterfly algorithm)
+                    # matmul_hadU operates on the last dimension — for weight
+                    # shape [out, in], last dim = in_features which is what
+                    # we want to rotate (input channels of down_proj).
+                    if r4_size == W.shape[1]:
+                        mlp.down_proj.weight.data = matmul_hadU(W).to(dtype)
+                    else:
+                        out_feat, in_feat = W.shape
+                        n_blocks = in_feat // r4_size
+                        W_reshaped = W.reshape(out_feat, n_blocks, r4_size)
+                        W_rotated = matmul_hadU(W_reshaped)
+                        mlp.down_proj.weight.data = W_rotated.reshape(out_feat, in_feat).to(dtype)
                 n_fused += 1
 
+        mode_str = "random x @ R" if use_random else "deterministic butterfly"
         logger.info(
             f"[SpinQuant] R4 offline fused into {n_fused} down_proj layers "
-            f"(r4_rotation_size={r4_size}, intermediate_size={self.intermediate_size})"
+            f"(r4_rotation_size={r4_size}, mode={mode_str})"
         )
 
     # ------------------------------------------------------------------
@@ -941,11 +1046,10 @@ class SpinQuantPreprocessor:
     def _cleanup(self) -> None:
         self.model.eval()
 
-        # Remove fused offline rotation *Parameters* (not buffers)
-        for name in list(self.model._parameters.keys()):
-            if name.startswith("spinquant_R") and name in self.model._parameters:
-                if name not in self.model._buffers:
-                    delattr(self.model, name)
+        # Keep rotation matrices on the model — they are needed by
+        # inject_buffers_on_layer during serialization (random / trained
+        # matrices must be read back via _get_stored_rotation).
+        # Only the internal tracking lists are cleared below.
 
         # NOTE: Do NOT remove online hooks/monkeypatches here. R3/R4 hooks
         # must persist for correct inference. Only remove training-related state.

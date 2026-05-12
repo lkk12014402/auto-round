@@ -99,11 +99,8 @@ def inject_spinquant_buffers(
                 continue
             if name in r1_targets:
                 _inject_rotation_buffers(
-                    module,
-                    _R1_PREFIX,
-                    r1_size,
-                    config.random_r1,
-                    is_trained=False,
+                    module, _R1_PREFIX, r1_size,
+                    config.random_r1, is_trained=False,
                     rotation_matrix=_get_stored_rotation(model, "spinquant_R1"),
                 )
                 n_injected += 1
@@ -116,16 +113,16 @@ def inject_spinquant_buffers(
                 continue
             if name in r4_targets:
                 _inject_rotation_buffers(
-                    module,
-                    _R4_PREFIX,
-                    r4_size,
-                    random=False,
-                    is_trained=False,
-                    rotation_matrix=None,
+                    module, _R4_PREFIX, r4_size,
+                    random=config.random_r4, is_trained=False,
+                    rotation_matrix=_get_stored_rotation(model, "spinquant_R4_matrix") if config.random_r4 else None,
                 )
                 n_injected += 1
 
-    logger.info(f"[SpinQuant Serialize] Injected rotation buffers into " f"{n_injected} QuantLinear modules")
+    logger.info(
+        f"[SpinQuant Serialize] Injected rotation buffers into "
+        f"{n_injected} QuantLinear modules"
+    )
     return n_injected
 
 
@@ -146,7 +143,10 @@ def save_spinquant_config(
     """
     config_path = os.path.join(save_dir, "config.json")
     if not os.path.exists(config_path):
-        logger.warning(f"[SpinQuant Serialize] config.json not found at {save_dir}, " f"cannot save spinquant_config")
+        logger.warning(
+            f"[SpinQuant Serialize] config.json not found at {save_dir}, "
+            f"cannot save spinquant_config"
+        )
         return
 
     with open(config_path, "r") as f:
@@ -168,7 +168,9 @@ def save_spinquant_config(
     with open(config_path, "w") as f:
         json.dump(model_config, f, indent=2)
 
-    logger.info(f"[SpinQuant Serialize] Saved spinquant_config to {config_path}")
+    logger.info(
+        f"[SpinQuant Serialize] Saved spinquant_config to {config_path}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -204,8 +206,12 @@ def preregister_spinquant_buffers(
     trained = spinquant_config.get("trainable_rotation", False)
     rotation_size_cfg = spinquant_config.get("rotation_size")
 
-    hidden_size = spinquant_config.get("hidden_size", _get_hidden_size(model))
-    intermediate_size = spinquant_config.get("intermediate_size", _get_intermediate_size(model))
+    hidden_size = spinquant_config.get(
+        "hidden_size", _get_hidden_size(model)
+    )
+    intermediate_size = spinquant_config.get(
+        "intermediate_size", _get_intermediate_size(model)
+    )
 
     r1_size = rotation_size_cfg or hidden_size
     r4_size = rotation_size_cfg or intermediate_size
@@ -231,16 +237,18 @@ def preregister_spinquant_buffers(
             continue
 
         if name in r1_targets:
-            _preregister_buffers_on_module(module, _R1_PREFIX, r1_size, needs_matrix, matrix_dtype)
+            _preregister_buffers_on_module(
+                module, _R1_PREFIX, r1_size, needs_matrix, matrix_dtype
+            )
             n_registered += 1
 
         if name in r4_targets:
+            random_r4 = spinquant_config.get("random_r4", False)
+            r4_needs_matrix = random_r4 or trained
             _preregister_buffers_on_module(
-                module,
-                _R4_PREFIX,
-                r4_size,
-                needs_matrix=False,  # R4 is always deterministic Hadamard
-                matrix_dtype=torch.int8,
+                module, _R4_PREFIX, r4_size,
+                needs_matrix=r4_needs_matrix,
+                matrix_dtype=torch.float32 if trained else torch.int8,
             )
             n_registered += 1
 
@@ -281,10 +289,8 @@ def _preregister_buffers_on_module(
         module.register_buffer(
             f"{prefix}_matrix",
             torch.zeros(
-                rotation_size,
-                rotation_size,
-                dtype=matrix_dtype,
-                device=device,
+                rotation_size, rotation_size,
+                dtype=matrix_dtype, device=device,
             ),
         )
 
@@ -314,7 +320,10 @@ def rebuild_spinquant_online(
     if config is None:
         config = _load_config_from_model(model)
         if config is None:
-            logger.warning("[SpinQuant] No spinquant_config found on model. " "Cannot rebuild online rotations.")
+            logger.warning(
+                "[SpinQuant] No spinquant_config found on model. "
+                "Cannot rebuild online rotations."
+            )
             return model
 
     # Patch QuantLinear forward for R1/R4 buffer-based rotation
@@ -327,7 +336,6 @@ def rebuild_spinquant_online(
             from auto_round.algorithms.transforms.spinquant.inplace.apply import (
                 register_spinquant_hooks,
             )
-
             # Only register R3 hooks (R1/R4 handled by buffer)
             register_spinquant_hooks(
                 model,
@@ -336,7 +344,9 @@ def rebuild_spinquant_online(
                 head_dim=head_dim,
                 r4_rotation_size=0,
             )
-            logger.info(f"[SpinQuant] Rebuilt R3 monkeypatch (head_dim={head_dim})")
+            logger.info(
+                f"[SpinQuant] Rebuilt R3 monkeypatch (head_dim={head_dim})"
+            )
 
     # Build descriptive summary of which rotations are active
     active = []
@@ -352,7 +362,9 @@ def rebuild_spinquant_online(
     active_str = ", ".join(active) if active else "none"
 
     logger.info(
-        f"[SpinQuant] Rebuilt online rotations: " f"{n_patched} QuantLinear patched, " f"active rotations: {active_str}"
+        f"[SpinQuant] Rebuilt online rotations: "
+        f"{n_patched} QuantLinear patched, "
+        f"active rotations: {active_str}"
     )
     return model
 
@@ -550,7 +562,11 @@ def _inject_rotation_buffers(
     # Store matrix for random/trained types
     if rot_type == ROTATION_TYPE_RANDOM:
         if rotation_matrix is None:
-            # Reconstruct: deterministic Hadamard (fallback, shouldn't happen)
+            logger.warning(
+                f"Random rotation ({prefix}) requires rotation_matrix but got None. "
+                "This usually means the matrix was deleted during cleanup. "
+                "Falling back to deterministic Hadamard — the saved model may be INCORRECT."
+            )
             had_K, K = get_hadamard_K(rotation_size)
             if had_K.shape[0] != rotation_size:
                 had_1, _ = get_hadamard_K(rotation_size // K)
@@ -565,7 +581,9 @@ def _inject_rotation_buffers(
 
     elif rot_type == ROTATION_TYPE_TRAINED:
         if rotation_matrix is None:
-            raise ValueError("Trained rotation requires rotation_matrix to be provided")
+            raise ValueError(
+                "Trained rotation requires rotation_matrix to be provided"
+            )
         # Store as float32 (arbitrary values)
         module.register_buffer(
             f"{prefix}_matrix",
@@ -599,7 +617,10 @@ def _is_quantlinear(module: nn.Module) -> bool:
 
 def _has_spinquant_buffers(module: nn.Module) -> bool:
     """Check if a module has any spinquant rotation buffers."""
-    return hasattr(module, f"{_R1_PREFIX}_type") or hasattr(module, f"{_R4_PREFIX}_type")
+    return (
+        hasattr(module, f"{_R1_PREFIX}_type")
+        or hasattr(module, f"{_R4_PREFIX}_type")
+    )
 
 
 def _get_online_r1_target_names(model: nn.Module) -> set:
@@ -633,7 +654,9 @@ def _get_r4_target_names(model: nn.Module) -> set:
     return targets
 
 
-def _get_stored_rotation(model: nn.Module, param_name: str) -> Optional[torch.Tensor]:
+def _get_stored_rotation(
+    model: nn.Module, param_name: str
+) -> Optional[torch.Tensor]:
     """Get a stored rotation matrix/parameter from the model.
 
     During preprocessing, rotation matrices are stored as model-level
@@ -671,7 +694,9 @@ def _get_intermediate_size(model: nn.Module) -> int:
     return 0
 
 
-def _config_to_serializable(config: "SpinQuantConfig", model: nn.Module) -> dict:
+def _config_to_serializable(
+    config: "SpinQuantConfig", model: nn.Module
+) -> dict:
     """Convert SpinQuantConfig to a JSON-serializable dict with model info."""
     from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig
 
@@ -685,6 +710,8 @@ def _config_to_serializable(config: "SpinQuantConfig", model: nn.Module) -> dict
         "rotation_size": config.rotation_size,
         "random_r1": config.random_r1,
         "random_r2": config.random_r2,
+        "random_r3": config.random_r3,
+        "random_r4": config.random_r4,
         "trainable_rotation": config.trainable_rotation,
         # Model architecture info for reconstruction
         "head_dim": _get_head_dim(model),
@@ -733,6 +760,8 @@ def _load_config_from_model(
             rotation_size=spinquant_dict.get("rotation_size"),
             random_r1=spinquant_dict.get("random_r1", False),
             random_r2=spinquant_dict.get("random_r2", False),
+            random_r3=spinquant_dict.get("random_r3", False),
+            random_r4=spinquant_dict.get("random_r4", False),
             trainable_rotation=spinquant_dict.get("trainable_rotation", False),
         )
     except Exception as e:
