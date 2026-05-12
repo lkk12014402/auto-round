@@ -107,9 +107,24 @@ SCHEME_DEFS = OrderedDict([
     ("MXFP4",     ("MXFP4_RCEIL", "MXFP4 W4A4, block=32")),
     ("NVFP4",     ("NVFP4",       "NVFP4 W4A4, gs=16")),
     ("FP8_STATIC", ("FP8_STATIC", "FP8 static, per-tensor")),
+    ("FP16",      ("FP16",        "No quantization (FP16 baseline)")),
 ])
 
 DEFAULT_TASKS = "hellaswag,piqa"
+
+
+def set_seed(seed: int) -> None:
+    """Set random seeds for reproducibility."""
+    import random
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except ImportError:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -160,9 +175,14 @@ def evaluate_model_object(
                               limit=limit, device=device)
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
+        # Accuracy (acc_norm preferred, fallback to acc)
         acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
+        # Perplexity (word_perplexity or byte_perplexity for wikitext)
+        ppl = task_results.get("word_perplexity,none") or task_results.get("byte_perplexity,none")
+        if ppl is not None:
+            metrics[f"{task_name}_ppl"] = round(ppl, 4)
     return metrics
 
 
@@ -183,6 +203,9 @@ def evaluate_model_from_path(
         acc = task_results.get("acc_norm,none") or task_results.get("acc,none")
         if acc is not None:
             metrics[task_name] = round(acc, 4)
+        ppl = task_results.get("word_perplexity,none") or task_results.get("byte_perplexity,none")
+        if ppl is not None:
+            metrics[f"{task_name}_ppl"] = round(ppl, 4)
     return metrics
 
 
@@ -323,6 +346,13 @@ def run_roundtrip(
     t0 = time.time()
     model = None
 
+    # Set seed for reproducibility
+    if hasattr(args, 'seed') and args.seed is not None:
+        set_seed(args.seed)
+        result["seed"] = args.seed
+
+    is_fp16_baseline = (scheme_name == "FP16")
+
     try:
         # ── Step 1: Load fresh model ──
         logger.info(f"  [1/5] Loading model: {model_name}")
@@ -331,7 +361,46 @@ def run_roundtrip(
         )
         model.eval()
 
-        # ── Step 2: Quantize and save ──
+        # ── Step 2: Quantize and save (or FP16 baseline) ──
+        if is_fp16_baseline:
+            # FP16 baseline: apply rotation only, no quantization
+            if rotation_config is not None:
+                logger.info(f"  [2/5] FP16 baseline with rotation — applying rotation only (no quant)")
+                from auto_round.algorithms.transforms import apply_rotation
+                model = apply_rotation(model, rotation_config)
+            else:
+                logger.info(f"  [2/5] FP16 baseline — no rotation, no quant")
+            model.eval()
+            model.to(args.device)
+
+            # Evaluate directly (no save/load for FP16)
+            logger.info(f"  [3/5] N/A (FP16 baseline — no save)")
+            logger.info(f"  [4/5] Evaluating FP16 model directly...")
+            t_eval = time.time()
+            metrics_disk = evaluate_model_object(
+                model, tokenizer, args.tasks,
+                batch_size=args.batch_size, limit=args.limit, device=args.device,
+            )
+            eval_time = time.time() - t_eval
+            result["metrics_from_disk"] = metrics_disk
+            result["metrics_in_memory"] = metrics_disk  # same for FP16
+            result["roundtrip_match"] = True  # trivially true
+            logger.info(f"    FP16 eval done in {eval_time:.1f}s")
+            for task, acc in sorted(metrics_disk.items()):
+                logger.info(f"      {task}: {acc:.4f}")
+
+            result["status"] = "success"
+            result["total_time_s"] = round(time.time() - t0, 1)
+            result["save_dir"] = None
+            result["save_checks"] = {"config_has_spinquant": False, "n_spinquant_keys": 0}
+
+            del model
+            model = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return result
+
         if rotation_config is not None:
             logger.info(f"  [2/5] AutoRound(rotation_config=SpinQuantConfig("
                         f"r1={rotation_config.r1}, r2={rotation_config.r2}, "
@@ -608,6 +677,9 @@ Examples:
                         help="Skip in-memory comparison (only test save+load from disk)")
     parser.add_argument("--cleanup", action="store_true", default=False,
                         help="Remove saved model directories after verification")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducible random rotations. "
+                             "Sets torch/numpy/python random seeds before each combo.")
     return parser.parse_args()
 
 
@@ -691,6 +763,7 @@ def main():
     logger.info(f"  Tasks:           {task_list}")
     logger.info(f"  Eval limit:      {args.limit or 'full'}")
     logger.info(f"  In-memory:       {'skip' if args.skip_inmemory else 'enabled'}")
+    logger.info(f"  Seed:            {args.seed if args.seed is not None else 'none (non-reproducible)'}")
     logger.info(f"  Output dir:      {args.output_dir}")
     logger.info(f"{'═'*70}\n")
 

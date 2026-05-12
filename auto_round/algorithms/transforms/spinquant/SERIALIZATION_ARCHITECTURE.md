@@ -885,3 +885,88 @@ R3 monkeypatch 未重建，导致精度下降。
 **根因**：`algorithm.py` 的 `inject_buffers_on_layer()` 中 R4 的注入硬编码为 `random=False, rotation_matrix=None`，忽略了 `config.random_r4`。
 
 **修复**：改为 `random=config.random_r4`，并在 `random_r4=True` 时从 `model.spinquant_R4_matrix` 读取矩阵传入。
+
+---
+
+## 16. 代码审查发现（2026-05-12）
+
+对核心实现文件（preprocessor.py、serialize.py、algorithm.py、apply.py、convert_model.py）及测试脚本进行全面审查后，按严重程度分类如下。
+
+### 16.1 真正的 Bug（当前可能影响行为）
+
+#### B1: `"down_proj" in name` 匹配太宽泛
+
+- **文件**：`inplace/apply.py` L171, L214
+- **问题**：R4 hook 注册时使用 `"down_proj" in name`，会匹配任何包含该子串的模块名（如 `down_proj_backup`、`down_proj_layer` 等），可能将 hook 错误地注册到非目标模块。
+- **修复建议**：改为 `name.endswith("down_proj")`。
+- **风险**：标准 Transformer 模型命名不会触发，但非标准模型存在隐患。
+
+#### B2: 回退 Hadamard 时 `rot_type` 保持 RANDOM
+
+- **文件**：`serialize.py` L572-589
+- **问题**：当 `random=True` 但 `rotation_matrix=None` 时，代码回退到确定性 Hadamard 矩阵但保留 `rot_type=ROTATION_TYPE_RANDOM`。加载时 `_apply_rotation_from_buffer` 会执行 `R.float() / math.sqrt(rot_size)` 归一化——这对 Hadamard 矩阵是**错误的**。
+- **现状**：已有 `logger.warning` 提示模型可能不正确。
+- **修复建议**：回退后应将 `rot_type` 改为 `ROTATION_TYPE_HADAMARD`，不存矩阵。
+
+#### B3: `run_full_matrix.sh` 结果汇总路径不匹配
+
+- **文件**：`examples/run_full_matrix.sh` L222
+- **问题**：汇总脚本用 `glob(os.path.join(outdir, '*/results.json'))` 查找结果，但 `test_save_load_roundtrip.py` 将 `results.json` 直接保存在 `output_dir/` 下，不在子目录中。
+- **修复建议**：同时搜索 `outdir/results.json` 和 `outdir/*/results.json`。
+
+### 16.2 潜在 Bug（trainable_rotation 功能实现后会触发）
+
+#### B4: `is_trained=False` 硬编码
+
+- **文件**：`serialize.py` L103/L117，`algorithm.py` L145/L155
+- **问题**：`inject_spinquant_buffers` 和 `inject_buffers_on_layer` 调用 `_inject_rotation_buffers` 时硬编码 `is_trained=False`。当 `trainable_rotation=True` 时，训练好的 float32 矩阵会被存为 `ROTATION_TYPE_RANDOM`（int8 ±1），精度完全丢失。
+- **修复建议**：改为 `is_trained=config.trainable_rotation`（或更精细的 per-rotation 判断）。
+
+#### B5: R4 trained 矩阵未取回
+
+- **文件**：`serialize.py` L118
+- **问题**：`rotation_matrix=_get_stored_rotation(...) if config.random_r4 else None`，当 `trainable_rotation=True` 但 `random_r4=False` 时，trained R4 矩阵不会被取回。
+- **修复建议**：条件改为 `if (config.random_r4 or config.trainable_rotation) else None`。
+
+### 16.3 代码质量 / 健壮性
+
+#### Q1: R3 确定性模式不需要存矩阵但仍注册 buffer
+
+- **文件**：`preprocessor.py` L514
+- **问题**：R3 确定性模式下 `register_buffer("spinquant_R3_head", R3)` 存了完整矩阵。由于 R3 数学上自动抵消（`QR(KR)^T = QK^T`），且确定性 Hadamard 可从 `head_dim` 重建，此 buffer 浪费内存。
+- **对比**：R4 确定性模式不存矩阵（仅存分解 `had_K`/`K`），R3 与 R4 不一致。
+
+#### Q2: `--random-rotations` 参数无验证
+
+- **文件**：`examples/test_save_load_roundtrip.py` L652
+- **问题**：`--random-rotations "R1,R99"` 中 `R99` 会被静默接受，不报错。
+- **修复建议**：添加 `valid_rotations = {"r1", "r2", "r3", "r4"}` 校验。
+
+#### Q3: `rebuild_rotation_if_needed()` 无 try/except
+
+- **文件**：`convert_model.py` L759
+- **问题**：`preregister_rotation_buffers`（L866）有 try/except 保护，但 `rebuild_rotation_if_needed`（L759）没有。rebuild 失败会直接 crash 推理流程。
+- **修复建议**：添加 try/except + warning，与 preregister 保持一致。
+
+#### Q4: `rotation_config` 与 `spinquant_config` 无互斥检查
+
+- **文件**：`convert_model.py` L843-868
+- **问题**：旧系统（`rotation_config` → Hadamard hooks）和新系统（`spinquant_config` → SpinQuant buffers）可同时激活，导致前向传播中**双重旋转**，产生错误结果。
+- **修复建议**：添加互斥检查，当两者同时存在时发出警告或只启用其一。
+
+### 16.4 经验证的误报
+
+| 发现 | 为何不是 Bug |
+|------|-------------|
+| algorithm.py R1 矩阵无条件取回 | `_inject_rotation_buffers` 在 `HADAMARD` 类型时忽略 `rotation_matrix` 参数，传 None 安全。R4 条件判断只是优化。 |
+| apply.py Config fallback attrs（L72-75） | `head_dim`/`intermediate_size` 在 config 上不存在，但正常流程通过显式参数传入，不走 fallback，是死代码防御。 |
+| preprocessor.py R1 注册逻辑不对称 | 三个分支（online deterministic 跳过、trainable 注册、fixed 注册）逻辑正确，只是代码组织不够整齐。 |
+
+### 16.5 修复优先级建议
+
+| 优先级 | 项目 | 原因 |
+|--------|------|------|
+| **P0** | B1 + B2 | 简单修改且影响正确性 |
+| **P1** | B3 | 测试基础设施修复 |
+| **P2** | B4 + B5 | 为 trainable_rotation 做预备 |
+| **P3** | Q1 ~ Q4 | 代码质量提升，有空再做 |
