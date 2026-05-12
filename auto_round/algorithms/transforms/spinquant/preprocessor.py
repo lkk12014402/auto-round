@@ -851,7 +851,7 @@ class SpinQuantPreprocessor:
 
         Math:
             v_rotated = v @ R2  per head  →  fuse into v_proj: W_new = R2^T @ W
-            o_proj input is R2-rotated    →  fuse into o_proj: W_new = W @ R2^T
+            o_proj input is R2-rotated    →  fuse into o_proj: W_new = W @ R2
         """
         if not self.config.r2 or self.head_dim <= 0:
             return
@@ -879,14 +879,15 @@ class SpinQuantPreprocessor:
                 W_reshaped = torch.einsum("ij,kjl->kil", R2_T, W_reshaped)
                 attn.v_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
 
-            # o_proj: W_new = W @ R2^T per head on input dimension
+            # o_proj: W_new = W @ R2 per head on input dimension
+            # (R2^{-1} = R2^T on the activation side ↔ W @ R2 on the weight side)
             if hasattr(attn, "o_proj"):
                 W = attn.o_proj.weight.data
                 dtype = W.dtype
                 W = W.to(torch.float64)
                 n_heads = W.shape[1] // self.head_dim
                 W_reshaped = W.reshape(W.shape[0], n_heads, self.head_dim)
-                W_reshaped = torch.einsum("ijk,lk->ijl", W_reshaped, R2)
+                W_reshaped = torch.einsum("ijk,kl->ijl", W_reshaped, R2)
                 attn.o_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
 
             n_fused += 1
