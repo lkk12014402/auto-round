@@ -22,7 +22,7 @@ Feature Status
    - ``RotationTrainer.fuse()`` does not handle online R1 mode fully
    - No pre-trained rotation matrices are shipped
 
-⚠️  **Model save/load after rotation** — Implemented via Plan A+C.
+⚠️  **Model save/load after rotation**
    Rotated + quantized models are saved with rotation buffers injected into
    QuantLinear modules. Use :func:`inject_spinquant_buffers` before save and
    :func:`rebuild_spinquant_online` after load. See ``serialize.py`` for details.
