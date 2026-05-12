@@ -1,3 +1,6 @@
+# # Copyright (C) 2026 Intel Corporation
+# # SPDX-License-Identifier: Apache-2.0
+
 """
 SpinQuant in-place application utilities.
 
@@ -138,7 +141,7 @@ def register_spinquant_hooks(
         r4_size = r4_rotation_size if r4_rotation_size > 0 else intermediate_size
 
         # Determine if we need block rotation (r4_size < intermediate_size)
-        need_block_rotation = (r4_size < intermediate_size)
+        need_block_rotation = r4_size < intermediate_size
 
         if random_r4:
             # Random R4: use stored full matrix
@@ -164,6 +167,7 @@ def register_spinquant_hooks(
                     else:
                         x = x @ R_local
                     return (x,) + args[1:]
+
                 return hook
 
             r4_count = 0
@@ -185,6 +189,7 @@ def register_spinquant_hooks(
                 from auto_round.algorithms.transforms.spinquant.rotation_utils import (
                     get_hadamard_K,
                 )
+
                 had_K_mat, had_K_val = get_hadamard_K(r4_size)
             except ValueError:
                 logger.warning(
@@ -207,6 +212,7 @@ def register_spinquant_hooks(
                         else:
                             x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
                         return (x,) + args[1:]
+
                     return hook
 
                 r4_count = 0
@@ -282,4 +288,3 @@ def apply_spinquant_in_place(
 
     preprocessor = SpinQuantPreprocessor(model, config)
     return preprocessor.preprocess(dataloader)
-
