@@ -123,43 +123,42 @@ class SpinQuantRotation(BaseRotation, RotationSerializer):
 
         try:
             from auto_round.algorithms.transforms.spinquant.serialize import (
-                _R1_PREFIX,
-                _R4_PREFIX,
+                _inject_rotation_buffers,
+                _get_stored_rotation,
                 _get_hidden_size,
                 _get_intermediate_size,
-                _get_stored_rotation,
-                _inject_rotation_buffers,
+                _R1_PREFIX,
+                _R4_PREFIX,
             )
 
             short_name = layer_name.split(".")[-1]
-            r1_proj_names = ("q_proj", "k_proj", "v_proj", "gate_proj", "up_proj")
+            r1_proj_names = ("q_proj", "k_proj", "v_proj",
+                             "gate_proj", "up_proj")
             r4_proj_names = ("down_proj",)
 
-            if config.r1 and config.online_r1_rotation and short_name in r1_proj_names:
+            if (config.r1 and config.online_r1_rotation
+                    and short_name in r1_proj_names):
                 hidden_size = _get_hidden_size(model)
                 r1_size = config.rotation_size or hidden_size
                 _inject_rotation_buffers(
-                    qlayer,
-                    _R1_PREFIX,
-                    r1_size,
-                    random=config.random_r1,
-                    is_trained=False,
-                    rotation_matrix=_get_stored_rotation(model, "spinquant_R1"),
+                    qlayer, _R1_PREFIX, r1_size,
+                    random=config.random_r1, is_trained=False,
+                    rotation_matrix=_get_stored_rotation(
+                        model, "spinquant_R1"),
                 )
 
             if config.r4 and short_name in r4_proj_names:
                 intermediate_size = _get_intermediate_size(model)
                 r4_size = config.rotation_size or intermediate_size
                 _inject_rotation_buffers(
-                    qlayer,
-                    _R4_PREFIX,
-                    r4_size,
-                    random=False,
-                    is_trained=False,
+                    qlayer, _R4_PREFIX, r4_size,
+                    random=False, is_trained=False,
                     rotation_matrix=None,
                 )
         except Exception as e:
-            logger.warning(f"Failed to inject SpinQuant buffers on {layer_name}: {e}")
+            logger.warning(
+                f"Failed to inject SpinQuant buffers on {layer_name}: {e}"
+            )
 
     def inject_buffers_bulk(
         self,
@@ -173,8 +172,8 @@ class SpinQuantRotation(BaseRotation, RotationSerializer):
 
         try:
             from auto_round.algorithms.transforms.spinquant.serialize import (
-                _config_to_serializable,
                 inject_spinquant_buffers,
+                _config_to_serializable,
             )
 
             n = inject_spinquant_buffers(model, config)
@@ -197,7 +196,6 @@ class SpinQuantRotation(BaseRotation, RotationSerializer):
             from auto_round.algorithms.transforms.spinquant.serialize import (
                 save_spinquant_config,
             )
-
             save_spinquant_config(model, save_dir, config)
         except Exception as e:
             logger.warning(f"Failed to save SpinQuant config: {e}")
@@ -215,7 +213,6 @@ class SpinQuantRotation(BaseRotation, RotationSerializer):
         from auto_round.algorithms.transforms.spinquant.serialize import (
             preregister_spinquant_buffers,
         )
-
         return preregister_spinquant_buffers(model, config_dict)
 
     def rebuild_online(self, model: nn.Module) -> nn.Module:
@@ -223,12 +220,14 @@ class SpinQuantRotation(BaseRotation, RotationSerializer):
         from auto_round.algorithms.transforms.spinquant.serialize import (
             rebuild_spinquant_online,
         )
-
         return rebuild_spinquant_online(model)
 
     def has_rotation_buffers(self, module: nn.Module) -> bool:
         """Check for spinquant-specific buffer prefixes."""
-        return hasattr(module, "spinquant_r1_type") or hasattr(module, "spinquant_r4_type")
+        return (
+            hasattr(module, "spinquant_r1_type")
+            or hasattr(module, "spinquant_r4_type")
+        )
 
     @classmethod
     def config_key(cls) -> str:

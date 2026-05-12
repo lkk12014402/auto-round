@@ -186,7 +186,6 @@ def pack_layer(layer_name, model, data_type, device=None, unsqueeze=False):
     # ShardWriter.save_module() captures them before offloading to meta.
     if hasattr(model, "_rotation_config"):
         from auto_round.algorithms.transforms import inject_rotation_buffers_on_layer
-
         inject_rotation_buffers_on_layer(layer_name, my_linear, model)
 
     # Note: release weight and bias explicitly, in case they are referenced elsewhere
@@ -261,7 +260,6 @@ def save_quantized_as_autoround(
     # Inject rotation buffers for non-shard path and persist config
     if hasattr(model, "_rotation_config"):
         from auto_round.algorithms.transforms import inject_rotation_buffers_bulk
-
         inject_rotation_buffers_bulk(model, quantization_config)
 
     if hasattr(model, "config"):
@@ -292,7 +290,6 @@ def save_quantized_as_autoround(
     # Save rotation config to config.json for load-time reconstruction
     if hasattr(model, "_rotation_config"):
         from auto_round.algorithms.transforms import save_rotation_config
-
         save_rotation_config(model, output_dir)
 
     return model

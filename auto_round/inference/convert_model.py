@@ -756,7 +756,6 @@ def post_init(model: torch.nn.Module, used_backends: list[str]) -> None:
     # HuggingFace's state_dict loader. Now rebuild online rotations
     # (forward patching + R3 monkeypatch) via the generic dispatch.
     from auto_round.algorithms.transforms import rebuild_rotation_if_needed
-
     rebuild_rotation_if_needed(model)
 
 
@@ -864,7 +863,6 @@ def convert_hf_model(model: nn.Module, target_device: str = "cpu") -> tuple[nn.M
     # Uses generic dispatch — supports SpinQuant and future rotation methods.
     try:
         from auto_round.algorithms.transforms import preregister_rotation_buffers
-
         preregister_rotation_buffers(model, quantization_config)
     except Exception as e:
         logger.warning(f"Failed to pre-register rotation buffers: {e}")
