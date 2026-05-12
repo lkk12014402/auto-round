@@ -74,7 +74,7 @@ class SpinQuantConfig(BaseRotationConfig):
            Fixed Hadamard rotation (R1–R4), no training needed, no calibration data.
         ⚠️  SpinQuant mode (``trainable_rotation=True``): Experimental.
            Training loop exists but not fully validated on real models.
-        ⚠️  Model save/load: Not yet implemented for models with online hooks.
+        ✅  Model save/load: fully implemented with rebuilt hooks.
     """
 
     #: Registry key — used by ``BaseRotation.from_config()`` to dispatch.
