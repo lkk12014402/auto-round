@@ -28,15 +28,10 @@ Usage:
     python test_save_load_roundtrip.py --device cuda:0 --limit 100 \
         --rotations "R1+R2" --schemes "W4A16"
 
-    # Hadamard vs random rotation (all rotations use random):
+    # Hadamard vs random rotation:
     python test_save_load_roundtrip.py --device cuda:0 --limit 100 \
         --rotations "R1+R2" --schemes "W4A16" \
         --rotation-modes "hadamard,random"
-
-    # Per-rotation random control (only R2 uses random, R1 stays hadamard):
-    python test_save_load_roundtrip.py --device cuda:0 --limit 100 \
-        --rotations "R1+R2" --schemes "W4A16" \
-        --random-rotations "R2"
 
     # Multi-scheme coverage (INT + FP paths):
     python test_save_load_roundtrip.py --device cuda:0 --limit 100 \
@@ -121,28 +116,16 @@ def build_rotation_config(rotation_flags: dict, **kwargs) -> SpinQuantConfig | N
         return None
     rotation_mode = kwargs.get("rotation_mode", "hadamard")
     is_random = rotation_mode == "random"
-    # Per-rotation random overrides (from --random-rotations)
-    random_set = kwargs.get("random_set", None)  # e.g. {"r1", "r2"}
-    if random_set is not None:
-        random_r1 = "r1" in random_set
-        random_r2 = "r2" in random_set
-        random_r3 = "r3" in random_set
-        random_r4 = "r4" in random_set
-    else:
-        random_r1 = is_random or kwargs.get("random_r1", False)
-        random_r2 = is_random or kwargs.get("random_r2", False)
-        random_r3 = is_random or kwargs.get("random_r3", False)
-        random_r4 = is_random or kwargs.get("random_r4", False)
     return SpinQuantConfig(
         **rotation_flags,
         rotation_size=kwargs.get("rotation_size", None),
         online_r1_rotation=kwargs.get("online_r1", True),
         trainable_rotation=False,
         trainable_smooth=False,
-        random_r1=random_r1,
-        random_r2=random_r2,
-        random_r3=random_r3,
-        random_r4=random_r4,
+        random_r1=True,
+        random_r2=True,
+        random_r3=False,
+        random_r4=False,
     )
 
 
@@ -262,7 +245,6 @@ def run_roundtrip(
     rotation_size: int | None = None,
     quant_iters: int | None = None,
     rotation_mode: str = "hadamard",
-    random_set: set[str] | None = None,
 ) -> dict[str, Any]:
     """Run save/load roundtrip test for one rotation × scheme combination.
 
@@ -275,11 +257,8 @@ def run_roundtrip(
     """
     iters = quant_iters if quant_iters is not None else args.quant_iters
     label = f"{rotation_name} + {scheme_name}" if rotation_name != "none" else f"{scheme_name} only"
-    if random_set:
-        rand_parts = sorted(r.upper() for r in random_set)
-        label += f" [random:{'+'.join(rand_parts)}]"
-    elif rotation_mode == "random":
-        label += " [random:all]"
+    if rotation_mode == "random":
+        label += " [random]"
     if iters > 0:
         label += f" (iters={iters})"
     if rotation_size is not None:
@@ -292,7 +271,6 @@ def run_roundtrip(
         "rotation": rotation_name,
         "scheme": scheme_name,
         "rotation_mode": rotation_mode,
-        "random_set": sorted(random_set) if random_set else None,
         "label": label,
         "quant_iters": iters,
         "rotation_size": rotation_size,
@@ -303,19 +281,12 @@ def run_roundtrip(
         rotation_size=rotation_size,
         online_r1=args.online_r1,
         rotation_mode=rotation_mode,
-        random_set=random_set,
     )
 
     # Build save directory
     model_short = model_name.split("/")[-1]
     safe_rot = rotation_name.replace("+", "_")
-    if random_set:
-        rand_tag = "-rand_" + "_".join(sorted(r.upper() for r in random_set))
-    elif rotation_mode == "random":
-        rand_tag = "-rand"
-    else:
-        rand_tag = ""
-    mode_tag = rand_tag
+    mode_tag = "-rand" if rotation_mode == "random" else ""
     iters_tag = f"-iters{iters}" if iters > 0 else ""
     rs_tag = f"-rs{rotation_size}" if rotation_size else ""
     save_dir = os.path.join(args.output_dir, f"{model_short}-{safe_rot}-{scheme_name}{mode_tag}{iters_tag}{rs_tag}")
@@ -597,12 +568,6 @@ Examples:
                         help="Comma-separated rotation modes: 'hadamard,random'. "
                              "Sweeps each combo with each mode. "
                              "If not set, uses 'hadamard' (or 'random' if --random-hadamard).")
-    parser.add_argument("--random-rotations", type=str, default=None,
-                        help="Per-rotation random control. Comma-separated list of which "
-                             "rotations should use random Hadamard, e.g. 'R2', 'R1,R2', "
-                             "'R1,R2,R3,R4'. Overrides --rotation-modes for fine-grained "
-                             "control. Example: --random-rotations 'R2' means only R2 is "
-                             "random while R1/R3/R4 stay deterministic.")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--skip-inmemory", action="store_true", default=False,
                         help="Skip in-memory comparison (only test save+load from disk)")
@@ -646,12 +611,7 @@ def main():
         rotation_sizes = [args.rotation_size]
 
     # Resolve rotation_modes
-    # --random-rotations takes precedence over --rotation-modes
-    random_set = None
-    if args.random_rotations:
-        random_set = {r.strip().lower() for r in args.random_rotations.split(",")}
-        rotation_modes = ["per-rotation"]  # single pass, random_set controls per-rotation
-    elif args.rotation_modes:
+    if args.rotation_modes:
         rotation_modes = [m.strip().lower() for m in args.rotation_modes.split(",")]
     elif args.random_hadamard:
         rotation_modes = ["random"]
@@ -679,10 +639,7 @@ def main():
     logger.info(f"  Model:           {args.model}")
     logger.info(f"  Device:          {args.device}")
     logger.info(f"  Rotations:       {rotation_names}")
-    if random_set:
-        logger.info(f"  Random rotations:{sorted(r.upper() for r in random_set)}")
-    else:
-        logger.info(f"  Rotation modes:  {rotation_modes}")
+    logger.info(f"  Rotation modes:  {rotation_modes}")
     logger.info(f"  Schemes:         {scheme_names}")
     logger.info(f"  Iters:           {iters_list}")
     rs_display = [str(s) if s is not None else "auto" for s in rotation_sizes]
@@ -719,12 +676,7 @@ def main():
                         sch_str, sch_desc = SCHEME_DEFS[sch_name]
 
                         rs_label = str(rs) if rs is not None else "auto"
-                        if random_set:
-                            mode_label = f", random={'+'.join(sorted(r.upper() for r in random_set))}"
-                        elif rot_mode != "hadamard":
-                            mode_label = f", mode={rot_mode}"
-                        else:
-                            mode_label = ""
+                        mode_label = f", mode={rot_mode}" if rot_mode != "hadamard" else ""
                         logger.info(f"\n[{combo_idx}/{n_combos}] "
                                     f"{rot_name} × {sch_name} (iters={iters}, rs={rs_label}{mode_label})")
 
@@ -736,7 +688,6 @@ def main():
                             rotation_size=rs if rot_name != "none" else None,
                             quant_iters=iters,
                             rotation_mode=rot_mode if rot_name != "none" else "hadamard",
-                            random_set=random_set if rot_name != "none" else None,
                         )
                         all_results.append(result)
 

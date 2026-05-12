@@ -117,10 +117,11 @@ def pack_layer(name, model, backend, device=None):
     qlayer.to(orig_device)
     set_module(model, name, qlayer)
 
-    # Inject SpinQuant rotation buffers right after packing so that
+    # Inject rotation buffers right after packing so that
     # ShardWriter.save_module() captures them before offloading to meta.
-    from auto_round.export.export_to_autoround.export import _inject_spinquant_buffers_on_layer
-    _inject_spinquant_buffers_on_layer(name, qlayer, model)
+    if hasattr(model, "_rotation_config"):
+        from auto_round.algorithms.transforms import inject_rotation_buffers_on_layer
+        inject_rotation_buffers_on_layer(name, qlayer, model)
 
     # Note: release weight and bias explicitly, in case they are referenced elsewhere
     release_layer_safely(layer)
@@ -245,12 +246,10 @@ def save_quantized_as_fp(
         pack_layer(name, model, backend, device)
     filter_quantization_config(quantization_config)
 
-    # Inject SpinQuant rotation buffers for non-shard path and persist config
-    from auto_round.export.export_to_autoround.export import (
-        _inject_spinquant_rotation_buffers,
-        _save_spinquant_config_to_dir,
-    )
-    _inject_spinquant_rotation_buffers(model, quantization_config)
+    # Inject rotation buffers for non-shard path and persist config
+    if hasattr(model, "_rotation_config"):
+        from auto_round.algorithms.transforms import inject_rotation_buffers_bulk
+        inject_rotation_buffers_bulk(model, quantization_config)
 
     if hasattr(model, "config"):
         model.config.quantization_config = quantization_config
@@ -273,7 +272,9 @@ def save_quantized_as_fp(
     dtype = None
     save_model(model, output_dir, safe_serialization=safe_serialization, dtype=dtype)
 
-    # Save SpinQuant config to config.json for load-time reconstruction
-    _save_spinquant_config_to_dir(model, output_dir)
+    # Save rotation config to config.json for load-time reconstruction
+    if hasattr(model, "_rotation_config"):
+        from auto_round.algorithms.transforms import save_rotation_config
+        save_rotation_config(model, output_dir)
 
     return model

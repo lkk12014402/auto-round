@@ -114,8 +114,8 @@ def inject_spinquant_buffers(
             if name in r4_targets:
                 _inject_rotation_buffers(
                     module, _R4_PREFIX, r4_size,
-                    random=False, is_trained=False,
-                    rotation_matrix=None,
+                    random=config.random_r4, is_trained=False,
+                    rotation_matrix=_get_stored_rotation(model, "spinquant_R4_matrix") if config.random_r4 else None,
                 )
                 n_injected += 1
 
@@ -154,10 +154,14 @@ def save_spinquant_config(
 
     # Build serializable spinquant config
     spinquant_dict = _config_to_serializable(config, model)
+    spinquant_dict["algorithm"] = "spinquant"
 
-    # Store under quantization_config if it exists, else at top level
+    # Store under quantization_config if it exists, else at top level.
+    # Key is "spinquant_config" (not "rotation_config" — that key is
+    # already used by the Hadamard rotation system with a different schema).
     if "quantization_config" in model_config:
-        model_config["quantization_config"]["spinquant_config"] = spinquant_dict
+        qcfg = model_config["quantization_config"]
+        qcfg["spinquant_config"] = spinquant_dict
     else:
         model_config["spinquant_config"] = spinquant_dict
 
@@ -239,10 +243,12 @@ def preregister_spinquant_buffers(
             n_registered += 1
 
         if name in r4_targets:
+            random_r4 = spinquant_config.get("random_r4", False)
+            r4_needs_matrix = random_r4 or trained
             _preregister_buffers_on_module(
                 module, _R4_PREFIX, r4_size,
-                needs_matrix=False,  # R4 is always deterministic Hadamard
-                matrix_dtype=torch.int8,
+                needs_matrix=r4_needs_matrix,
+                matrix_dtype=torch.float32 if trained else torch.int8,
             )
             n_registered += 1
 
@@ -330,11 +336,20 @@ def rebuild_spinquant_online(
             from auto_round.algorithms.transforms.spinquant.inplace.apply import (
                 register_spinquant_hooks,
             )
-            # Only register R3 hooks (R1/R4 handled by buffer)
-            register_spinquant_hooks(
-                model,
+            # Build a minimal config with R3=True, R4=False for hook rebuild.
+            # R1/R4 are handled by QuantLinear buffer-based forward patching.
+            from types import SimpleNamespace
+            r3_config = SimpleNamespace(
                 r3=True,
                 r4=False,
+                random_r3=getattr(config, "random_r3", False),
+                random_r4=False,
+                head_dim=head_dim,
+                intermediate_size=0,
+            )
+            register_spinquant_hooks(
+                model,
+                config=r3_config,
                 head_dim=head_dim,
                 r4_rotation_size=0,
             )
@@ -556,7 +571,11 @@ def _inject_rotation_buffers(
     # Store matrix for random/trained types
     if rot_type == ROTATION_TYPE_RANDOM:
         if rotation_matrix is None:
-            # Reconstruct: deterministic Hadamard (fallback, shouldn't happen)
+            logger.warning(
+                f"Random rotation ({prefix}) requires rotation_matrix but got None. "
+                "This usually means the matrix was deleted during cleanup. "
+                "Falling back to deterministic Hadamard — the saved model may be INCORRECT."
+            )
             had_K, K = get_hadamard_K(rotation_size)
             if had_K.shape[0] != rotation_size:
                 had_1, _ = get_hadamard_K(rotation_size // K)
@@ -700,6 +719,8 @@ def _config_to_serializable(
         "rotation_size": config.rotation_size,
         "random_r1": config.random_r1,
         "random_r2": config.random_r2,
+        "random_r3": config.random_r3,
+        "random_r4": config.random_r4,
         "trainable_rotation": config.trainable_rotation,
         # Model architecture info for reconstruction
         "head_dim": _get_head_dim(model),
@@ -748,6 +769,8 @@ def _load_config_from_model(
             rotation_size=spinquant_dict.get("rotation_size"),
             random_r1=spinquant_dict.get("random_r1", False),
             random_r2=spinquant_dict.get("random_r2", False),
+            random_r3=spinquant_dict.get("random_r3", False),
+            random_r4=spinquant_dict.get("random_r4", False),
             trainable_rotation=spinquant_dict.get("trainable_rotation", False),
         )
     except Exception as e:

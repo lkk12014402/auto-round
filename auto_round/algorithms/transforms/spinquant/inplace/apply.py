@@ -1,6 +1,3 @@
-# # Copyright (C) 2026 Intel Corporation
-# # SPDX-License-Identifier: Apache-2.0
-
 """
 SpinQuant in-place application utilities.
 
@@ -44,15 +41,19 @@ def register_spinquant_hooks(
 
     R3 uses the architecture-generic monkeypatch approach: replaces
     ``apply_rotary_pos_emb`` in attention forward's globals with a wrapper
-    that applies normalized Hadamard to Q and K after RoPE.
+    that applies rotation to Q and K after RoPE.
 
-    R4 registers a forward_pre_hook on each ``down_proj`` that applies block
-    Hadamard to the activation before the linear layer.
+    R4 registers a forward_pre_hook on each ``down_proj`` that applies
+    rotation to the activation before the linear layer.
+
+    Both R3 and R4 support two modes:
+    - **Deterministic** (default): butterfly algorithm via ``matmul_hadU``
+    - **Random** (``random_r3/r4=True``): explicit ``x @ R`` using stored matrix
 
     Args:
         model: The transformer model to patch.
         config: A ``SpinQuantConfig`` instance (or any object with ``r3``,
-            ``r4`` booleans).
+            ``r4`` booleans and optional ``random_r3``, ``random_r4``).
         compute_device: Device for hook computation.
         head_dim: Per-head dimension for R3 rotation. If 0, tries config.head_dim.
         intermediate_size: MLP intermediate dimension for R4. If 0, tries config.intermediate_size.
@@ -73,8 +74,11 @@ def register_spinquant_hooks(
     if intermediate_size <= 0:
         intermediate_size = getattr(config, "intermediate_size", 0)
 
+    random_r3 = getattr(config, "random_r3", False)
+    random_r4 = getattr(config, "random_r4", False)
+
     # ------------------------------------------------------------------
-    # R3: Q/K rotation after RoPE (head_dim Hadamard)
+    # R3: Q/K rotation after RoPE (head_dim rotation)
     # Uses monkeypatch to wrap apply_rotary_pos_emb in attention forward.
     # ------------------------------------------------------------------
     if getattr(config, "r3", False) and head_dim > 0:
@@ -90,6 +94,9 @@ def register_spinquant_hooks(
                 add_qk_rotation_after_rope,
             )
 
+            # Get stored R3 matrix for random mode
+            r3_matrix = getattr(model, "spinquant_R3_head", None)
+
             r3_count = 0
             for name, module in model.named_modules():
                 if name.endswith("self_attn") and hasattr(module, "q_proj") and hasattr(module, "k_proj"):
@@ -98,7 +105,10 @@ def register_spinquant_hooks(
                             module,
                             rope_function_name="apply_rotary_pos_emb",
                         )
-                        wrapper.set_hadamard(None, head_dim)
+                        if random_r3 and r3_matrix is not None:
+                            wrapper.set_matrix(r3_matrix)
+                        else:
+                            wrapper.set_hadamard(None, head_dim)
                         module._spinquant_r3_patched = True
                         handles.append(("r3_monkeypatch", name, module, wrapper))
                         r3_count += 1
@@ -114,66 +124,104 @@ def register_spinquant_hooks(
                             logger.warning(f"[SpinQuant] R3 monkeypatch failed for '{name}': {e}")
 
             if r3_count > 0:
+                mode = "random x @ R" if (random_r3 and r3_matrix is not None) else "deterministic butterfly"
                 logger.info(
-                    f"[SpinQuant] R3: Applied Hadamard(head_dim={head_dim}) after RoPE on {r3_count} attention layers"
+                    f"[SpinQuant] R3: Applied rotation(head_dim={head_dim}, mode={mode}) "
+                    f"after RoPE on {r3_count} attention layers"
                 )
 
     # ------------------------------------------------------------------
-    # R4: MLP activation rotation (intermediate_size Hadamard)
+    # R4: MLP activation rotation (intermediate_size rotation)
     # ------------------------------------------------------------------
     if getattr(config, "r4", False) and intermediate_size > 0:
         # Use r4_rotation_size if provided, otherwise fall back to intermediate_size
         r4_size = r4_rotation_size if r4_rotation_size > 0 else intermediate_size
 
-        # Validate that Hadamard decomposition exists for r4_size
-        try:
-            from auto_round.algorithms.transforms.spinquant.rotation_utils import (
-                get_hadamard_K,
-            )
+        # Determine if we need block rotation (r4_size < intermediate_size)
+        need_block_rotation = (r4_size < intermediate_size)
 
-            had_K_mat, had_K_val = get_hadamard_K(r4_size)
-        except ValueError:
-            logger.warning(
-                f"[SpinQuant] R4: no Hadamard decomposition for r4_rotation_size={r4_size}. " f"Skipping R4 rotation."
-            )
-            had_K_mat, had_K_val = None, None
+        if random_r4:
+            # Random R4: use stored full matrix
+            r4_matrix = getattr(model, "spinquant_R4_matrix", None)
+            if r4_matrix is None:
+                logger.warning(
+                    "[SpinQuant] R4: random_r4=True but spinquant_R4_matrix buffer not found. "
+                    "Falling back to deterministic Hadamard."
+                )
+                random_r4 = False
 
-        if had_K_mat is not None:
-            # Pre-compute the rotation matrix on compute_device
-            had_K_mat = had_K_mat.to(device=compute_device, dtype=torch.float32)
+        if random_r4:
+            R4 = r4_matrix.to(device=compute_device, dtype=torch.float32)
 
-            # Determine if we need block rotation (r4_size < intermediate_size)
-            need_block_rotation = r4_size < intermediate_size
-
-            def _make_r4_hook(had_mat, k_val, rot_size, block_mode):
+            def _make_r4_hook_matrix(R, rot_size, block_mode):
                 def hook(module, args):
                     x = args[0]
+                    R_local = R.to(x.device, dtype=x.dtype)
                     if block_mode:
                         shape = x.shape
-                        # Reshape: [..., intermediate_size] → [..., num_blocks, r4_size]
                         x = x.reshape(*shape[:-1], -1, rot_size)
-                        x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
-                        x = x.reshape(shape)
+                        x = (x @ R_local).reshape(shape)
                     else:
-                        x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                        x = x @ R_local
                     return (x,) + args[1:]
-
                 return hook
 
             r4_count = 0
             for name, module in list(model.named_modules()):
                 if "down_proj" in name and isinstance(module, nn.Linear):
-                    hook = _make_r4_hook(had_K_mat, had_K_val, r4_size, need_block_rotation)
-                    hook._spinquant_hook = True  # tag for selective removal
+                    hook = _make_r4_hook_matrix(R4, r4_size, need_block_rotation)
+                    hook._spinquant_hook = True
                     handle = module.register_forward_pre_hook(hook)
                     handles.append(handle)
                     r4_count += 1
 
             logger.info(
-                f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, K={had_K_val}, "
-                f"block_rotation={need_block_rotation}) on {r4_count} down_proj layers"
-                + (f" (r4_rotation_size={r4_size})" if r4_size != intermediate_size else "")
+                f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, "
+                f"mode=random x @ R, block_rotation={need_block_rotation}) on {r4_count} down_proj layers"
             )
+        else:
+            # Deterministic: butterfly algorithm
+            try:
+                from auto_round.algorithms.transforms.spinquant.rotation_utils import (
+                    get_hadamard_K,
+                )
+                had_K_mat, had_K_val = get_hadamard_K(r4_size)
+            except ValueError:
+                logger.warning(
+                    f"[SpinQuant] R4: no Hadamard decomposition for r4_rotation_size={r4_size}. "
+                    f"Skipping R4 rotation."
+                )
+                had_K_mat, had_K_val = None, None
+
+            if had_K_mat is not None:
+                had_K_mat = had_K_mat.to(device=compute_device, dtype=torch.float32)
+
+                def _make_r4_hook_butterfly(had_mat, k_val, rot_size, block_mode):
+                    def hook(module, args):
+                        x = args[0]
+                        if block_mode:
+                            shape = x.shape
+                            x = x.reshape(*shape[:-1], -1, rot_size)
+                            x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                            x = x.reshape(shape)
+                        else:
+                            x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                        return (x,) + args[1:]
+                    return hook
+
+                r4_count = 0
+                for name, module in list(model.named_modules()):
+                    if "down_proj" in name and isinstance(module, nn.Linear):
+                        hook = _make_r4_hook_butterfly(had_K_mat, had_K_val, r4_size, need_block_rotation)
+                        hook._spinquant_hook = True
+                        handle = module.register_forward_pre_hook(hook)
+                        handles.append(handle)
+                        r4_count += 1
+
+                logger.info(
+                    f"[SpinQuant] R4: Registered forward_pre_hook(rotation_size={r4_size}, K={had_K_val}, "
+                    f"mode=deterministic butterfly, block_rotation={need_block_rotation}) on {r4_count} down_proj layers"
+                )
 
     return handles
 
@@ -234,3 +282,4 @@ def apply_spinquant_in_place(
 
     preprocessor = SpinQuantPreprocessor(model, config)
     return preprocessor.preprocess(dataloader)
+
