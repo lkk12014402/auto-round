@@ -687,16 +687,13 @@ from auto_round import AutoRound
 from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
 
 # R1 only (fast, good baseline improvement)
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True))
 
 # R1 + R2 (better, no runtime overhead after fuse)
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True, r2=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True))
 
 # R1 + R2 + R3 + R4 (best accuracy, slight runtime overhead from hooks)
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
 ```
 
 ##### String Shortcuts
@@ -712,15 +709,16 @@ ar = AutoRound(model, scheme="MXFP4",
 
 ```python
 # Deterministic (default): fixed Hadamard matrix, no extra storage needed
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
 
 # Random: H × diag(±1), slightly better outlier suppression, requires saving the random sign vector
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(
-                   r1=True, r2=True, r3=True, r4=True,
-                   random_r1=True, random_r2=True,
-                   random_r3=True, random_r4=True))
+ar = AutoRound(
+    model,
+    scheme="MXFP4",
+    rotation_config=SpinQuantConfig(
+        r1=True, r2=True, r3=True, r4=True, random_r1=True, random_r2=True, random_r3=True, random_r4=True
+    ),
+)
 ```
 
 ##### Key Parameters
@@ -743,6 +741,7 @@ ar.quantize_and_save(output_dir="./my_model", format="auto_round")
 
 # Load (rotation hooks restored automatically)
 from transformers import AutoModelForCausalLM
+
 model = AutoModelForCausalLM.from_pretrained("./my_model", device_map="auto")
 ```
 
