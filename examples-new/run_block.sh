@@ -58,15 +58,15 @@ launch() {
 #launch 2 "Qwen/Qwen3-0.6B"                   full
 #launch 3 "Qwen/Qwen3-0.6B"                   tuning
 #launch 1 "Qwen/Qwen3-0.6B"                   size-sweep
-launch 4 "Qwen/Qwen3-8B"                     full
-launch 5 "Qwen/Qwen3-8B"                     tuning
-launch 6 "meta-llama/Llama-3.1-8B-Instruct"  full
-launch 7 "meta-llama/Llama-3.1-8B-Instruct"  tuning
+#launch 4 "Qwen/Qwen3-8B"                     full
+#launch 5 "Qwen/Qwen3-8B"                     tuning
+#launch 6 "meta-llama/Llama-3.1-8B-Instruct"  full
+#launch 7 "meta-llama/Llama-3.1-8B-Instruct"  tuning
 
 # ── Block-wise (layer-wise) rotation tests ───────────────────────────────────
 #launch 0 "Qwen/Qwen3-0.6B"                   layerwise
 #launch 1 "Qwen/Qwen3-0.6B"                   layerwise-tuning
-#launch 2 "Qwen/Qwen3-0.6B"                   layerwise-compare
+launch 3 "Qwen/Qwen3-0.6B"                   layerwise-compare
 
 echo ""
 echo "  All 6 jobs launched. PIDs: ${PIDS[*]}"

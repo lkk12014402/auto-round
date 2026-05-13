@@ -35,6 +35,8 @@ Modes (via run_rotation_scheme_matrix_v2.sh):
   weight-act  — MXFP4/NVFP4/INT8/MXFP8 (R3/R4 matter most here)
   random      — Same as full but random Hadamard (H×D)
   tuning      — W4A16 with iters=200 (rotation + auto-round tuning)
+  layerwise   — Block-wise rotation (layerwise_rotation=True), RTN
+  layerwise-tuning — Block-wise rotation + iters=200 auto-round tuning
 
 Rotation levels:
   none        — No rotation (quantization-only baseline)
@@ -314,6 +316,7 @@ def run_single_combination(
         "random_r4": rr4,
         "quant_iters": args.quant_iters,
         "rotation_size": rotation_size,
+        "layerwise": args.layerwise,
         "api": "pipeline_v2",
     }
 
@@ -345,11 +348,13 @@ def run_single_combination(
                 f"random_r3={rotation_config.random_r3}, "
                 f"random_r4={rotation_config.random_r4})"
             )
+            if args.layerwise:
+                logger.info("  layerwise_rotation = True (block-wise rotation)")
         else:
             logger.info("  rotation_config = None (no rotation)")
 
         logger.info(f"  AutoRound(rotation_config=..., scheme={scheme_str}, "
-                    f"iters={args.quant_iters})")
+                    f"iters={args.quant_iters}, layerwise={args.layerwise})")
 
         ar = AutoRound(
             model,
@@ -360,6 +365,7 @@ def run_single_combination(
             nsamples=args.nsamples,
             seqlen=args.seqlen,
             device_map=args.device,
+            layerwise_rotation=args.layerwise,
         )
         ar.quantize()
         model = ar.model
@@ -877,7 +883,7 @@ def save_results_csv(all_results: list[dict], tasks: list[str],
     header = [
         "rotation", "scheme", "rotation_mode", "matrix_mode",
         "random_r1", "random_r2", "random_r3", "random_r4",
-        "quant_iters", "rotation_size", "status", "total_time_s",
+        "quant_iters", "rotation_size", "layerwise", "status", "total_time_s",
     ]
     for t in task_list:
         header.append(f"{t}_mem")
@@ -911,6 +917,7 @@ def save_results_csv(all_results: list[dict], tasks: list[str],
                 r.get("random_r4", False),
                 r.get("quant_iters", ""),
                 r.get("rotation_size", ""),
+                r.get("layerwise", False),
                 r.get("status", ""),
                 r.get("total_time_s", ""),
             ] + accs_mem + [avg_mem]
@@ -979,6 +986,12 @@ Examples:
 
   # Auto-round tuning (better accuracy):
   python test_rotation_scheme_matrix_v2.py --device cuda:7 --quant-iters 200
+
+  # Block-wise (layer-wise) rotation — same as full-model but rotation applied per-block:
+  python test_rotation_scheme_matrix_v2.py --device cuda:7 --layerwise
+
+  # Block-wise + tuning (simulates 70B+ model workflow):
+  python test_rotation_scheme_matrix_v2.py --device cuda:7 --layerwise --quant-iters 200
 
   # Common schemes with all 5 rotation levels:
   python test_rotation_scheme_matrix_v2.py --device cuda:7 \\
@@ -1066,6 +1079,12 @@ Examples:
                         help="Run each rotation combo twice (deterministic + "
                              "random Hadamard) for side-by-side comparison. "
                              "Overrides --random-hadamard/--random-r* flags.")
+    parser.add_argument("--layerwise", action="store_true", default=False,
+                        help="Enable block-wise (layer-wise) rotation. Rotation "
+                             "is applied per-block inside the compressor loop "
+                             "via _on_block_ready hook, instead of once upfront. "
+                             "This enables rotation+quantization for 70B+ models "
+                             "with limited GPU memory. Requires online_r1=True.")
     parser.add_argument("--cleanup", action="store_true", default=True,
                         help="Clean up saved model after roundtrip (default: True)")
     parser.add_argument("--no-cleanup", dest="cleanup", action="store_false",
@@ -1093,6 +1112,13 @@ def main():
         args.random_r2 = True
         args.random_r3 = True
         args.random_r4 = True
+
+    # --layerwise requires online_r1 (offline R1 modifies embed/lm_head,
+    # incompatible with pre-cached inputs in block-wise loop)
+    if args.layerwise and not args.online_r1:
+        logger.error("--layerwise requires --online-r1 (default). "
+                     "Offline R1 is incompatible with block-wise rotation.")
+        sys.exit(1)
 
     # Resolve presets
     if args.full_matrix:
@@ -1146,9 +1172,10 @@ def main():
             parts = [str(s) if s else "auto" for s in rotation_sizes]
             size_tag = f"_rs{'_'.join(parts)}"
         cmp_tag = "_cmprand" if args.compare_random else ""
+        lw_tag = "_layerwise" if args.layerwise else ""
         args.output_dir = (
             f"results_v2_{model_short}{iters_tag}"
-            f"{size_tag}{cmp_tag}_{timestamp}"
+            f"{size_tag}{cmp_tag}{lw_tag}_{timestamp}"
         )
 
     if not args.no_save:
@@ -1213,6 +1240,7 @@ def main():
                     f"{args.rotation_size or 'auto (known Hadamard)'}")
     logger.info(f"  Rotation mode:  {rot_mode_str}")
     logger.info(f"  Online R1:      {args.online_r1}")
+    logger.info(f"  Layerwise:      {args.layerwise}")
     logger.info(f"  Save/Load:      {args.save_load}")
     logger.info(f"  Compare random: {args.compare_random}")
     logger.info(f"  Seed:           {args.seed}")
@@ -1357,6 +1385,7 @@ def main():
                                for s in rotation_sizes],
             "matrix_modes": matrix_modes,
             "compare_random": args.compare_random,
+            "layerwise_rotation": args.layerwise,
             "random_r1": args.random_r1, "random_r2": args.random_r2,
             "random_r3": args.random_r3, "random_r4": args.random_r4,
             "online_r1": args.online_r1,

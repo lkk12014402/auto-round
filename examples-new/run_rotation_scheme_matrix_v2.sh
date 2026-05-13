@@ -34,6 +34,9 @@
 #   size-sweep  — Sweep rotation_sizes (16,32,64,128,auto) × rotations × schemes
 #   tuning      — All 5 rotations × common schemes, iters=200 (auto-round tuning)
 #   tuning-matrix — ALL 5 rotations × ALL 11 schemes, iters=200 (full tuning matrix)
+#   layerwise   — Block-wise rotation (applied per-block via lifecycle hooks), RTN
+#   layerwise-tuning — Block-wise rotation + iters=200 auto-round tuning
+#   layerwise-compare — Full-model vs block-wise comparison (validates equivalence)
 #
 # Usage:
 #   bash run_rotation_scheme_matrix_v2.sh                  # Quick test
@@ -41,11 +44,16 @@
 #   bash run_rotation_scheme_matrix_v2.sh full-matrix       # All combos
 #   bash run_rotation_scheme_matrix_v2.sh size-sweep        # rotation_size sweep
 #   bash run_rotation_scheme_matrix_v2.sh tuning            # With tuning
+#   bash run_rotation_scheme_matrix_v2.sh layerwise         # Block-wise rotation
+#   bash run_rotation_scheme_matrix_v2.sh layerwise-tuning  # Block-wise + tuning
+#   bash run_rotation_scheme_matrix_v2.sh layerwise-compare # Full vs block-wise
 #   DEVICE=cuda:4 bash run_rotation_scheme_matrix_v2.sh full
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -e
 cd "$(dirname "$0")"
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 DEVICE="${DEVICE:-cuda:6}"
@@ -186,9 +194,67 @@ case "$MODE" in
             --tasks "hellaswag,piqa,winogrande,lambada_openai,mmlu"
         ;;
 
+    layerwise)
+        echo "Running block-wise (layer-wise) rotation, RTN, save/load..."
+        python test_rotation_scheme_matrix_v2.py \
+            --model "$MODEL" \
+            --device "$DEVICE" \
+            $RS_FLAG $RSS_FLAG \
+            --rotations "none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4" \
+            --schemes "W4A16,MXFP4,NVFP4" \
+            --layerwise \
+            --save-load \
+            --tasks "hellaswag,piqa,winogrande,lambada_openai" \
+            ${2:+--limit $2}
+        ;;
+
+    layerwise-tuning)
+        echo "Running block-wise rotation + auto-round tuning (iters=200), save/load..."
+        python test_rotation_scheme_matrix_v2.py \
+            --model "$MODEL" \
+            --device "$DEVICE" \
+            $RS_FLAG $RSS_FLAG \
+            --rotations "none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4" \
+            --schemes "W4A16,MXFP4,NVFP4" \
+            --layerwise \
+            --quant-iters 200 \
+            --save-load \
+            --tasks "hellaswag,piqa,winogrande,lambada_openai" \
+            ${2:+--limit $2}
+        ;;
+
+    layerwise-compare)
+        echo "Running full-model vs block-wise comparison (validates equivalence)..."
+        echo "  Step 1/2: Full-model rotation (baseline)..."
+        python test_rotation_scheme_matrix_v2.py \
+            --model "$MODEL" \
+            --device "$DEVICE" \
+            $RS_FLAG $RSS_FLAG \
+            --rotations "R1,R1+R2,R1+R2+R3+R4" \
+            --schemes "W4A16,MXFP4" \
+            --save-load \
+            --tasks "hellaswag,piqa" \
+            --output-dir "_compare_fullmodel_${TIMESTAMP}" \
+            ${2:+--limit $2}
+        echo "  Step 2/2: Block-wise rotation..."
+        python test_rotation_scheme_matrix_v2.py \
+            --model "$MODEL" \
+            --device "$DEVICE" \
+            $RS_FLAG $RSS_FLAG \
+            --rotations "R1,R1+R2,R1+R2+R3+R4" \
+            --schemes "W4A16,MXFP4" \
+            --layerwise \
+            --save-load \
+            --tasks "hellaswag,piqa" \
+            --output-dir "_compare_layerwise_${TIMESTAMP}" \
+            ${2:+--limit $2}
+        echo ""
+        echo "Compare results in _compare_fullmodel_${TIMESTAMP}/ vs _compare_layerwise_${TIMESTAMP}/"
+        ;;
+
     *)
         echo "Unknown mode: $MODE"
-        echo "Available modes: quick, full, full-matrix, weight-only, weight-act, random, size-sweep, tuning, tuning-matrix"
+        echo "Available modes: quick, full, full-matrix, weight-only, weight-act, random, size-sweep, tuning, tuning-matrix, layerwise, layerwise-tuning, layerwise-compare"
         exit 1
         ;;
 esac
