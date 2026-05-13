@@ -318,6 +318,401 @@ class SpinQuantPreprocessor:
         logger.info("[SpinQuant] Preprocessing complete!")
         return self.model
 
+    # ------------------------------------------------------------------
+    # Layer-wise API (for Block Lifecycle Hooks integration)
+    # ------------------------------------------------------------------
+
+    def prepare(self, dataloader: Optional[Any] = None) -> None:
+        """Global preparation for layer-wise rotation.
+
+        Performs all lightweight, non-destructive steps:
+        - Validates dimensions
+        - Initialises rotation matrices (stored as model buffers)
+        - Optionally trains rotation matrices (requires full model + dataloader)
+
+        Does **NOT** modify model weights or register hooks — that is done
+        per-layer by :meth:`rotate_layer`.
+
+        This method is the layer-wise counterpart of :meth:`preprocess`.
+
+        Args:
+            dataloader: Required only when ``trainable_rotation=True``.
+
+        Raises:
+            ValueError: If ``online_r1_rotation=False`` (offline R1 is
+                incompatible with layer-wise mode because it changes the
+                inter-layer hidden-state space).
+        """
+        # Layer-wise rotation only works with Online R1
+        if self.config.r1 and not self.config.online_r1_rotation:
+            raise ValueError(
+                "[SpinQuant] Layer-wise rotation requires online_r1_rotation=True. "
+                "Offline R1 changes inter-layer hidden state space, which is "
+                "incompatible with pre-cached block inputs. Use full-model "
+                "rotation (layerwise_rotation=False) for offline R1."
+            )
+
+        logger.info("[SpinQuant] Preparing for layer-wise rotation...")
+        logger.info(
+            f"[SpinQuant] Model architecture: hidden_size={self.hidden_size}, "
+            f"head_dim={self.head_dim}, intermediate_size={self.intermediate_size}"
+        )
+        logger.info(
+            f"[SpinQuant] Rotation config: R1={self.config.r1}, R2={self.config.r2}, "
+            f"R3={self.config.r3}, R4={self.config.r4}, "
+            f"online_r1={self.config.online_r1_rotation}"
+        )
+
+        # Step 1: Validate dimensions
+        self._validate_dimensions()
+
+        # Step 2: Initialise rotation matrices (lightweight — only R matrix buffers)
+        logger.info("[SpinQuant] Initialising rotation matrices...")
+        self._init_rotation_matrices()
+
+        # Step 3: Train if requested (needs full model forward/backward)
+        if self.config.trainable_rotation or self.config.trainable_smooth:
+            if dataloader is None:
+                raise ValueError("dataloader required when trainable=True")
+            logger.warning(
+                "[SpinQuant] Layer-wise mode with trainable_rotation: training "
+                "requires full model forward/backward pass (higher memory). "
+                "Consider pre-training R matrices separately for large models."
+            )
+            # Trainable smooth needs norm replacement first
+            if self.config.trainable_smooth:
+                self._replace_norms_with_trainable()
+            self._train_rotations(dataloader)
+
+        # Pre-compute shared state for rotate_layer()
+        self._prepare_r1_state()
+
+        # Store config on model for downstream serialization
+        self.model._rotation_config = self.config
+        self.model._spinquant_config = self.config  # legacy alias
+
+        logger.info("[SpinQuant] Layer-wise preparation complete (no weights modified yet).")
+
+    def _prepare_r1_state(self) -> None:
+        """Pre-compute R1 rotation state shared across all layers."""
+        if not self.config.r1 or not self.config.online_r1_rotation:
+            self._r1_state = None
+            return
+
+        r1_size = self.r1_rotation_size
+        use_random = self.config.random_r1
+        model_device = next(self.model.parameters()).device
+
+        if use_random:
+            R1_full = self._get_rotation_tensor("spinquant_R1")
+            if R1_full is None:
+                raise RuntimeError(
+                    "[SpinQuant] random_r1=True but spinquant_R1 buffer not found."
+                )
+            self._r1_state = {
+                "mode": "random",
+                "R1_full": R1_full.data.to(torch.float64),
+                "r1_size": r1_size,
+                "hadamard_K": None,
+                "K": None,
+            }
+        else:
+            hadamard_K, K = get_hadamard_K(r1_size)
+            hadamard_K = hadamard_K.to(model_device)
+            self._r1_state = {
+                "mode": "deterministic",
+                "R1_full": None,
+                "r1_size": r1_size,
+                "hadamard_K": hadamard_K,
+                "K": K,
+            }
+
+    def rotate_layer(self, layer: nn.Module, layer_idx: int) -> None:
+        """Apply all configured rotations to a single decoder layer.
+
+        This is the per-block entry point called by the compressor's
+        ``_on_block_ready()`` hook. The layer must already be on the
+        target device.
+
+        Operations performed (in order):
+        1. **R1 (Online)**: Rotate target module weights + register hooks
+        2. **R2 (Offline fuse)**: Fuse into v_proj output + o_proj input
+        3. **R4 (Offline fuse)**: Fuse into down_proj input
+        4. **R3 (Hook)**: Monkeypatch apply_rotary_pos_emb
+        5. **R4 (Hook)**: Register forward_pre_hook on down_proj
+
+        Args:
+            layer: A single decoder layer (e.g. ``model.model.layers[i]``),
+                already materialised and on the target device.
+            layer_idx: Zero-based index for logging purposes.
+        """
+        if not (hasattr(layer, "self_attn") and hasattr(layer, "mlp")):
+            logger.warning(f"[SpinQuant] Layer {layer_idx}: no self_attn/mlp, skipping rotation.")
+            return
+
+        layer_device = next(layer.parameters()).device
+
+        # ── R1: Online weight rotation + hooks ──
+        if self.config.r1 and self.config.online_r1_rotation and self._r1_state is not None:
+            self._rotate_layer_online_r1(layer, layer_idx, layer_device)
+
+        # ── R2: Offline fuse into v_proj/o_proj ──
+        if self.config.r2 and self.head_dim > 0:
+            self._rotate_layer_r2(layer, layer_idx)
+
+        # ── R4: Offline fuse into down_proj ──
+        if self.config.r4 and self.r4_rotation_size > 0:
+            self._rotate_layer_r4_fuse(layer, layer_idx)
+
+        # ── R3: Monkeypatch attention (after RoPE) ──
+        if self.config.r3 and self.head_dim > 0:
+            self._rotate_layer_r3_hook(layer, layer_idx)
+
+        # ── R4: Hook on down_proj ──
+        if self.config.r4 and self.r4_rotation_size > 0:
+            self._rotate_layer_r4_hook(layer, layer_idx, layer_device)
+
+        logger.debug(f"[SpinQuant] Layer {layer_idx}: rotation applied.")
+
+    def _rotate_layer_online_r1(self, layer: nn.Module, layer_idx: int, layer_device: torch.device) -> None:
+        """Apply Online R1 rotation to a single layer's target modules."""
+        state = self._r1_state
+        r1_size = state["r1_size"]
+        use_random = state["mode"] == "random"
+
+        attn = layer.self_attn
+        mlp = layer.mlp
+
+        # Target modules: q/k/v_proj, gate/up_proj
+        target_specs = []
+        for proj_name in ("q_proj", "k_proj", "v_proj"):
+            if hasattr(attn, proj_name):
+                target_specs.append((attn, proj_name))
+        for proj_name in ("gate_proj", "up_proj"):
+            if hasattr(mlp, proj_name):
+                target_specs.append((mlp, proj_name))
+
+        for parent, attr_name in target_specs:
+            module = getattr(parent, attr_name)
+            dtype = module.weight.data.dtype
+            in_features = module.weight.shape[-1]
+
+            if use_random:
+                R = state["R1_full"].to(layer_device)
+                if r1_size == in_features:
+                    W = module.weight.data.to(torch.float64)
+                    module.weight.data = (W @ R).to(dtype)
+                elif in_features % r1_size == 0:
+                    rotate_in_channels_(module, R_in=R)
+                else:
+                    raise ValueError(
+                        f"Online R1: in_features={in_features} not compatible "
+                        f"with r1_rotation_size={r1_size}"
+                    )
+                hook = self._make_online_r1_hook_matrix(
+                    state["R1_full"].to(layer_device), r1_size, in_features
+                )
+            else:
+                hadamard_K = state["hadamard_K"].to(layer_device)
+                K = state["K"]
+                if r1_size == in_features:
+                    module.weight.data = matmul_hadU(
+                        module.weight.data, hadamard_K=hadamard_K, K=K
+                    ).to(dtype)
+                elif in_features % r1_size == 0:
+                    R_block = hadamard_K.to(torch.float64)
+                    if R_block.shape[0] != r1_size:
+                        had_1, _ = get_hadamard_K(r1_size // K)
+                        R_block = torch.kron(
+                            hadamard_K.to(device="cpu", dtype=torch.float64),
+                            had_1.to(device="cpu", dtype=torch.float64),
+                        )
+                    R_block = R_block / math.sqrt(r1_size)
+                    rotate_in_channels_(module, R_in=R_block)
+                else:
+                    raise ValueError(
+                        f"Online R1: in_features={in_features} not compatible "
+                        f"with r1_rotation_size={r1_size}"
+                    )
+                hook = self._make_online_r1_hook_butterfly(
+                    r1_size, in_features, hadamard_K, K
+                )
+
+            hook._spinquant_hook = True
+            handle = module.register_forward_pre_hook(hook)
+            self._r1_hook_handles.append(handle)
+
+    def _rotate_layer_r2(self, layer: nn.Module, layer_idx: int) -> None:
+        """Fuse R2 per-head rotation into a single layer's v_proj and o_proj."""
+        R2_head = self._get_rotation_tensor("spinquant_R2_head")
+        if R2_head is None:
+            return
+
+        R2 = R2_head.data.to(torch.float64)
+        R2_T = R2.t()
+        attn = layer.self_attn
+
+        if hasattr(attn, "v_proj"):
+            W = attn.v_proj.weight.data
+            dtype = W.dtype
+            W = W.to(torch.float64)
+            n_heads = W.shape[0] // self.head_dim
+            W_reshaped = W.reshape(n_heads, self.head_dim, W.shape[1])
+            W_reshaped = torch.einsum("ij,kjl->kil", R2_T, W_reshaped)
+            attn.v_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
+
+        if hasattr(attn, "o_proj"):
+            W = attn.o_proj.weight.data
+            dtype = W.dtype
+            W = W.to(torch.float64)
+            n_heads = W.shape[1] // self.head_dim
+            W_reshaped = W.reshape(W.shape[0], n_heads, self.head_dim)
+            W_reshaped = torch.einsum("ijk,kl->ijl", W_reshaped, R2)
+            attn.o_proj.weight.data = W_reshaped.reshape(W.shape).to(dtype)
+
+    def _rotate_layer_r4_fuse(self, layer: nn.Module, layer_idx: int) -> None:
+        """Fuse R4 rotation into a single layer's down_proj input side."""
+        r4_size = self.r4_rotation_size
+        use_random = self.config.random_r4
+        mlp = layer.mlp
+
+        if not hasattr(mlp, "down_proj"):
+            return
+
+        W = mlp.down_proj.weight.data
+        dtype = W.dtype
+
+        if use_random:
+            R4_matrix = getattr(self.model, "spinquant_R4_matrix", None)
+            if R4_matrix is None:
+                raise RuntimeError("[SpinQuant] random_r4=True but spinquant_R4_matrix buffer not found.")
+            R4 = R4_matrix.to(torch.float64)
+            W = W.to(torch.float64)
+            if r4_size == W.shape[1]:
+                mlp.down_proj.weight.data = (W @ R4).to(dtype)
+            else:
+                out_feat, in_feat = W.shape
+                n_blocks = in_feat // r4_size
+                W_reshaped = W.reshape(out_feat, n_blocks, r4_size)
+                W_reshaped = torch.einsum("ijk,kl->ijl", W_reshaped, R4)
+                mlp.down_proj.weight.data = W_reshaped.reshape(out_feat, in_feat).to(dtype)
+        else:
+            if r4_size == W.shape[1]:
+                mlp.down_proj.weight.data = matmul_hadU(W).to(dtype)
+            else:
+                out_feat, in_feat = W.shape
+                n_blocks = in_feat // r4_size
+                W_reshaped = W.reshape(out_feat, n_blocks, r4_size)
+                W_rotated = matmul_hadU(W_reshaped)
+                mlp.down_proj.weight.data = W_rotated.reshape(out_feat, in_feat).to(dtype)
+
+    def _rotate_layer_r3_hook(self, layer: nn.Module, layer_idx: int) -> None:
+        """Apply R3 monkeypatch to a single layer's attention module."""
+        if not is_pow2(self.head_dim):
+            return
+
+        from auto_round.algorithms.transforms.spinquant.monkeypatch import (
+            add_qk_rotation_after_rope,
+        )
+
+        attn = layer.self_attn
+        if not (hasattr(attn, "q_proj") and hasattr(attn, "k_proj")):
+            return
+        if getattr(attn, "_spinquant_r3_patched", False):
+            return  # Already patched (idempotent)
+
+        random_r3 = self.config.random_r3
+        r3_matrix = getattr(self.model, "spinquant_R3_head", None)
+
+        try:
+            wrapper = add_qk_rotation_after_rope(
+                attn, rope_function_name="apply_rotary_pos_emb"
+            )
+            if random_r3 and r3_matrix is not None:
+                wrapper.set_matrix(r3_matrix)
+            else:
+                wrapper.set_hadamard(None, self.head_dim)
+            attn._spinquant_r3_patched = True
+            self._hook_handles.append(("r3_monkeypatch", f"layer_{layer_idx}", attn, wrapper))
+        except ValueError as e:
+            logger.warning(f"[SpinQuant] R3 monkeypatch failed for layer {layer_idx}: {e}")
+
+    def _rotate_layer_r4_hook(self, layer: nn.Module, layer_idx: int, layer_device: torch.device) -> None:
+        """Register R4 forward_pre_hook on a single layer's down_proj."""
+        mlp = layer.mlp
+        if not hasattr(mlp, "down_proj"):
+            return
+
+        r4_size = self.r4_rotation_size
+        use_random = self.config.random_r4
+        need_block = r4_size < self.intermediate_size
+        module = mlp.down_proj
+
+        if use_random:
+            R4_matrix = getattr(self.model, "spinquant_R4_matrix", None)
+            if R4_matrix is None:
+                return
+            R4 = R4_matrix.to(device=layer_device, dtype=torch.float32)
+
+            def _make_hook(R, rot_size, block_mode):
+                def hook(mod, args):
+                    x = args[0]
+                    R_local = R.to(x.device, dtype=x.dtype)
+                    if block_mode:
+                        shape = x.shape
+                        x = x.reshape(*shape[:-1], -1, rot_size)
+                        x = (x @ R_local).reshape(shape)
+                    else:
+                        x = x @ R_local
+                    return (x,) + args[1:]
+                return hook
+
+            hook = _make_hook(R4, r4_size, need_block)
+        else:
+            try:
+                had_K_mat, had_K_val = get_hadamard_K(r4_size)
+            except ValueError:
+                return
+            had_K_mat = had_K_mat.to(device=layer_device, dtype=torch.float32)
+
+            def _make_hook_butterfly(had_mat, k_val, rot_size, block_mode):
+                def hook(mod, args):
+                    x = args[0]
+                    if block_mode:
+                        shape = x.shape
+                        x = x.reshape(*shape[:-1], -1, rot_size)
+                        x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                        x = x.reshape(shape)
+                    else:
+                        x = matmul_hadU(x, hadamard_K=had_mat.to(x.device), K=k_val)
+                    return (x,) + args[1:]
+                return hook
+
+            hook = _make_hook_butterfly(had_K_mat, had_K_val, r4_size, need_block)
+
+        hook._spinquant_hook = True
+        handle = module.register_forward_pre_hook(hook)
+        self._hook_handles.append(handle)
+
+    def finalize(self) -> None:
+        """Post-loop cleanup after all layers have been rotated layer-wise.
+
+        Mirrors :meth:`_cleanup` but for the layer-wise path.
+        """
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+        self.rotation_params.clear()
+        self.smooth_params.clear()
+        self._rotated_modules.clear()
+
+        n_r1 = len(self._r1_hook_handles)
+        n_other = len(self._hook_handles)
+        logger.info(
+            f"[SpinQuant] Layer-wise rotation finalized. "
+            f"Active hooks: {n_r1} R1 + {n_other} R3/R4."
+        )
+
     def _validate_dimensions(self) -> None:
         """Validate dimension requirements and disable rotations that can't work."""
         # R1: check r1_rotation_size divides hidden_size and is power of 2

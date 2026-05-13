@@ -101,7 +101,9 @@ class ZeroShotCompressor(BaseCompressor):
         convert_module_to_hp_if_necessary(block, self.model_context.amp_dtype, device)
         block = block.to(device)
 
-        self.quantizer.quantize_block(block)
+        # ── Block lifecycle: rotation + quantization ───────────────────────
+        with self._block_lifecycle(block, block_name=None, block_idx=0):
+            self.quantizer.quantize_block(block)
 
         # ── MoE scale alignment for FP8 dispatch efficiency ────────────────
         if is_nv_fp(self.quantizer.act_data_type) or is_static_wfp8afp8(self.quantizer):
@@ -156,6 +158,7 @@ class ZeroShotCompressor(BaseCompressor):
 
             all_blocks = self.quant_block_list or get_block_names(self.model)
             pbar = tqdm(range(sum(len(block) for block in all_blocks)))
+            block_idx = 0
             for block_names in all_blocks:
                 for block_name in block_names:
                     pbar.set_description(f"Quantizing {block_name}")
@@ -164,8 +167,9 @@ class ZeroShotCompressor(BaseCompressor):
                     # ── Infrastructure: materialize ───────────────────────────
                     materialize_model_(block)
 
-                    # ── Pure algorithm ────────────────────────────────────────
-                    self.quantizer.quantize_block(block)
+                    # ── Block lifecycle: rotation + quantization ───────────────
+                    with self._block_lifecycle(block, block_name, block_idx):
+                        self.quantizer.quantize_block(block)
 
                     # ── MoE scale alignment for FP8 dispatch efficiency ────────────────
                     if is_nv_fp(self.quantizer.act_data_type) or is_static_wfp8afp8(self.quantizer):
@@ -197,6 +201,11 @@ class ZeroShotCompressor(BaseCompressor):
                     clear_memory(device_list=self.device_list)
                     memory_monitor.log_summary()
                     pbar.update(1)
+                    block_idx += 1
+
+            # ── Block lifecycle: finalize layer-wise rotation ─────────────
+            self._finalize_block_processing(self.model)
+
             cnt = 1
             remain_layer_names = []
             block_name_set = set(name for block in all_blocks for name in block)

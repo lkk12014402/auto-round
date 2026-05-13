@@ -835,36 +835,40 @@ class CalibCompressor(BaseCompressor):
                     continue
                 add_hook_to_module(m, AlignDevicesHook(m.tuning_device, io_same_device=True), True)
 
-        # ── Infrastructure: collect reference output and act_max ──────────────
-        bs = self.quantizer.batch_size * self.quantizer.infer_bs_coeff
-        if q_input is None:
-            hook_handles = self.quantizer._register_act_max_hook(block)
-            reference_output = self.quantizer._get_block_outputs(block, input_ids, input_others, bs)
-            for h in hook_handles:
-                h.remove()
-        else:
-            reference_output = self.quantizer._get_block_outputs(block, input_ids, input_others, bs)
-            hook_handles = self.quantizer._register_act_max_hook(block)
-            if hook_handles:
-                self.quantizer._get_block_outputs(block, q_input, input_others, bs, save_output=False)
-            for h in hook_handles:
-                h.remove()
-            if input_ids is not q_input:
-                clear_memory(input_ids, device_list=self.compress_context.device_list)
+        # ── Block lifecycle: rotation + quantization ──────────────────────────
+        block_idx = getattr(self, "_current_block_idx", 0)
+        block_name = self.quant_block_list[0][0] if self.quant_block_list else ""
+        with self._block_lifecycle(block, block_name, block_idx):
+            # ── Infrastructure: collect reference output and act_max ──────────
+            bs = self.quantizer.batch_size * self.quantizer.infer_bs_coeff
+            if q_input is None:
+                hook_handles = self.quantizer._register_act_max_hook(block)
+                reference_output = self.quantizer._get_block_outputs(block, input_ids, input_others, bs)
+                for h in hook_handles:
+                    h.remove()
             else:
-                clear_memory(device_list=self.compress_context.device_list)
-            input_ids = q_input
+                reference_output = self.quantizer._get_block_outputs(block, input_ids, input_others, bs)
+                hook_handles = self.quantizer._register_act_max_hook(block)
+                if hook_handles:
+                    self.quantizer._get_block_outputs(block, q_input, input_others, bs, save_output=False)
+                for h in hook_handles:
+                    h.remove()
+                if input_ids is not q_input:
+                    clear_memory(input_ids, device_list=self.compress_context.device_list)
+                else:
+                    clear_memory(device_list=self.compress_context.device_list)
+                input_ids = q_input
 
-        # ── Pure algorithm: delegates to quantizer ────────────────────────────
-        mid_iter_mem_check = self.compress_context.low_gpu_mem_usage and card_0_in_high_risk
-        self.quantizer.quantize_block(
-            block,
-            input_ids,
-            input_others,
-            reference_output,
-            loss_device=loss_device,
-            mid_iter_mem_check=mid_iter_mem_check,
-        )
+            # ── Pure algorithm: delegates to quantizer ────────────────────────
+            mid_iter_mem_check = self.compress_context.low_gpu_mem_usage and card_0_in_high_risk
+            self.quantizer.quantize_block(
+                block,
+                input_ids,
+                input_others,
+                reference_output,
+                loss_device=loss_device,
+                mid_iter_mem_check=mid_iter_mem_check,
+            )
 
         # ── MoE scale alignment for FP8 dispatch efficiency ────────────────
         if is_nv_fp(self.quantizer.act_data_type) or is_static_wfp8afp8(self.quantizer):
@@ -970,39 +974,41 @@ class CalibCompressor(BaseCompressor):
                         continue
                     add_hook_to_module(_mod, AlignDevicesHook(_mod.tuning_device, io_same_device=True), True)
 
-            # ── Infrastructure: collect reference output and act_max ──────────
-            bs = self.quantizer.batch_size * self.quantizer.infer_bs_coeff
-            if q_input is None:
-                hook_handles = self.quantizer._register_act_max_hook(m)
-                reference_output = self.quantizer._get_block_outputs(m, input_ids, input_others, bs)
-                for h in hook_handles:
-                    h.remove()
-            else:
-                reference_output = self.quantizer._get_block_outputs(m, input_ids, input_others, bs)
-                hook_handles = self.quantizer._register_act_max_hook(m)
-                if hook_handles:
-                    self.quantizer._get_block_outputs(m, q_input, input_others, bs, save_output=False)
-                for h in hook_handles:
-                    h.remove()
-
-            # ── Infrastructure: swap q_input ──────────────────────────────────
-            if q_input is not None:
-                if input_ids is not q_input:
-                    clear_memory(input_ids, device_list=self.compress_context.device_list)
+            # ── Block lifecycle: rotation + quantization ──────────────────
+            with self._block_lifecycle(m, block_name_or_names, i):
+                # ── Infrastructure: collect reference output and act_max ──────
+                bs = self.quantizer.batch_size * self.quantizer.infer_bs_coeff
+                if q_input is None:
+                    hook_handles = self.quantizer._register_act_max_hook(m)
+                    reference_output = self.quantizer._get_block_outputs(m, input_ids, input_others, bs)
+                    for h in hook_handles:
+                        h.remove()
                 else:
-                    clear_memory(device_list=self.compress_context.device_list)
-                input_ids = q_input
+                    reference_output = self.quantizer._get_block_outputs(m, input_ids, input_others, bs)
+                    hook_handles = self.quantizer._register_act_max_hook(m)
+                    if hook_handles:
+                        self.quantizer._get_block_outputs(m, q_input, input_others, bs, save_output=False)
+                    for h in hook_handles:
+                        h.remove()
 
-            # ── Pure algorithm: delegates to quantizer ────────────────────────
-            mid_iter_mem_check = self.compress_context.low_gpu_mem_usage and card_0_in_high_risk
-            self.quantizer.quantize_block(
-                m,
-                input_ids,
-                input_others,
-                reference_output,
-                loss_device=loss_device,
-                mid_iter_mem_check=mid_iter_mem_check,
-            )
+                # ── Infrastructure: swap q_input ──────────────────────────────
+                if q_input is not None:
+                    if input_ids is not q_input:
+                        clear_memory(input_ids, device_list=self.compress_context.device_list)
+                    else:
+                        clear_memory(device_list=self.compress_context.device_list)
+                    input_ids = q_input
+
+                # ── Pure algorithm: delegates to quantizer ────────────────────
+                mid_iter_mem_check = self.compress_context.low_gpu_mem_usage and card_0_in_high_risk
+                self.quantizer.quantize_block(
+                    m,
+                    input_ids,
+                    input_others,
+                    reference_output,
+                    loss_device=loss_device,
+                    mid_iter_mem_check=mid_iter_mem_check,
+                )
 
             # ── MoE scale alignment for FP8 dispatch efficiency ────────────────
             if is_nv_fp(self.quantizer.act_data_type) or is_static_wfp8afp8(self.quantizer):
@@ -1052,6 +1058,9 @@ class CalibCompressor(BaseCompressor):
                         self._offloader(model, name, overwrite=True)
         if pbar is not None:
             pbar.update(1)
+
+        # ── Block lifecycle: finalize layer-wise rotation ─────────────────
+        self._finalize_block_processing(model)
 
         if not self.compress_context.is_immediate_saving:
             self.model = mv_module_from_gpu(self.model)
@@ -1411,6 +1420,7 @@ class CalibratedRTNCompressor(CalibCompressor):
 
         pbar = tqdm(range(sum(len(block) for block in all_blocks)))
 
+        block_idx = 0
         for block_names in all_blocks:
             first_block = block_names[0]
             inputs = all_inputs.pop(first_block)
@@ -1483,26 +1493,28 @@ class CalibratedRTNCompressor(CalibCompressor):
                 else:
                     block = block.to(self.compress_context.device)
 
-                # ── Infrastructure: register act_max hook and run forward pass ──
-                hook_handles = self.quantizer._register_act_max_hook(block)
-                input_ids = self.quantizer._get_block_outputs(
-                    block,
-                    input_ids,
-                    input_others,
-                    self.quantizer.batch_size * self.quantizer.infer_bs_coeff,
-                )
-                for h in hook_handles:
-                    h.remove()
+                # ── Block lifecycle: rotation + quantization ──────────────────
+                with self._block_lifecycle(block, block_name, block_idx):
+                    # ── Infrastructure: register act_max hook and run forward pass
+                    hook_handles = self.quantizer._register_act_max_hook(block)
+                    input_ids = self.quantizer._get_block_outputs(
+                        block,
+                        input_ids,
+                        input_others,
+                        self.quantizer.batch_size * self.quantizer.infer_bs_coeff,
+                    )
+                    for h in hook_handles:
+                        h.remove()
 
-                if len(self.compress_context.device_list) > 1:
-                    accelerate.hooks.remove_hook_from_submodules(block)
+                    if len(self.compress_context.device_list) > 1:
+                        accelerate.hooks.remove_hook_from_submodules(block)
 
-                if self.compress_context.low_gpu_mem_usage:
-                    block.to("cpu")
-                    self.compress_context.clear_memory()
+                    if self.compress_context.low_gpu_mem_usage:
+                        block.to("cpu")
+                        self.compress_context.clear_memory()
 
-                # ── Pure algorithm ────────────────────────────────────────────
-                self.quantizer.quantize_block(block)
+                    # ── Pure algorithm ────────────────────────────────────────
+                    self.quantizer.quantize_block(block)
 
                 # ── Infrastructure: cleanup ───────────────────────────────────
                 mv_module_from_gpu(block)
@@ -1516,7 +1528,12 @@ class CalibratedRTNCompressor(CalibCompressor):
 
                 memory_monitor.log_summary()
                 pbar.update(1)
+                block_idx += 1
         pbar.close()
+
+        # ── Block lifecycle: finalize layer-wise rotation ─────────────────
+        self._finalize_block_processing(self.model_context.model)
+
         # Process remaining layers not in blocks
         # Collect names of quantizable layers not belonging to any block
         remain_layer_names = []
