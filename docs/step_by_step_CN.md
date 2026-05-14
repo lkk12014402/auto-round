@@ -33,7 +33,9 @@
     - [lm_head 量化中开启多 GPU 标定](#lm_head-量化中开启多-gpu-标定)
     - [手动配置设备映射](#手动配置设备映射)
   + [超参数调整](#超参数调整)
-  + [Hadamard变换](#hadamard变换)
+  + [旋转（Rotation）](#旋转rotation)
+    - [QuaRot / SpinQuant](#quarot--spinquant)
+    - [逐线性层块旋转（实验性）](#逐线性层块旋转实验性)
 * [4 推理部署](#4-推理部署)
   + [CPU](#cpu)
   + [英特尔 GPU](#英特尔-gpu)
@@ -650,16 +652,13 @@ from auto_round import AutoRound
 from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
 
 # 仅 R1（速度快，良好的基准提升）
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True))
 
 # R1 + R2（更好，融合后无运行时开销）
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True, r2=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True))
 
 # R1 + R2 + R3 + R4（最佳精度，hook 带来少许运行时开销）
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
 ```
 
 ##### 字符串快捷方式
@@ -675,15 +674,16 @@ ar = AutoRound(model, scheme="MXFP4",
 
 ```python
 # 确定性（默认）：固定 Hadamard 矩阵，无需额外存储
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
 
 # 随机：H × diag(±1)，离群点抑制效果略好，需保存随机符号向量
-ar = AutoRound(model, scheme="MXFP4",
-               rotation_config=SpinQuantConfig(
-                   r1=True, r2=True, r3=True, r4=True,
-                   random_r1=True, random_r2=True,
-                   random_r3=True, random_r4=True))
+ar = AutoRound(
+    model,
+    scheme="MXFP4",
+    rotation_config=SpinQuantConfig(
+        r1=True, r2=True, r3=True, r4=True, random_r1=True, random_r2=True, random_r3=True, random_r4=True
+    ),
+)
 ```
 
 ##### 关键参数
@@ -706,6 +706,7 @@ ar.quantize_and_save(output_dir="./my_model", format="auto_round")
 
 # 加载（旋转 hook 自动恢复）
 from transformers import AutoModelForCausalLM
+
 model = AutoModelForCausalLM.from_pretrained("./my_model", device_map="auto")
 ```
 

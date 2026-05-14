@@ -367,7 +367,7 @@ def rotate_in_channels_(
 
     rot_size = R.shape[0]
     W_f64 = W.to(torch.float64)
-    R_f64 = R.to(torch.float64)
+    R_f64 = R.to(device=W.device, dtype=torch.float64)
 
     if W.shape[-1] == rot_size:
         # Full rotation: W_new = W @ R.T
@@ -420,7 +420,7 @@ def rotate_out_channels_(
 
     rot_size = R.shape[0]
     W_f64 = W.to(torch.float64)
-    R_f64 = R.to(torch.float64)
+    R_f64 = R.to(device=W.device, dtype=torch.float64)
 
     # output rotation: we need to rotate rows (output dim) of W
     # For block rotation, use W.T so rotation acts on the last dim,

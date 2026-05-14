@@ -548,13 +548,13 @@ class SpinQuantPreprocessor:
         if R2_head is None:
             return
 
-        R2 = R2_head.data.to(torch.float64)
-        R2_T = R2.t()
         attn = layer.self_attn
 
         if hasattr(attn, "v_proj"):
             W = attn.v_proj.weight.data
             dtype = W.dtype
+            R2 = R2_head.data.to(device=W.device, dtype=torch.float64)
+            R2_T = R2.t()
             W = W.to(torch.float64)
             n_heads = W.shape[0] // self.head_dim
             W_reshaped = W.reshape(n_heads, self.head_dim, W.shape[1])
@@ -564,6 +564,7 @@ class SpinQuantPreprocessor:
         if hasattr(attn, "o_proj"):
             W = attn.o_proj.weight.data
             dtype = W.dtype
+            R2 = R2_head.data.to(device=W.device, dtype=torch.float64)
             W = W.to(torch.float64)
             n_heads = W.shape[1] // self.head_dim
             W_reshaped = W.reshape(W.shape[0], n_heads, self.head_dim)
@@ -586,7 +587,7 @@ class SpinQuantPreprocessor:
             R4_matrix = getattr(self.model, "spinquant_R4_matrix", None)
             if R4_matrix is None:
                 raise RuntimeError("[SpinQuant] random_r4=True but spinquant_R4_matrix buffer not found.")
-            R4 = R4_matrix.to(torch.float64)
+            R4 = R4_matrix.to(device=W.device, dtype=torch.float64)
             W = W.to(torch.float64)
             if r4_size == W.shape[1]:
                 mlp.down_proj.weight.data = (W @ R4).to(dtype)
