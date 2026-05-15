@@ -68,6 +68,12 @@ launch 7 "meta-llama/Llama-3.1-8B-Instruct"  tuning
 #launch 1 "Qwen/Qwen3-0.6B"                   layerwise-tuning
 #launch 2 "Qwen/Qwen3-0.6B"                   layerwise-compare
 
+# ── Large model multi-GPU tests (uncomment to use) ───────────────────────────
+# For 32B/70B/122B models, use run_multi_gpu.sh instead:
+#   bash run_multi_gpu.sh --model 32b --mode quick
+#   bash run_multi_gpu.sh --model 70b --mode full
+#   GPUS_70B="0,1,2,3" bash run_multi_gpu.sh --model 70b
+
 echo ""
 echo "  All 6 jobs launched. PIDs: ${PIDS[*]}"
 echo "  Monitor: tail -f ${LOG_DIR}/<job>.log"

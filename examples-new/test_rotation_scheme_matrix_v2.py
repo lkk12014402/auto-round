@@ -68,6 +68,14 @@ Usage:
     python test_rotation_scheme_matrix_v2.py --device cuda:7 \\
         --rotation-sizes "16,32,64,128,auto" --rotations "R1,R1+R2+R3+R4"
 
+    # Multi-GPU for large models (32B/70B/122B):
+    python test_rotation_scheme_matrix_v2.py --device "0,1,2,3" \\
+        --model meta-llama/Llama-3.1-70B --rotations "R1,R1+R2+R3+R4"
+
+    # Multi-GPU with auto device mapping:
+    python test_rotation_scheme_matrix_v2.py --device auto \\
+        --model Qwen/Qwen2.5-32B --layerwise
+
     # Custom model:
     python test_rotation_scheme_matrix_v2.py --model meta-llama/Llama-3.2-1B
 """
@@ -158,11 +166,75 @@ DEFAULT_TASKS = "hellaswag,piqa,winogrande,lambada_openai,mmlu"
 # Core functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_model(model_name: str, device: str, dtype=torch.float16):
-    """Load a fresh model instance."""
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=dtype, trust_remote_code=True
-    ).to(device)
+def is_multi_gpu(device: str) -> bool:
+    """Check if device spec indicates multi-GPU usage.
+
+    Multi-GPU formats:
+      - "auto"       — accelerate auto device_map
+      - "0,1,2,3"   — explicit GPU list
+      - "0,1"       — two GPUs
+    Single-GPU formats:
+      - "cuda:0"    — single GPU
+      - "cuda"      — default GPU
+      - "cpu"       — CPU only
+    """
+    if device is None:
+        return False
+    device = str(device).strip()
+    if device == "auto":
+        return True
+    if "," in device:
+        return True
+    return False
+
+
+def get_primary_device(device: str) -> str:
+    """Get the primary device for single-tensor operations.
+
+    For multi-GPU: returns "cuda:0" (first GPU).
+    For single-GPU: returns the device as-is.
+    """
+    if not is_multi_gpu(device):
+        return device
+    device = str(device).strip()
+    if device == "auto":
+        return "cuda:0"
+    # "0,1,2,3" → "cuda:0"
+    first_gpu = device.split(",")[0].strip()
+    return f"cuda:{first_gpu}"
+
+
+def load_model(model_name: str, device: str, dtype=torch.float16,
+               for_eval_only: bool = False):
+    """Load a fresh model instance.
+
+    Args:
+        for_eval_only: If True, load for direct evaluation (not for AutoRound).
+            Multi-GPU models are loaded with device_map="auto".
+            If False (default), multi-GPU models stay on CPU for AutoRound to handle.
+
+    For multi-GPU (device="auto" or "0,1,2,3"):
+      - for_eval_only=True:  device_map="auto" (model distributed across GPUs)
+      - for_eval_only=False: stays on CPU (AutoRound dispatches internally)
+    For single-GPU (device="cuda:X"):
+      Loads to the specified device directly.
+    """
+    if is_multi_gpu(device):
+        if for_eval_only:
+            logger.info(f"  Loading model with device_map='auto' for evaluation...")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, trust_remote_code=True,
+                device_map="auto",
+            )
+        else:
+            logger.info(f"  Loading model to CPU (AutoRound will dispatch to multi-GPU)...")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, trust_remote_code=True,
+            )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=dtype, trust_remote_code=True
+        ).to(device)
     model.eval()
     return model
 
@@ -217,15 +289,28 @@ def evaluate_model(
     limit: int | None = None,
     device: str = "cuda:0",
 ) -> dict[str, float]:
-    """Evaluate model accuracy using lm_eval."""
+    """Evaluate model accuracy using lm_eval.
+
+    For multi-GPU: model is already distributed, HFLM uses it as-is.
+    For single-GPU: passes device to HFLM normally.
+    """
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size, device=device)
+    multi_gpu = is_multi_gpu(device)
+    primary_dev = get_primary_device(device)
+
+    if multi_gpu:
+        # Model is already distributed across GPUs via device_map="auto"
+        # HFLM will use model.device (the first device in the pipeline)
+        lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+    else:
+        lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size,
+                   device=primary_dev)
     task_list = [t.strip() for t in tasks.split(",")] if isinstance(tasks, str) else tasks
 
     results = simple_evaluate(
-        model=lm, tasks=task_list, batch_size=batch_size, limit=limit, device=device
+        model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
     )
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
@@ -242,15 +327,28 @@ def evaluate_model_from_path(
     limit: int | None = None,
     device: str = "cuda:0",
 ) -> dict[str, float]:
-    """Load a saved model from disk and evaluate using lm_eval."""
+    """Load a saved model from disk and evaluate using lm_eval.
+
+    For multi-GPU: uses parallelize=True so lm_eval distributes the model.
+    For single-GPU: loads to the specified device.
+    """
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
-    lm = HFLM(pretrained=model_path, batch_size=batch_size, device=device)
+    multi_gpu = is_multi_gpu(device)
+    primary_dev = get_primary_device(device)
+
+    if multi_gpu:
+        # Let lm_eval handle model parallelism via parallelize=True
+        lm = HFLM(pretrained=model_path, batch_size=batch_size,
+                   parallelize=True, device_map="auto")
+    else:
+        lm = HFLM(pretrained=model_path, batch_size=batch_size,
+                   device=primary_dev)
     task_list = [t.strip() for t in tasks.split(",")] if isinstance(tasks, str) else tasks
 
     results = simple_evaluate(
-        model=lm, tasks=task_list, batch_size=batch_size, limit=limit, device=device
+        model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
     )
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
@@ -370,7 +468,9 @@ def run_single_combination(
         ar.quantize()
         model = ar.model
         model.eval()
-        model.to(args.device)
+        # Only .to(device) for single-GPU; multi-GPU model is already distributed
+        if not is_multi_gpu(args.device):
+            model.to(args.device)
 
         pipeline_time = time.time() - t0
         result["setup_time_s"] = round(pipeline_time, 1)
@@ -494,7 +594,7 @@ def run_fp16_baseline(model_name: str, tokenizer, args) -> dict[str, Any]:
     t0 = time.time()
     model = None
     try:
-        model = load_model(model_name, args.device)
+        model = load_model(model_name, args.device, for_eval_only=True)
         metrics = evaluate_model(
             model, tokenizer, args.tasks,
             batch_size=args.batch_size, limit=args.limit, device=args.device,
@@ -1003,7 +1103,10 @@ Examples:
     parser.add_argument("--model", type=str, default="Qwen/Qwen3-0.6B",
                         help="Model name or path (default: Qwen/Qwen3-0.6B)")
     parser.add_argument("--device", type=str, default="cuda:7",
-                        help="Device (default: cuda:7)")
+                        help="Device specification. Single GPU: 'cuda:0'. "
+                             "Multi-GPU: '0,1,2,3' or 'auto'. "
+                             "Multi-GPU uses accelerate device_map for model parallelism. "
+                             "(default: cuda:7)")
 
     # Rotation config
     parser.add_argument("--rotations", type=str,

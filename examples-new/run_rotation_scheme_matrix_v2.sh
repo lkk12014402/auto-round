@@ -48,6 +48,8 @@
 #   bash run_rotation_scheme_matrix_v2.sh layerwise-tuning  # Block-wise + tuning
 #   bash run_rotation_scheme_matrix_v2.sh layerwise-compare # Full vs block-wise
 #   DEVICE=cuda:4 bash run_rotation_scheme_matrix_v2.sh full
+#   DEVICE="0,1,2,3" bash run_rotation_scheme_matrix_v2.sh full  # Multi-GPU
+#   DEVICE=auto bash run_rotation_scheme_matrix_v2.sh full       # All GPUs
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -e
@@ -56,6 +58,10 @@ cd "$(dirname "$0")"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # ── Configuration ────────────────────────────────────────────────────────────
+# DEVICE supports:
+#   Single GPU:  "cuda:6"      — use one specific GPU
+#   Multi-GPU:   "0,1,2,3"    — use multiple GPUs (accelerate device_map)
+#                "auto"        — use all available GPUs
 DEVICE="${DEVICE:-cuda:6}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 ROTATION_SIZE="${ROTATION_SIZE:-}"
