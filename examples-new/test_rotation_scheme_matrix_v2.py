@@ -204,11 +204,13 @@ def get_primary_device(device: str) -> str:
     return f"cuda:{first_gpu}"
 
 
-def load_model(model_name: str, device: str, dtype=torch.float16,
+def load_model(model_name: str, device: str, dtype=torch.bfloat16,
                for_eval_only: bool = False):
     """Load a fresh model instance.
 
     Args:
+        dtype: Model dtype. Default is bfloat16 which is safer for large models
+            (float16 can overflow in attention scores for 30B+ models).
         for_eval_only: If True, load for direct evaluation (not for AutoRound).
             Multi-GPU models are loaded with device_map="auto".
             If False (default), multi-GPU models stay on CPU for AutoRound to handle.
@@ -293,6 +295,9 @@ def evaluate_model(
 
     For multi-GPU: model is already distributed, HFLM uses it as-is.
     For single-GPU: passes device to HFLM normally.
+
+    Uses add_bos_token=True and softmax_dtype="float32" to match vLLM backend
+    precision and ensure correct logprob computation for models that require BOS.
     """
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
@@ -300,17 +305,19 @@ def evaluate_model(
     multi_gpu = is_multi_gpu(device)
     primary_dev = get_primary_device(device)
 
+    common_kwargs = dict(
+        pretrained=model, tokenizer=tokenizer, batch_size=batch_size,
+        add_bos_token=True, softmax_dtype="float32",
+    )
     if multi_gpu:
-        # Model is already distributed across GPUs via device_map="auto"
-        # HFLM will use model.device (the first device in the pipeline)
-        lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+        lm = HFLM(**common_kwargs)
     else:
-        lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size,
-                   device=primary_dev)
+        lm = HFLM(**common_kwargs, device=primary_dev)
     task_list = [t.strip() for t in tasks.split(",")] if isinstance(tasks, str) else tasks
 
     results = simple_evaluate(
         model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
+        gen_kwargs="max_gen_toks=2048",
     )
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
@@ -331,6 +338,9 @@ def evaluate_model_from_path(
 
     For multi-GPU: uses parallelize=True so lm_eval distributes the model.
     For single-GPU: loads to the specified device.
+
+    Uses dtype=bfloat16 (safer for large models), add_bos_token=True, and
+    softmax_dtype="float32" to match vLLM backend precision.
     """
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
@@ -338,17 +348,20 @@ def evaluate_model_from_path(
     multi_gpu = is_multi_gpu(device)
     primary_dev = get_primary_device(device)
 
+    common_kwargs = dict(
+        pretrained=model_path, batch_size=batch_size,
+        dtype="bfloat16", trust_remote_code=True,
+        add_bos_token=True, softmax_dtype="float32",
+    )
     if multi_gpu:
-        # Let lm_eval handle model parallelism via parallelize=True
-        lm = HFLM(pretrained=model_path, batch_size=batch_size,
-                   parallelize=True, device_map="auto")
+        lm = HFLM(**common_kwargs, parallelize=True)
     else:
-        lm = HFLM(pretrained=model_path, batch_size=batch_size,
-                   device=primary_dev)
+        lm = HFLM(**common_kwargs, device=primary_dev)
     task_list = [t.strip() for t in tasks.split(",")] if isinstance(tasks, str) else tasks
 
     results = simple_evaluate(
         model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
+        gen_kwargs="max_gen_toks=2048",
     )
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
@@ -580,7 +593,7 @@ def run_single_combination(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_fp16_baseline(model_name: str, tokenizer, args) -> dict[str, Any]:
-    """Run FP16 baseline evaluation (no rotation, no quantization)."""
+    """Run bf16 baseline evaluation (no rotation, no quantization)."""
     logger.info(f"\n{'='*70}")
     logger.info(f"  FP16 BASELINE (no rotation, no quantization)")
     logger.info(f"{'='*70}")

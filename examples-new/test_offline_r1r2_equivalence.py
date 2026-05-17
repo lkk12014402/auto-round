@@ -115,7 +115,7 @@ def evaluate_model_object(
 
     lm = HFLM(
         pretrained=model, tokenizer=tokenizer, batch_size=batch_size,
-        device=device, softmax_dtype=softmax_dtype,
+        device=device, softmax_dtype=softmax_dtype, add_bos_token=True,
     )
     task_list = [t.strip() for t in tasks.split(",")]
     results = simple_evaluate(model=lm, tasks=task_list, batch_size=batch_size,
@@ -139,7 +139,7 @@ def evaluate_model_from_path(
 
     lm = HFLM(
         pretrained=model_path, batch_size=batch_size, device=device,
-        softmax_dtype=softmax_dtype,
+        softmax_dtype=softmax_dtype, add_bos_token=True,
     )
     task_list = [t.strip() for t in tasks.split(",")]
     results = simple_evaluate(model=lm, tasks=task_list, batch_size=batch_size,

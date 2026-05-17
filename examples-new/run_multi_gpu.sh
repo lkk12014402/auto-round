@@ -123,10 +123,10 @@ get_mode_args() {
     local mode=$1
     case "$mode" in
         quick)
-            echo "--rotations 'none,R1,R1+R2,R1+R2+R3+R4' --schemes 'W4A16,MXFP4,NVFP4' --limit 100 --tasks 'hellaswag,piqa'"
+            echo "--rotations 'none,R1,R1+R2,R1+R2+R3+R4' --schemes 'W4A16' --limit 100 --tasks 'piqa'"
             ;;
         full)
-            echo "--rotations 'none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4' --schemes 'W4A16,MXFP4,NVFP4' --compare-random --save-load --tasks 'hellaswag,piqa,winogrande,lambada_openai'"
+            echo "--rotations 'none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4' --schemes 'W4A16' --compare-random --save-load --tasks 'piqa'"
             ;;
         layerwise)
             echo "--rotations 'none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4' --schemes 'W4A16,MXFP4,NVFP4' --layerwise --save-load --tasks 'hellaswag,piqa,winogrande,lambada_openai'"

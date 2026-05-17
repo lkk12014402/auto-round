@@ -88,7 +88,8 @@ def evaluate_model(model, tokenizer, tasks, batch_size=8, limit=None, device="cu
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size, device=device)
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size,
+              device=device, add_bos_token=True, softmax_dtype="float32")
     task_list = [t.strip() for t in tasks.split(",")] if isinstance(tasks, str) else tasks
     results = simple_evaluate(model=lm, tasks=task_list, batch_size=batch_size,
                               limit=limit, device=device)
@@ -100,7 +101,7 @@ def evaluate_model(model, tokenizer, tasks, batch_size=8, limit=None, device="cu
     return metrics
 
 
-def load_model(model_name, device, dtype=torch.float16):
+def load_model(model_name, device, dtype=torch.bfloat16):
     """Load a fresh model."""
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=dtype, trust_remote_code=True

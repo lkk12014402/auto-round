@@ -137,7 +137,8 @@ def evaluate_model_object(
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size, device=device)
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size,
+              device=device, add_bos_token=True, softmax_dtype="float32")
     task_list = [t.strip() for t in tasks.split(",")]
     results = simple_evaluate(model=lm, tasks=task_list, batch_size=batch_size,
                               limit=limit, device=device)
@@ -157,7 +158,8 @@ def evaluate_model_from_path(
     from lm_eval.evaluator import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
-    lm = HFLM(pretrained=model_path, batch_size=batch_size, device=device)
+    lm = HFLM(pretrained=model_path, batch_size=batch_size, device=device,
+              add_bos_token=True, softmax_dtype="float32")
     task_list = [t.strip() for t in tasks.split(",")]
     results = simple_evaluate(model=lm, tasks=task_list, batch_size=batch_size,
                               limit=limit, device=device)
@@ -298,7 +300,7 @@ def run_roundtrip(
         # ── Step 1: Load fresh model ──
         logger.info(f"  [1/5] Loading model: {model_name}")
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16, trust_remote_code=True
+            model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
         )
         model.eval()
 
@@ -371,7 +373,7 @@ def run_roundtrip(
             t_inmem = time.time()
 
             model2 = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=torch.float16, trust_remote_code=True
+                model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
             )
             model2.eval()
 

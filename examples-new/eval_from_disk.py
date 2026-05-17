@@ -52,6 +52,7 @@ def evaluate_model_from_path(
         batch_size=batch_size,
         device=device,
         softmax_dtype=softmax_dtype,
+        add_bos_token=True,
     )
     task_list = [t.strip() for t in tasks.split(",")]
     results = simple_evaluate(
