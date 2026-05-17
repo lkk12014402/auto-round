@@ -9,6 +9,20 @@ All use deterministic Hadamard rotation (no training).
 Auto-Round uses the pipeline API: AutoRound(rotation_config=SpinQuantConfig(...))
 which applies rotation automatically at Phase 4.5 before quantization.
 
+Frameworks:
+    autoround          — Auto-Round with R1 online (default, runtime hook)
+    autoround-offline  — Auto-Round with R1 offline (fused into weights)
+    quark              — AMD Quark
+    llmcompressor      — vLLM llm-compressor (R1 is always offline)
+
+R1 Online vs Offline:
+    Online:   R1 rotation applied via runtime hook during inference.
+              Model weights are partially rotated; hook completes the transform.
+    Offline:  R1 rotation fully fused into weights (embed, layernorm, linears).
+              No runtime hook — the rotated model is standalone.
+    llm-compressor always uses offline R1. To compare apples-to-apples,
+    use "autoround-offline" alongside "llmcompressor".
+
 Usage:
     # Quick test (limit=100):
     python test_three_way_comparison.py --device cuda:4 --limit 100
@@ -16,14 +30,23 @@ Usage:
     # Full eval:
     python test_three_way_comparison.py --device cuda:4
 
+    # Compare R1 offline: auto-round vs llm-compressor
+    python test_three_way_comparison.py --device cuda:4 \\
+        --frameworks autoround-offline,llmcompressor --rotations R1
+
+    # All four frameworks side by side:
+    python test_three_way_comparison.py --device cuda:4 \\
+        --frameworks autoround,autoround-offline,quark,llmcompressor
+
     # Specific rotation levels:
     python test_three_way_comparison.py --device cuda:4 --rotations R1,R1+R2+R3+R4
 
-    # Specific frameworks:
-    python test_three_way_comparison.py --device cuda:4 --frameworks autoround,llmcompressor
-
     # Auto-round only (no Quark/llm-compressor dependency):
     python test_three_way_comparison.py --device cuda:4 --frameworks autoround
+
+    # Compare online vs offline R1 in auto-round:
+    python test_three_way_comparison.py --device cuda:4 \\
+        --frameworks autoround,autoround-offline --rotations R1,R1+R2,R1+R2+R3+R4
 """
 
 import argparse
@@ -87,12 +110,17 @@ def load_model(model_name, device, dtype=torch.float16):
 
 # ── Auto-Round (pipeline API) ───────────────────────────────────────────────
 
-def run_autoround(model_name, tokenizer, rotation_flags, device, nsamples=128,
-                  seqlen=512, rotation_size=128):
-    """Apply rotation + MXFP4 quantization using auto-round pipeline API.
+def _run_autoround_impl(model_name, tokenizer, rotation_flags, device,
+                        nsamples=128, seqlen=512, rotation_size=128,
+                        online_r1=True):
+    """Core auto-round runner (shared by online/offline variants).
 
     Uses AutoRound(rotation_config=SpinQuantConfig(...)) so rotation is
     applied automatically at Phase 4.5 before quantization.
+
+    Args:
+        online_r1: If True, R1 is applied as an online hook (default).
+            If False, R1 is fused into weights offline (same as llm-compressor).
     """
     from auto_round import AutoRound
     from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
@@ -102,7 +130,7 @@ def run_autoround(model_name, tokenizer, rotation_flags, device, nsamples=128,
         rotation_config = SpinQuantConfig(
             **rotation_flags,
             rotation_size=rotation_size,
-            online_r1_rotation=True,
+            online_r1_rotation=online_r1,
             trainable_rotation=False,
             trainable_smooth=False,
         )
@@ -120,6 +148,30 @@ def run_autoround(model_name, tokenizer, rotation_flags, device, nsamples=128,
     ar.quantize()
     model = ar.model.eval().to(device)
     return model
+
+
+def run_autoround(model_name, tokenizer, rotation_flags, device, nsamples=128,
+                  seqlen=512, rotation_size=128):
+    """Auto-round with R1 online (default). R1 applied as runtime hook."""
+    return _run_autoround_impl(
+        model_name, tokenizer, rotation_flags, device,
+        nsamples=nsamples, seqlen=seqlen, rotation_size=rotation_size,
+        online_r1=True,
+    )
+
+
+def run_autoround_offline(model_name, tokenizer, rotation_flags, device,
+                          nsamples=128, seqlen=512, rotation_size=128):
+    """Auto-round with R1 offline. R1 fused into weights (like llm-compressor).
+
+    This modifies embed_tokens, lm_head, RMSNorm, and linear weights directly.
+    No runtime hook for R1 — the rotated model is standalone.
+    """
+    return _run_autoround_impl(
+        model_name, tokenizer, rotation_flags, device,
+        nsamples=nsamples, seqlen=seqlen, rotation_size=rotation_size,
+        online_r1=False,
+    )
 
 
 # ── Quark ───────────────────────────────────────────────────────────────────
@@ -321,6 +373,7 @@ def run_llmcompressor(model_name, tokenizer, rotation_flags, device, nsamples=12
 
 FRAMEWORK_RUNNERS = {
     "autoround": run_autoround,
+    "autoround-offline": run_autoround_offline,
     "quark": run_quark,
     "llmcompressor": run_llmcompressor,
 }
@@ -426,7 +479,25 @@ def print_comparison_table(all_results, tasks, model_name=""):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Three-Way Comparison: Auto-Round vs Quark vs llm-compressor (Rotation + MXFP4)"
+        description="Three-Way Comparison: Auto-Round vs Quark vs llm-compressor (Rotation + MXFP4)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Frameworks:
+  autoround          R1 online (runtime hook, default)
+  autoround-offline  R1 offline (fused into weights, like llm-compressor)
+  quark              AMD Quark (R1 online by default)
+  llmcompressor      vLLM llm-compressor (R1 always offline)
+
+Examples:
+  # Compare R1 offline implementations:
+  python test_three_way_comparison.py --frameworks autoround-offline,llmcompressor
+
+  # All four frameworks:
+  python test_three_way_comparison.py --frameworks autoround,autoround-offline,quark,llmcompressor
+
+  # Online vs offline R1 in auto-round:
+  python test_three_way_comparison.py --frameworks autoround,autoround-offline
+        """,
     )
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--tasks", default="piqa,hellaswag")
@@ -441,8 +512,8 @@ def main():
         help="Comma-separated rotation levels"
     )
     parser.add_argument(
-        "--frameworks", default="autoround,quark,llmcompressor",
-        help="Comma-separated frameworks to test"
+        "--frameworks", default="autoround,autoround-offline,quark,llmcompressor",
+        help="Comma-separated frameworks: autoround, autoround-offline, quark, llmcompressor"
     )
     parser.add_argument("--include-baselines", action="store_true",
                         help="Include MXFP4-only (no rotation) baseline per framework")
