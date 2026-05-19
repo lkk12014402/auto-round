@@ -319,6 +319,7 @@ def evaluate_model(
         model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
         gen_kwargs="max_gen_toks=2048",
     )
+    print("==results: ", results.get("results", {}))
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
         acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
@@ -363,6 +364,7 @@ def evaluate_model_from_path(
         model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
         gen_kwargs="max_gen_toks=2048",
     )
+    print("==results: ", results.get("results", {}))
     metrics = {}
     for task_name, task_results in results.get("results", {}).items():
         acc = task_results.get("acc,none") or task_results.get("acc_norm,none")
@@ -480,26 +482,43 @@ def run_single_combination(
         )
         ar.quantize()
         model = ar.model
-        model.eval()
-        # Only .to(device) for single-GPU; multi-GPU model is already distributed
-        if not is_multi_gpu(args.device):
-            model.to(args.device)
 
         pipeline_time = time.time() - t0
         result["setup_time_s"] = round(pipeline_time, 1)
         logger.info(f"  Pipeline (rotation+quantization) done in "
                     f"{pipeline_time:.1f}s")
 
-        # ── In-memory evaluation ──
-        logger.info(f"  Evaluating in-memory on tasks: {args.tasks}")
-        metrics = evaluate_model(
-            model, tokenizer, args.tasks,
-            batch_size=args.batch_size, limit=args.limit, device=args.device,
-        )
-        result["metrics"] = metrics
-        logger.info("  In-memory results:")
-        for task, acc in sorted(metrics.items()):
-            logger.info(f"    {task}: {acc:.4f}")
+        # ── In-memory evaluation (optional) ──
+        if not args.no_in_memory_eval:
+            model.eval()
+            if is_multi_gpu(args.device):
+                from accelerate import dispatch_model, infer_auto_device_map
+                from accelerate.utils import get_max_memory
+                no_split = list(getattr(model, "_no_split_modules", None) or [])
+                max_memory = get_max_memory()
+                # Reserve 20% headroom for activations / KV cache
+                max_memory = {k: int(v * 0.85) for k, v in max_memory.items()}
+                device_map = infer_auto_device_map(
+                    model, max_memory=max_memory,
+                    no_split_module_classes=no_split,
+                )
+                dispatch_model(model, device_map=device_map)
+                logger.info(f"  Model re-dispatched to multi-GPU for eval")
+            else:
+                model.to(args.device)
+
+            logger.info(f"  Evaluating in-memory on tasks: {args.tasks}")
+            metrics = evaluate_model(
+                model, tokenizer, args.tasks,
+                batch_size=args.batch_size, limit=args.limit, device=args.device,
+            )
+            result["metrics"] = metrics
+            logger.info("  In-memory results:")
+            for task, acc in sorted(metrics.items()):
+                logger.info(f"    {task}: {acc:.4f}")
+        else:
+            logger.info("  Skipping in-memory evaluation (--no-in-memory-eval)")
+            metrics = {}
 
         # ── Save/Load roundtrip ──
         if args.save_load:
@@ -529,34 +548,41 @@ def run_single_combination(
             )
             result["metrics_disk"] = metrics_disk
 
-            # Compare
-            match = True
-            max_diff = 0.0
-            avg_diff = 0.0
-            n_compared = 0
-            logger.info("  From-disk results:")
-            for task in sorted(set(list(metrics.keys())
-                                   + list(metrics_disk.keys()))):
-                mem_val = metrics.get(task)
-                disk_val = metrics_disk.get(task)
-                if mem_val is not None and disk_val is not None:
-                    diff = abs(mem_val - disk_val)
-                    status = "✓" if diff < 5e-3 else "✗"
-                    logger.info(f"    {task}: mem={mem_val:.4f} "
-                                f"disk={disk_val:.4f} diff={diff:.6f} "
-                                f"{status}")
-                    if diff >= 5e-3:
-                        match = False
-                    max_diff = max(max_diff, diff)
-                    avg_diff += diff
-                    n_compared += 1
-                else:
-                    logger.info(f"    {task}: mem={mem_val} disk={disk_val}")
-            result["roundtrip_match"] = match
-            result["roundtrip_max_diff"] = round(max_diff, 6)
-            result["roundtrip_avg_diff"] = (
-                round(avg_diff / n_compared, 6) if n_compared > 0 else 0.0
-            )
+            # When in-memory eval was skipped, use disk metrics as primary
+            if args.no_in_memory_eval:
+                result["metrics"] = metrics_disk
+                logger.info("  From-disk results (primary):")
+                for task, acc in sorted(metrics_disk.items()):
+                    logger.info(f"    {task}: {acc:.4f}")
+            else:
+                # Compare in-memory vs from-disk
+                match = True
+                max_diff = 0.0
+                avg_diff = 0.0
+                n_compared = 0
+                logger.info("  From-disk results:")
+                for task in sorted(set(list(metrics.keys())
+                                       + list(metrics_disk.keys()))):
+                    mem_val = metrics.get(task)
+                    disk_val = metrics_disk.get(task)
+                    if mem_val is not None and disk_val is not None:
+                        diff = abs(mem_val - disk_val)
+                        status = "✓" if diff < 5e-3 else "✗"
+                        logger.info(f"    {task}: mem={mem_val:.4f} "
+                                    f"disk={disk_val:.4f} diff={diff:.6f} "
+                                    f"{status}")
+                        if diff >= 5e-3:
+                            match = False
+                        max_diff = max(max_diff, diff)
+                        avg_diff += diff
+                        n_compared += 1
+                    else:
+                        logger.info(f"    {task}: mem={mem_val} disk={disk_val}")
+                result["roundtrip_match"] = match
+                result["roundtrip_max_diff"] = round(max_diff, 6)
+                result["roundtrip_avg_diff"] = (
+                    round(avg_diff / n_compared, 6) if n_compared > 0 else 0.0
+                )
 
             # Cleanup saved model
             if args.cleanup and save_dir and os.path.exists(save_dir):
@@ -1125,7 +1151,7 @@ Examples:
     parser.add_argument("--rotations", type=str,
                         default="none,R1,R1+R2,R1+R2+R3,R1+R2+R3+R4",
                         help="Comma-separated rotation levels (default includes all 5 levels)")
-    parser.add_argument("--rotation-size", type=int, default=None,
+    parser.add_argument("--rotation-size", type=int, default=128,
                         help="Custom rotation dimension. Rarely needed with v2 — known "
                              "Hadamard matrices handle most non-pow2 sizes (768, 1536, 3072, "
                              "5120, 7168, 11008, 14336). Only set if the preprocessor warns "
@@ -1191,6 +1217,11 @@ Examples:
                         help="Enable save/load roundtrip: save model to disk, "
                              "load back, evaluate from disk, compare with "
                              "in-memory results")
+    parser.add_argument("--no-in-memory-eval", action="store_true", default=False,
+                        help="Skip in-memory evaluation after quantization. "
+                             "Useful for large models where GPU memory is tight. "
+                             "When combined with --save-load, only from-disk "
+                             "evaluation is performed.")
     parser.add_argument("--compare-random", action="store_true", default=False,
                         help="Run each rotation combo twice (deterministic + "
                              "random Hadamard) for side-by-side comparison. "
@@ -1235,6 +1266,12 @@ def main():
         logger.error("--layerwise requires --online-r1 (default). "
                      "Offline R1 is incompatible with block-wise rotation.")
         sys.exit(1)
+
+    # --no-in-memory-eval without --save-load means no evaluation at all
+    if args.no_in_memory_eval and not args.save_load:
+        logger.warning("--no-in-memory-eval without --save-load: "
+                       "no evaluation will be performed. Adding --save-load.")
+        args.save_load = True
 
     # Resolve presets
     if args.full_matrix:
@@ -1358,6 +1395,7 @@ def main():
     logger.info(f"  Online R1:      {args.online_r1}")
     logger.info(f"  Layerwise:      {args.layerwise}")
     logger.info(f"  Save/Load:      {args.save_load}")
+    logger.info(f"  In-memory eval: {not args.no_in_memory_eval}")
     logger.info(f"  Compare random: {args.compare_random}")
     logger.info(f"  Seed:           {args.seed}")
     logger.info(f"  Output dir:     "

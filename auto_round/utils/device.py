@@ -1708,23 +1708,23 @@ class MemoryMonitor:
         for device in device_list:
             if str(device) == "cpu":
                 continue
-            if torch.cuda.is_available():
-                current_vram = torch.cuda.memory_reserved(device) / 1024**3  # GB
-                if device == "cuda":
-                    device = "0"
-            elif torch.xpu.is_available():
-                current_vram = torch.xpu.memory_reserved(device) / 1024**3  # GB
-                if device == "xpu":
-                    device = "0"
-            elif is_hpex_available():
-                try:
+            try:
+                if torch.cuda.is_available():
+                    current_vram = torch.cuda.memory_reserved(device) / 1024**3  # GB
+                    if device == "cuda":
+                        device = "0"
+                elif torch.xpu.is_available():
+                    current_vram = torch.xpu.memory_reserved(device) / 1024**3  # GB
+                    if device == "xpu":
+                        device = "0"
+                elif is_hpex_available():
                     current_vram = torch.hpu.memory_allocated(device) / 1024**3  # GB
-                except Exception:
-                    current_vram = 0.0
-                if device == "hpu":
-                    device = "0"
-            else:
-                return
+                    if device == "hpu":
+                        device = "0"
+                else:
+                    return
+            except (RuntimeError, ValueError):
+                continue
 
             device = str(device).split(":")[-1]
             if current_vram > 0:

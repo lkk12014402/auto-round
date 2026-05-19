@@ -42,6 +42,7 @@ def evaluate_model_from_path(
     limit: int | None = None,
     device: str = "cuda:0",
     softmax_dtype: str | None = "float32",
+    use_triton: bool = False,
 ) -> dict[str, float]:
     """Load a saved model from disk and evaluate using lm_eval."""
     from lm_eval.evaluator import simple_evaluate
@@ -54,6 +55,17 @@ def evaluate_model_from_path(
         softmax_dtype=softmax_dtype,
         add_bos_token=True,
     )
+
+    # Optionally patch MXFP4QuantLinear to use Triton fused GEMM
+    if use_triton:
+        try:
+            from auto_round.triton_kernels import patch_mxfp4_forward_triton
+            n = patch_mxfp4_forward_triton(lm._model)
+            logger.info(f"[Triton] Patched {n} MXFP4QuantLinear modules with fused Triton GEMM")
+        except Exception as e:
+            logger.warning(f"[Triton] Failed to patch: {e}. Falling back to default forward.")
+
+    print(lm._model)
     task_list = [t.strip() for t in tasks.split(",")]
     results = simple_evaluate(
         model=lm, tasks=task_list, batch_size=batch_size, limit=limit,
@@ -113,6 +125,8 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--no_softmax_fix", action="store_true",
                         help="Disable float32 softmax fix (default: enabled)")
+    parser.add_argument("--use_triton", action="store_true",
+                        help="Use Triton fused GEMM kernel for MXFP4 inference (faster)")
     args = parser.parse_args()
 
     softmax_dtype = None if args.no_softmax_fix else "float32"
@@ -135,6 +149,7 @@ def main():
             path, args.tasks,
             batch_size=args.batch_size, limit=args.limit,
             device=args.device, softmax_dtype=softmax_dtype,
+            use_triton=args.use_triton,
         )
         elapsed = time.time() - t0
         logger.info(f"Evaluation done in {elapsed:.1f}s")
