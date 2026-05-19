@@ -81,6 +81,12 @@ ROTATION_CONFIGS = {
         rotation_size=128,
         random_r1=False,
     ),
+    "R1_size32": dict(
+        r1=True, r2=False, r3=False, r4=False,
+        online_r1_rotation=True,
+        rotation_size=32,
+        random_r1=False,
+    ),
     "R1_random": dict(
         r1=True, r2=False, r3=False, r4=False,
         online_r1_rotation=True,
@@ -91,6 +97,24 @@ ROTATION_CONFIGS = {
         r1=True, r2=False, r3=False, r4=True,
         online_r1_rotation=True,
         rotation_size=128,
+        random_r1=False,
+    ),
+    "R1+R4_size32": dict(
+        r1=True, r2=False, r3=False, r4=True,
+        online_r1_rotation=True,
+        rotation_size=32,
+        random_r1=False,
+    ),
+    "R1+R2+R4_size128": dict(
+        r1=True, r2=True, r3=False, r4=True,
+        online_r1_rotation=True,
+        rotation_size=128,
+        random_r1=False,
+    ),
+    "R1+R2+R4_size32": dict(
+        r1=True, r2=True, r3=False, r4=True,
+        online_r1_rotation=True,
+        rotation_size=32,
         random_r1=False,
     ),
 }

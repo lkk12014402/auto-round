@@ -455,11 +455,21 @@ def _apply_rotation_from_buffer(
         had_K, K = getattr(module, cache_key)
         had_K = had_K.to(x.device)
 
+        # Butterfly algorithm accumulates error in low-precision dtypes (bf16/fp16).
+        # Upcast to float32 for computation, then cast back.
+        orig_dtype = x.dtype
+        if orig_dtype != torch.float32:
+            x = x.float()
+            had_K = had_K.float()
+
         if rot_size == in_features:
             x = matmul_hadU(x, hadamard_K=had_K, K=K)
         else:
             # Block rotation
             x = _apply_block_rotation_butterfly(x, had_K, K, rot_size)
+
+        if orig_dtype != torch.float32:
+            x = x.to(orig_dtype)
 
     elif rot_type in (ROTATION_TYPE_RANDOM, ROTATION_TYPE_TRAINED):
         # Full matrix stored in buffer
@@ -691,6 +701,13 @@ def _config_to_serializable(config: "SpinQuantConfig", model: nn.Module) -> dict
     """Convert SpinQuantConfig to a JSON-serializable dict with model info."""
     from auto_round.algorithms.transforms.spinquant.preprocessor import SpinQuantConfig
 
+    hidden_size = _get_hidden_size(model)
+    intermediate_size = _get_intermediate_size(model)
+
+    # Compute actual rotation sizes used
+    r1_rotation_size = config.rotation_size or hidden_size
+    r4_rotation_size = config.rotation_size or intermediate_size
+
     # Get relevant fields from config
     result = {
         "r1": config.r1,
@@ -706,9 +723,33 @@ def _config_to_serializable(config: "SpinQuantConfig", model: nn.Module) -> dict
         "trainable_rotation": config.trainable_rotation,
         # Model architecture info for reconstruction
         "head_dim": _get_head_dim(model),
-        "hidden_size": _get_hidden_size(model),
-        "intermediate_size": _get_intermediate_size(model),
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+        # Actual rotation sizes (computed from rotation_size or model dims)
+        "r1_rotation_size": r1_rotation_size if config.r1 else None,
+        "r4_rotation_size": r4_rotation_size if config.r4 else None,
     }
+
+    # Algorithm info for non-power-of-2 cases
+    if config.r1 and r1_rotation_size and not config.random_r1:
+        is_po2 = (r1_rotation_size & (r1_rotation_size - 1) == 0) and r1_rotation_size > 0
+        if not is_po2:
+            try:
+                _, K = get_hadamard_K(r1_rotation_size)
+                result["r1_hadamard_K"] = K
+            except (ValueError, ImportError):
+                pass
+    if config.r4 and r4_rotation_size and not config.random_r4:
+        is_po2 = (r4_rotation_size & (r4_rotation_size - 1) == 0) and r4_rotation_size > 0
+        if not is_po2:
+            try:
+                _, K = get_hadamard_K(r4_rotation_size)
+                result["r4_hadamard_K"] = K
+            except (ValueError, ImportError):
+                pass
+
+    # Note: algorithm identifier
+    result["algorithm"] = "spinquant"
     return result
 
 

@@ -530,19 +530,31 @@ x = x @ R
     "r1": true,
     "r2": true,
     "r3": false,
-    "r4": false,
+    "r4": true,
     "online_r1_rotation": true,
     "rotation_size": null,
     "random_r1": false,
     "random_r2": false,
+    "random_r4": false,
     "trainable_rotation": false,
     "head_dim": 128,
     "hidden_size": 1024,
     "intermediate_size": 3072,
+    "r1_rotation_size": 1024,
+    "r4_rotation_size": 3072,
+    "r4_hadamard_K": 12,
     "algorithm": "spinquant"
   }
 }
 ```
+
+**字段说明：**
+- `rotation_size`: 用户配置值（null 表示使用默认）
+- `r1_rotation_size`: 实际使用的 R1 旋转维度 = `rotation_size or hidden_size`
+- `r4_rotation_size`: 实际使用的 R4 旋转维度 = `rotation_size or intermediate_size`
+- `r4_hadamard_K`: 仅当 R4 旋转维度不是 power-of-2 时出现，记录 Hadamard 分解的 K 值
+  - 例如 3072 = 12 × 256，K=12 表示使用 [12×12] 基础 Hadamard + butterfly(256)
+- `r1_rotation_size` / `r4_rotation_size` 为 null 表示对应旋转未启用
 
 ### model.safetensors 结构
 
@@ -1081,6 +1093,38 @@ python test_rotation_scheme_matrix_v2.py
 2. **旋转矩阵内存** — 每层存储 [n, n] float16 矩阵，对大 hidden_size 模型(如 8192)可能占 ~50GB
 3. **Triton kernel 精度** — 使用 TF32 accumulation，不如 IEEE FP32 精确
 4. **TP 下旋转矩阵冗余** — 每个 rank 存完整矩阵（因为 ColumnParallel input 不分片）
+5. **R4 TP 限制** — full-size R4 旋转（rotation_size=intermediate_size）不支持 TP > 1，详见下方
+
+### R4 与 Tensor Parallelism (TP) 的兼容性
+
+**核心问题：** `down_proj` 是 RowParallelLinear，TP > 1 时输入被分片：
+
+```
+TP=1: input shape = [batch, seq, intermediate_size]         → full rotation OK
+TP=2: input shape = [batch, seq, intermediate_size / 2]     → full rotation FAILS
+TP=4: input shape = [batch, seq, intermediate_size / 4]     → full rotation FAILS
+```
+
+**原因：** 保存时 `spinquant_r4_size = intermediate_size`（如 18432），但 TP>1 推理时
+每个 rank 只看到 `intermediate_size/tp` 个元素。代码尝试用 `[18432, 18432]` 矩阵旋转
+长度为 `9216` 的向量 → reshape 失败。
+
+**R1 不受影响：** R1 作用在 ColumnParallelLinear（q/k/v/gate/up）的输入上，TP 下
+ColumnParallel 的输入是完整的 hidden_size（不分片），因此任意 TP 都安全。
+
+**解决方案：对 R4 使用 block rotation（rotation_size ≤ intermediate_size/tp）：**
+
+| rotation_size | TP=1 | TP=2 | TP=4 | TP=8 |
+|---------------|------|------|------|------|
+| 32            | ✅   | ✅   | ✅   | ✅   |
+| 128           | ✅   | ✅   | ✅   | ✅   |
+| 1024          | ✅   | ✅   | ✅   | 需验证整除性 |
+| None (full)   | ✅   | ❌   | ❌   | ❌   |
+
+约束公式：`(intermediate_size / tp) % rotation_size == 0`
+
+示例（Qwen3-32B, intermediate_size=18432）：
+- TP=4: 每 rank 有 4608 元素, 4608 % 128 = 0 ✓, 4608 % 32 = 0 ✓
 
 ### 未来优化方向
 
@@ -1088,6 +1132,7 @@ python test_rotation_scheme_matrix_v2.py
 2. **`fast_hadamard_transform` CUDA kernel** — 替代预计算矩阵，降为 O(n log n) 且省内存
 3. **CUTLASS MXFP4 GEMM** — SM89+ 上使用硬件加速的 `matmul_mxf4_bf16_tn`
 4. **与 vllm_ext 合并** — 统一为一个扩展，自动根据模型配置选择 rotation vs no-rotation 路径
+5. **TP-aware full-size R4** — 通过 all-gather 支持 full intermediate_size 旋转（通信开销大，需评估）
 
 ---
 
@@ -1110,6 +1155,93 @@ python test_rotation_scheme_matrix_v2.py
 **4. `c10::Half != c10::BFloat16`**
 - 原因: 旋转矩阵 dtype 与输入不匹配
 - 本插件已修复: `R = R.to(dtype=x.dtype)` 动态 cast
+
+**5. `AssertionError` in RowParallelLinear.weight_loader (R4 scalar shape)**
+- 原因: `spinquant_r4_type/size` 注册为 shape `()` 的 scalar，但 RowParallelLinear
+  的 weight_loader 会将 shape `()` reshape 为 `(1,)` 再做 assert
+- 修复: 注册 R4 scalar 为 shape `(1,)` 而非 `()`
+
+**6. R4 精度差 (non-power-of-2 维度如 3072)**
+- 原因: Hadamard butterfly 矩阵构建方式不一致（见下方详细说明）
+- 修复: `_build_full_hadamard()` 改用 `matmul_hadU(I)` 构建
+
+### Hadamard Butterfly 结构不一致问题（已修复）
+
+这是一个关键的数学正确性 bug，影响所有 **non-power-of-2 维度** 的 Hadamard 旋转。
+
+**背景：** 对 n=3072 (K=12, n/K=256)，Hadamard 矩阵由两部分组成：
+1. Butterfly 阶段：递归将维度从 n 降至 K
+2. K-block 阶段：应用 [K×K] Hadamard 基础矩阵
+
+**Bug：** `_build_full_hadamard`（旧版）和 `matmul_hadU`（save/hook 使用）的 butterfly
+操作使用了不同的索引排列方式：
+
+```python
+# matmul_hadU: interleaved even/odd (view as [n/2, 2])
+inp = inp.view(batch, n//2, 2, last_dim)
+output[:, :, 0, :] = inp[:, :, 0, :] + inp[:, :, 1, :]  # even indices
+output[:, :, 1, :] = inp[:, :, 0, :] - inp[:, :, 1, :]  # odd indices
+
+# 旧 _build_full_hadamard: first-half / second-half split
+B[start+i, start+i] = 1; B[start+i, start+half+i] = 1       # first half
+B[start+half+i, start+i] = 1; B[start+half+i, start+half+i] = -1  # second half
+```
+
+**影响：**
+- n 是 power-of-2（如 1024, K=1）：两种方式得到相同结果（误差 < 1e-6）
+- n 非 power-of-2（如 3072, K=12）：完全不同的矩阵（误差 ~ 5.0）
+
+**修复：** `_build_full_hadamard` 改为通过 `matmul_hadU(torch.eye(n))` 来构建显式矩阵，
+确保与 save 时 offline fuse 和 online hook 使用完全相同的 Hadamard 变换。
+
+```python
+def _build_full_hadamard(n: int, device: torch.device) -> torch.Tensor:
+    from auto_round.algorithms.transforms.spinquant.rotation_utils import matmul_hadU
+    I = torch.eye(n, device=device, dtype=torch.float32)
+    H = matmul_hadU(I)  # 等价于 I @ H = H
+    return H
+```
+
+**验证：** 修复后所有维度一致性误差 < 1e-5 (float32 精度限制)。
+
+### HF 推理 bfloat16 精度问题（已修复）
+
+**问题：** HF 推理端使用 butterfly 算法在 bfloat16 精度下计算 Hadamard，
+每次加减操作引入 ~0.4% 相对误差，经过 10 层 butterfly（n=1024=2^10）后
+累积 ~2% 相对误差，28 层 × 5 个 linear = 140 次旋转 → 精度严重恶化。
+
+**修复：** 在 `serialize.py` 的 `_apply_rotation_from_buffer()` 中，将输入上转为
+float32 执行 butterfly 计算，结果再转回 bfloat16：
+
+```python
+def _apply_rotation_from_buffer(module, x, prefix):
+    # Upcast for precision
+    x_f32 = x.float()
+    result = matmul_hadU(x_f32, ...)
+    return result.to(x.dtype)
+```
+
+### 插件日志输出
+
+vLLM 启动时，插件会输出详细的旋转配置信息：
+
+```
+INFO [register.py] [AutoRound] SpinQuant MXFP4 vLLM plugin loaded.
+  Capabilities: R1/R4 online rotation + MXFP4 dequant (R2 offline in weights)
+
+INFO [spinquant_mxfp4.py] [AutoRound] Model quantization: MXFP4 (group_size=32) |
+  Online rotations: [R1(online, hadamard, size=1024, power-of-2),
+                     R4(online, hadamard, size=3072, K=12 (non-power-of-2))] |
+  hidden_size=1024, intermediate_size=3072
+
+INFO [spinquant_mxfp4.py] [AutoRound] R4 rotation: size=3072
+  (non-power-of-2, K=12, using matmul_hadU butterfly)
+```
+
+日志说明：
+- **power-of-2**: 纯 Walsh-Hadamard butterfly（如 1024=2^10）
+- **non-power-of-2, K=N**: 使用 K×K Hadamard 基矩阵 + butterfly 组合（如 3072=12×256）
+- **R2(offline, fused into weights)**: R2 已经在保存时融入权重，推理时无需额外操作
 
 ### 验证方法
 
@@ -1151,6 +1283,8 @@ python test_rotation_scheme_matrix_v2.py
 ### 端到端精度评估
 
 ```bash
+# ═══ Qwen3-0.6B (快速验证，单卡) ═══
+
 # 一键运行全流程: save → vLLM eval → HF eval (per config)
 bash run.sh
 
@@ -1164,7 +1298,45 @@ bash eval_hf.sh ./rotated_models_Qwen3-0.6B/R1
 
 # 对比 HF vs vLLM 精度
 python compare_results.py --hf-dir ./lm_eval_results_hf --vllm-dir ./lm_eval_results_vllm
+
+
+# ═══ Qwen3-32B (完整评估，多卡) ═══
+
+# 全部 10 种配置 (4 卡推理)
+bash run_qwen3_32b.sh
+
+# 指定配置
+bash run_qwen3_32b.sh R1 R1+R4_size128
+
+# 自定义 GPU 配置
+SAVE_DEVICE=cuda:0 EVAL_GPUS=4,5,6,7 TP=4 bash run_qwen3_32b.sh
+
+# 用 2 卡
+EVAL_GPUS=0,1 TP=2 bash run_qwen3_32b.sh
+
+# 模型已保存，只跑评估
+SKIP_SAVE=1 bash run_qwen3_32b.sh
 ```
+
+**Qwen3-32B 测试矩阵：**
+
+| Config | R1 | R2 | R3 | R4 | rotation_size | TP-safe |
+|--------|----|----|----|----|---------------|---------|
+| R1 | ✓ | | | | 5120 (hidden) | ✅ |
+| R1+R2 | ✓ | ✓ | | | 5120 | ✅ |
+| R1+R2+R3 | ✓ | ✓ | ✓ | | 5120 | ⏭ skip vLLM |
+| R1_random | ✓ | | | | 5120 | ✅ |
+| R1_size32 | ✓ | | | | 32 | ✅ |
+| R1_size128 | ✓ | | | | 128 | ✅ |
+| R1+R4_size32 | ✓ | | | ✓ | 32 | ✅ |
+| R1+R4_size128 | ✓ | | | ✓ | 128 | ✅ |
+| R1+R2+R4_size32 | ✓ | ✓ | | ✓ | 32 | ✅ |
+| R1+R2+R4_size128 | ✓ | ✓ | | ✓ | 128 | ✅ |
+
+评测任务：`piqa, hellaswag, mmlu, gsm8k` 全集（无 limit）。
+
+**注意：** R4 使用 `rotation_size=32` 或 `128`（block rotation）以兼容 TP > 1。
+Full-size R4（rotation_size=intermediate_size）只能 TP=1 使用。
 
 ### 验证输出示例
 

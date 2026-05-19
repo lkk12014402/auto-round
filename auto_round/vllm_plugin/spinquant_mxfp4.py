@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vllm")
 
 # Rotation type constants (must match auto_round serialization)
 ROTATION_TYPE_HADAMARD = 0
@@ -112,7 +112,7 @@ class SpinQuantMXFP4Config(QuantizationConfig):
     def from_config(cls, config: dict[str, Any]) -> "SpinQuantMXFP4Config":
         """Parse from model's quantization_config."""
         sq_config = config.get("spinquant_config", {})
-        return cls(
+        instance = cls(
             bits=config.get("bits", 4),
             group_size=config.get("group_size", 32),
             online_r1=sq_config.get("online_r1_rotation", True),
@@ -126,6 +126,29 @@ class SpinQuantMXFP4Config(QuantizationConfig):
             head_dim=sq_config.get("head_dim", 128),
             intermediate_size=sq_config.get("intermediate_size", 0),
         )
+        # Log only active rotations for this specific model
+        active = []
+        if instance.online_r1:
+            r1_size = instance.rotation_size or instance.hidden_size
+            r1_detail = _describe_hadamard(instance.r1_type, r1_size)
+            active.append(f"R1(online, {r1_detail})")
+        if sq_config.get("r2", False):
+            active.append("R2(offline, fused into weights)")
+        if instance.online_r3:
+            r3_size = instance.head_dim
+            r3_detail = _describe_hadamard(instance.r3_type, r3_size)
+            active.append(f"R3(online, {r3_detail})")
+        if instance.online_r4:
+            r4_size = instance.rotation_size or instance.intermediate_size
+            r4_detail = _describe_hadamard(instance.r4_type, r4_size)
+            active.append(f"R4(online, {r4_detail})")
+        rot_str = ", ".join(active) if active else "none"
+        logger.info(
+            f"[AutoRound] Model quantization: MXFP{instance.bits} (group_size={instance.group_size}) | "
+            f"Online rotations: [{rot_str}] | "
+            f"hidden_size={instance.hidden_size}, intermediate_size={instance.intermediate_size}"
+        )
+        return instance
 
     @classmethod
     def override_quantization_method(
@@ -245,14 +268,17 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
 
         # R4 rotation metadata (for down_proj layers — MLP activation rotation)
         # Same structure as R1: type + size + optional matrix
+        # NOTE: Use shape (1,) instead of () for RowParallelLinear compatibility.
+        # RowParallelLinear.weight_loader reshapes scalar tensors from () to (1,)
+        # before the shape assertion check.
         spinquant_r4_type = Parameter(
-            torch.zeros((), dtype=torch.int32), requires_grad=False
+            torch.zeros(1, dtype=torch.int32), requires_grad=False
         )
         set_weight_attrs(spinquant_r4_type, {"ignore_warning": True} | extra_weight_attrs)
         layer.register_parameter("spinquant_r4_type", spinquant_r4_type)
 
         spinquant_r4_size = Parameter(
-            torch.zeros((), dtype=torch.int32), requires_grad=False
+            torch.zeros(1, dtype=torch.int32), requires_grad=False
         )
         set_weight_attrs(spinquant_r4_size, {"ignore_warning": True} | extra_weight_attrs)
         layer.register_parameter("spinquant_r4_size", spinquant_r4_size)
@@ -304,6 +330,18 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
         device = layer.weight_packed.device
 
         if rot_type == ROTATION_TYPE_HADAMARD:
+            is_po2 = (rot_size & (rot_size - 1) == 0) and rot_size > 0
+            if not is_po2:
+                try:
+                    _, K = get_hadamard_K(rot_size)
+                except (ValueError, ImportError):
+                    K = "?"
+                if not hasattr(self, f"_logged_{prefix}_non_po2"):
+                    logger.info(
+                        f"[AutoRound] {prefix.upper()} rotation: size={rot_size} "
+                        f"(non-power-of-2, K={K}, using matmul_hadU butterfly)"
+                    )
+                    setattr(self, f"_logged_{prefix}_non_po2", True)
             R = _build_full_hadamard(rot_size, device)
         elif rot_type in (ROTATION_TYPE_RANDOM, ROTATION_TYPE_TRAINED):
             if hasattr(layer, matrix_attr):
@@ -415,20 +453,58 @@ def get_hadamard_K(n: int) -> tuple[torch.Tensor, int]:
     )
 
 
+def _describe_hadamard(rot_type: str, size: int) -> str:
+    """Build a human-readable description of a rotation configuration.
+
+    Examples:
+        "hadamard, size=1024, power-of-2"
+        "hadamard, size=3072, K=12 (non-power-of-2)"
+        "random, size=1024"
+    """
+    if rot_type != "hadamard":
+        return f"{rot_type}, size={size}"
+    is_po2 = (size & (size - 1) == 0) and size > 0
+    if is_po2:
+        return f"hadamard, size={size}, power-of-2"
+    try:
+        _, K = get_hadamard_K(size)
+        return f"hadamard, size={size}, K={K} (non-power-of-2)"
+    except (ValueError, ImportError):
+        return f"hadamard, size={size}, non-power-of-2"
+
+
 def _build_full_hadamard(n: int, device: torch.device) -> torch.Tensor:
     """Build full [n, n] normalized Hadamard matrix on device.
 
     Called once at model load time, NOT in the forward path.
-    """
-    had_K, K = get_hadamard_K(n)
-    had_K = had_K.to(device=device, dtype=torch.float32)
 
-    # Build butterfly Hadamard as explicit matrix
+    Uses matmul_hadU applied to an identity matrix to guarantee the explicit
+    matrix is byte-identical to the butterfly algorithm used during save-time
+    offline fuse and online hooks. This is critical for non-power-of-2 dimensions
+    (e.g. 3072 with K=12) where the butterfly interleaving pattern differs from
+    a naive first-half/second-half split.
+    """
+    try:
+        from auto_round.algorithms.transforms.spinquant.rotation_utils import matmul_hadU
+        # matmul_hadU(X) computes X @ H (normalized) via butterfly algorithm.
+        # Applying it to the identity gives us the explicit H matrix.
+        I = torch.eye(n, device=device, dtype=torch.float32)
+        H = matmul_hadU(I)
+        return H
+    except ImportError:
+        pass
+
+    # Fallback for pure power-of-2 (K=1) when auto_round is not installed
+    if n & (n - 1) != 0:
+        raise ValueError(
+            f"Dimension {n} is not a power of 2. "
+            f"Install auto-round for full Hadamard support (non-power-of-2 dims)."
+        )
+    # Standard Walsh-Hadamard for power-of-2
     H = torch.eye(n, device=device, dtype=torch.float32)
     size = n
-    while size > K:
+    while size > 1:
         half = size // 2
-        # Construct butterfly matrix for this level
         B = torch.zeros(n, n, device=device, dtype=torch.float32)
         for start in range(0, n, size):
             for i in range(half):
@@ -438,12 +514,6 @@ def _build_full_hadamard(n: int, device: torch.device) -> torch.Tensor:
                 B[start + half + i, start + half + i] = -1.0
         H = B @ H
         size = half
-
-    # Apply H_K block-diagonally
-    if K > 1:
-        K_block = torch.block_diag(*[had_K for _ in range(n // K)])
-        H = K_block @ H
-
     H = H / math.sqrt(n)
     return H
 

@@ -21,5 +21,15 @@ Or simply import before using vLLM:
 
 def register():
     """Register the spinquant_mxfp4 quantization config with vLLM."""
+    import logging
+
+    logger = logging.getLogger("vllm")
     # Importing this module triggers @register_quantization_config decorator
     from auto_round.vllm_plugin.spinquant_mxfp4 import SpinQuantMXFP4Config  # noqa: F401
+    from auto_round.vllm_plugin._weight_loading_patch import apply_weight_loading_patch
+
+    apply_weight_loading_patch()
+    logger.info(
+        "[AutoRound] SpinQuant MXFP4 plugin registered. "
+        "Capabilities: R1/R4 online rotation, R2 offline (fused), MXFP4 quantization."
+    )
