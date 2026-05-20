@@ -35,6 +35,8 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
+from auto_round.vllm_plugin._mxfp4_qdq_ext import qdq_mxfp4 as _local_qdq_mxfp4
+
 logger = logging.getLogger("vllm")
 
 MXFP4_BLOCK_SIZE = 32
@@ -167,10 +169,17 @@ class SpinQuantMXFP4Config(QuantizationConfig):
             r4_detail = _describe_hadamard(instance.r4_type, r4_size)
             active.append(f"R4(online, {r4_detail})")
         rot_str = ", ".join(active) if active else "none"
+        # Describe the underlying GEMM library for the selected runtime backend
+        _gemm_lib_map = {
+            RUNTIME_BACKEND_PACKED_FUSED: "Triton fused kernel",
+            RUNTIME_BACKEND_QUARK_LIKE_DENSE: "cuBLAS (torch.nn.functional.linear)",
+            RUNTIME_BACKEND_PREUNPACK_FP8: "CUTLASS FP8 (vllm.cutlass_scaled_mm)",
+        }
+        gemm_lib = _gemm_lib_map.get(instance.runtime_backend, "unknown")
         logger.info(
             f"[AutoRound] Model quantization: MXFP{instance.bits} (group_size={instance.group_size}) | "
             f"Online rotations: [{rot_str}] | activation_qdq=enabled(even) | "
-            f"runtime_backend={instance.runtime_backend} | "
+            f"runtime_backend={instance.runtime_backend} ({gemm_lib}) | "
             f"hidden_size={instance.hidden_size}, intermediate_size={instance.intermediate_size}"
         )
         return instance
@@ -835,10 +844,23 @@ try:
 except ImportError:
     _vllm_ext_qdq_mxfp4 = None
 
-try:
-    from quark.torch.kernel import mx as _quark_mx
-except ImportError:
-    _quark_mx = None
+# Lazy import for Quark — avoids triggering JIT kernel compilation at import time.
+_quark_mx = None
+_quark_mx_loaded = False
+
+
+def _get_quark_mx():
+    """Lazily import quark.torch.kernel.mx on first use."""
+    global _quark_mx, _quark_mx_loaded
+    if _quark_mx_loaded:
+        return _quark_mx
+    _quark_mx_loaded = True
+    try:
+        from quark.torch.kernel import mx as _mod
+        _quark_mx = _mod
+    except ImportError:
+        _quark_mx = None
+    return _quark_mx
 
 try:
     from auto_round.triton_kernels.mxfp4_gemm import triton_mxfp4_gemm as _triton_mxfp4_gemm
@@ -849,17 +871,74 @@ except (ImportError, RuntimeError):
 
 
 def _spinquant_mxfp4_act_qdq_impl(x: torch.Tensor, group_size: int) -> torch.Tensor:
-    """QDQ the rotated activation to MXFP4 semantics before GEMM."""
+    """QDQ the rotated activation to MXFP4 semantics before GEMM.
+
+    Backend selection priority (unless overridden by AUTO_ROUND_MXFP4_QDQ_BACKEND):
+        local_ext > quark > vllm_ext > fallback
+    """
     if group_size <= 0 or x.shape[-1] % group_size != 0:
         raise ValueError(
             f"MXFP4 activation qdq requires the last dim to be divisible by group_size, "
             f"got shape={tuple(x.shape)}, group_size={group_size}"
         )
-    if group_size == MXFP4_BLOCK_SIZE and _quark_mx is not None and x.dtype in (torch.float16, torch.bfloat16):
-        return _quark_mx.qdq_mxfp4(x, scale_calculation_mode="even")
-    if group_size == MXFP4_BLOCK_SIZE and _vllm_ext_qdq_mxfp4 is not None:
+
+    forced_backend = os.environ.get("AUTO_ROUND_MXFP4_QDQ_BACKEND", "").lower().strip()
+    is_cuda_fp16_bf16 = x.is_cuda and x.dtype in (torch.float16, torch.bfloat16)
+    block_ok = group_size == MXFP4_BLOCK_SIZE
+
+    # --- forced backend selection ---
+    if forced_backend == "local_ext":
+        if block_ok and is_cuda_fp16_bf16:
+            local_out = _local_qdq_mxfp4(x, group_size)
+            if local_out is not None:
+                _log_qdq_backend("local_ext (forced)")
+                return local_out
+        logger.warning("Forced QDQ backend 'local_ext' unavailable, using fallback")
+        return _mxfp4_act_qdq_fallback(x, group_size)
+    if forced_backend == "quark":
+        quark = _get_quark_mx()
+        if block_ok and is_cuda_fp16_bf16 and quark is not None:
+            _log_qdq_backend("quark (forced)")
+            return quark.qdq_mxfp4(x, scale_calculation_mode="even")
+        logger.warning("Forced QDQ backend 'quark' unavailable, using fallback")
+        return _mxfp4_act_qdq_fallback(x, group_size)
+    if forced_backend == "vllm_ext":
+        if block_ok and _vllm_ext_qdq_mxfp4 is not None:
+            _log_qdq_backend("vllm_ext (forced)")
+            return _vllm_ext_qdq_mxfp4(x)
+        logger.warning("Forced QDQ backend 'vllm_ext' unavailable, using fallback")
+        return _mxfp4_act_qdq_fallback(x, group_size)
+    if forced_backend == "fallback":
+        _log_qdq_backend("fallback (forced)")
+        return _mxfp4_act_qdq_fallback(x, group_size)
+
+    # --- auto selection (priority: local_ext > quark > vllm_ext > fallback) ---
+    if block_ok and is_cuda_fp16_bf16:
+        local_out = _local_qdq_mxfp4(x, group_size)
+        if local_out is not None:
+            _log_qdq_backend("local_ext")
+            return local_out
+    if block_ok and is_cuda_fp16_bf16:
+        quark = _get_quark_mx()
+        if quark is not None:
+            _log_qdq_backend("quark")
+            return quark.qdq_mxfp4(x, scale_calculation_mode="even")
+    if block_ok and _vllm_ext_qdq_mxfp4 is not None:
+        _log_qdq_backend("vllm_ext")
         return _vllm_ext_qdq_mxfp4(x)
+    _log_qdq_backend("fallback (pytorch)")
     return _mxfp4_act_qdq_fallback(x, group_size)
+
+
+_qdq_backend_logged = False
+
+
+def _log_qdq_backend(name: str) -> None:
+    """Log QDQ backend selection once."""
+    global _qdq_backend_logged
+    if not _qdq_backend_logged:
+        logger.info("MXFP4 activation QDQ backend: %s", name)
+        _qdq_backend_logged = True
 
 
 def _spinquant_mxfp4_act_qdq_fake(x: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -874,7 +953,7 @@ def _spinquant_mxfp4_linear_impl(
     group_size: int,
 ) -> torch.Tensor:
     """Actual MXFP4 dequant + GEMM implementation."""
-    if _HAS_TRITON_MXFP4:
+    if _HAS_TRITON_MXFP4 and x.is_cuda:
         output = _triton_mxfp4_gemm(
             x.float(),
             weight_packed,

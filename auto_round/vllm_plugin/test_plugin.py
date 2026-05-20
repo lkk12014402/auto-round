@@ -213,6 +213,26 @@ def test_activation_qdq_matches_vllm_ext_reference():
     print(f"[PASS] Activation qdq matches vllm_ext reference (device={device})")
 
 
+def test_local_activation_qdq_kernel_matches_reference():
+    """Test the vendored local CUDA QDQ kernel against the PyTorch reference."""
+    from auto_round.vllm_plugin._mxfp4_qdq_ext import qdq_mxfp4 as local_qdq_mxfp4
+    from auto_round.vllm_plugin.spinquant_mxfp4 import _mxfp4_act_qdq_fallback
+
+    if not torch.cuda.is_available():
+        print("[SKIP] Local activation qdq kernel test requires CUDA")
+        return
+
+    x = torch.randn(7, 64, dtype=torch.bfloat16, device="cuda")
+    actual = local_qdq_mxfp4(x, 32)
+    if actual is None:
+        print("[SKIP] Local activation qdq kernel extension unavailable")
+        return
+    expected = _mxfp4_act_qdq_fallback(x, 32)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
+    print("[PASS] Local activation qdq kernel matches reference")
+
+
 def test_quark_like_dense_backend():
     """Test load-time dense backend preparation and forward path."""
     from auto_round.vllm_plugin.spinquant_mxfp4 import (

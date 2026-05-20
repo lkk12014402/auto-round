@@ -84,6 +84,122 @@ llm = LLM(model="path/to/model")
 
 ---
 
+## 推理性能调优
+
+### 推理流水线架构
+
+```
+input activation x
+    │
+    ├─ Step 1: R1/R4 online rotation (Hadamard butterfly / matrix matmul)
+    │
+    ├─ Step 2: Activation QDQ  ← 由 AUTO_ROUND_MXFP4_QDQ_BACKEND 控制
+    │     选择: local_ext | quark | vllm_ext | fallback
+    │
+    └─ Step 3: GEMM           ← 由 AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND 控制
+          选择: quark_like_dense | preunpack_fp8 | packed_fused
+          │
+          output
+```
+
+**两个环境变量独立控制不同阶段，互不冲突。**
+
+### 环境变量一览
+
+| 环境变量 | 作用 | 可选值 | 默认 |
+|---------|------|--------|------|
+| `AUTO_ROUND_MXFP4_QDQ_BACKEND` | Activation QDQ 实现选择 | `local_ext`, `quark`, `vllm_ext`, `fallback` | 自动（local_ext > quark > vllm_ext > fallback） |
+| `AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND` | GEMM 计算后端 | `quark_like_dense`, `preunpack_fp8`, `packed_fused` | `packed_fused` |
+| `AUTO_ROUND_DISABLE_LOCAL_MXFP4_QDQ` | 禁用本地 CUDA kernel 编译 | `1` | 未设置 |
+
+### Activation QDQ 后端详情
+
+| 后端 | 实现 | 说明 |
+|------|------|------|
+| `local_ext` | 本地 vendored CUDA kernel (`csrc/mxfp4_qdq/`) | 从 Quark MIT 源码迁移，JIT 编译，**最快** |
+| `quark` | `quark.torch.kernel.mx.qdq_mxfp4` | Quark 原生 C++ extension，需安装 Quark |
+| `vllm_ext` | `auto_round_extension.vllm_ext.mxfp4_qdq_utils` | PyTorch 实现，无 CUDA 依赖 |
+| `fallback` | 纯 PyTorch（plugin 内置） | 任何环境可用，最慢 |
+
+**性能对比** (NVIDIA L20, bf16, 256×4096):
+
+| 后端 | 延迟 | 相对 |
+|------|------|------|
+| local_ext | 0.013ms | 1.00x |
+| quark_cuda | 0.015ms | 1.12x |
+| vllm_ext | 0.179ms | 13.2x |
+| fallback | 0.236ms | 17.5x |
+
+> `local_ext` 和 `quark_cuda` 是同一份 CUDA kernel 源码，local_ext 略快因为 dispatch 路径更短（直接 pybind11 vs torch.library 包装）。
+
+### GEMM Runtime 后端详情
+
+| 后端 | 实现 | 说明 |
+|------|------|------|
+| `quark_like_dense` | 模型加载时将 MXFP4 packed weight 解量化为 dense bf16，推理时走 `torch.nn.functional.linear` → **cuBLAS GEMM** | 小 batch 最快，内存占用较高 |
+| `preunpack_fp8` | 模型加载时将 packed weight 解量化为 FP8 (E4M3)，推理时走 `vllm._custom_ops.cutlass_scaled_mm` → **CUTLASS FP8 scaled GEMM** | 大 batch 最快，需 FP8 硬件支持 (sm89+) |
+| `packed_fused` | 保持 packed uint8 weight，推理时走 Triton fused kernel（在 GEMM 内逐 tile 解量化） | 内存最省，但 Triton kernel 未充分优化 |
+
+**显存占用对比** (以 Qwen3-32B 为例, 约 32B 参数):
+
+| 后端 | 权重存储格式 | 单卡显存 (TP=1) | TP=4 每卡 | 说明 |
+|------|-------------|----------------|-----------|------|
+| `packed_fused` | uint8 packed (4bit 有效) + uint8 scale | ~16 GB | ~4 GB | 保持原始压缩格式 |
+| `preunpack_fp8` | FP8 E4M3 (8bit) + bf16 scale | ~32 GB | ~8 GB | 加载时解包为 FP8，删除 packed 原始存储 |
+| `quark_like_dense` | bf16 dense (16bit) | ~64 GB | ~16 GB | 加载时完全 dequant 为 bf16，删除 packed 原始存储 |
+
+> **注意**：`quark_like_dense` 和 `preunpack_fp8` 在模型加载后会 **释放** packed weight 和 scale（`del layer.weight_packed`），
+> 最终显存中只保留 dequant 后的 dense/FP8 weight。因此实际占用是 dequant 后的大小，不是叠加。
+
+**性能对比** (NVIDIA L20, bf16, N_out=4096):
+
+| 后端 | 1×4096 | 16×4096 | 256×4096 | 1024×4096 |
+|------|--------|---------|----------|-----------|
+| quark_like_dense | 0.054ms | **0.030ms** | 0.093ms | 0.324ms |
+| preunpack_fp8 | **0.035ms** | 0.035ms | **0.089ms** | **0.214ms** |
+| packed_fused | 0.226ms | 0.223ms | 0.560ms | 1.578ms |
+
+> cuBLAS GEMM 由 PyTorch 的 `torch.nn.functional.linear` 调用，底层走 NVIDIA cuBLAS 库。
+> CUTLASS FP8 GEMM 由 vLLM 封装的 `cutlass_scaled_mm` 调用，底层走 NVIDIA CUTLASS 库。
+
+### 推荐配置
+
+```bash
+# 最优性能（显存充足，如 TP=4 每卡 ≥16GB 空闲）
+export AUTO_ROUND_MXFP4_QDQ_BACKEND=local_ext
+export AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND=quark_like_dense
+
+# 性能/显存均衡（sm89+ GPU，如 L4/L40/H100）
+export AUTO_ROUND_MXFP4_QDQ_BACKEND=local_ext
+export AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND=preunpack_fp8
+
+# 极限省显存（性能最差，仅在显存极度受限时使用）
+export AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND=packed_fused
+```
+
+**选择建议：**
+- 显存充足 → `quark_like_dense`（GEMM 最快，代价是 4x 权重显存）
+- 显存有限但有 FP8 硬件 → `preunpack_fp8`（GEMM 接近最快，显存仅 2x）
+- 极限场景 → `packed_fused`（保持 4bit 压缩，但 Triton GEMM 慢 6-8x）
+
+### 性能 benchmark 工具
+
+```bash
+# 完整 benchmark（QDQ + runtime）
+python examples/benchmark_qdq_kernels.py
+
+# 只测 activation QDQ
+python examples/benchmark_qdq_kernels.py --mode qdq
+
+# 只测 GEMM runtime
+python examples/benchmark_qdq_kernels.py --mode runtime
+
+# 自定义 shape
+python examples/benchmark_qdq_kernels.py --shapes 256x4096,1024x25600 --iters 200
+```
+
+---
+
 ## 完整推理调用链
 
 ### Phase 1: 插件注册
@@ -370,6 +486,26 @@ vLLM 捕获 CUDA graphs 加速推理:
 │  next_token = sample(logits)                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+### Activation QDQ 实现来源
+
+当前 plugin 对 `torch.ops.auto_round.spinquant_mxfp4_act_qdq` 的自动选择优先级是：
+
+1. **本地 vendored CUDA kernel**（从 Quark 的 MIT-licensed MXFP4 QDQ kernel 迁入 `auto_round/vllm_plugin/csrc/mxfp4_qdq/`）
+2. **Quark kernel**（懒加载：仅在 local_ext 不可用时才 import，避免触发 Quark 的 import-time 编译）
+3. **`auto_round_extension.vllm_ext.qdq_mxfp4`**
+4. **纯 PyTorch fallback**
+
+可通过 `AUTO_ROUND_MXFP4_QDQ_BACKEND` 环境变量强制指定后端（详见"推理性能调优"章节）。
+
+首次选择后端时，plugin 会输出一条日志：
+```
+INFO: MXFP4 activation QDQ backend: local_ext
+```
+
+这意味着现在 vLLM plugin **不再需要依赖 Quark 才能拿到 Quark 同语义的 fast path**；只要本地 extension 编译成功，就会优先走 auto-round 自己 vendored 的 CUDA kernel。
 
 ---
 
