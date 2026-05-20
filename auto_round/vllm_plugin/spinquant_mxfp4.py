@@ -8,6 +8,7 @@ Supports:
   - R1 online rotation (Hadamard butterfly or full matrix) on q/k/v/gate/up
   - R4 online rotation (Hadamard butterfly or full matrix) on down_proj
   - R3 online rotation (Q/K after RoPE — head_dim rotation)
+  - MXFP4 activation QDQ after online rotation
   - MXFP4 packed weight dequant + GEMM (Triton fused kernel)
 
 Weight format (from auto-round):
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Any
 
 import torch
@@ -35,10 +37,28 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = logging.getLogger("vllm")
 
+MXFP4_BLOCK_SIZE = 32
+FP4_E2M1_MAX = 6.0
+F32_MIN_NORMAL = 2 ** (-126)
+
+RUNTIME_BACKEND_PACKED_FUSED = "packed_fused"
+RUNTIME_BACKEND_QUARK_LIKE_DENSE = "quark_like_dense"
+RUNTIME_BACKEND_PREUNPACK_FP8 = "preunpack_fp8"
+VALID_RUNTIME_BACKENDS = {
+    RUNTIME_BACKEND_PACKED_FUSED,
+    RUNTIME_BACKEND_QUARK_LIKE_DENSE,
+    RUNTIME_BACKEND_PREUNPACK_FP8,
+}
+
 # Rotation type constants (must match auto_round serialization)
 ROTATION_TYPE_HADAMARD = 0
 ROTATION_TYPE_RANDOM = 1
 ROTATION_TYPE_TRAINED = 2
+
+# Rotation runtime modes prepared once at load time.
+ROTATION_RUNTIME_NONE = 0
+ROTATION_RUNTIME_MATRIX = 1
+ROTATION_RUNTIME_HADAMARD = 2
 
 
 # =============================================================================
@@ -64,6 +84,7 @@ class SpinQuantMXFP4Config(QuantizationConfig):
         hidden_size: int = 0,
         head_dim: int = 128,
         intermediate_size: int = 0,
+        runtime_backend: str = RUNTIME_BACKEND_PACKED_FUSED,
     ) -> None:
         super().__init__()
         self.bits = bits
@@ -78,6 +99,7 @@ class SpinQuantMXFP4Config(QuantizationConfig):
         self.hidden_size = hidden_size
         self.head_dim = head_dim
         self.intermediate_size = intermediate_size
+        self.runtime_backend = runtime_backend
 
     def __repr__(self) -> str:
         parts = [
@@ -85,6 +107,7 @@ class SpinQuantMXFP4Config(QuantizationConfig):
             f"group_size={self.group_size}",
             f"online_r1={self.online_r1}",
             f"r1_type={self.r1_type}",
+            f"runtime_backend={self.runtime_backend}",
         ]
         if self.online_r4:
             parts.append(f"online_r4={self.online_r4}, r4_type={self.r4_type}")
@@ -125,6 +148,7 @@ class SpinQuantMXFP4Config(QuantizationConfig):
             hidden_size=sq_config.get("hidden_size", 0),
             head_dim=sq_config.get("head_dim", 128),
             intermediate_size=sq_config.get("intermediate_size", 0),
+            runtime_backend=_resolve_runtime_backend(config),
         )
         # Log only active rotations for this specific model
         active = []
@@ -145,7 +169,8 @@ class SpinQuantMXFP4Config(QuantizationConfig):
         rot_str = ", ".join(active) if active else "none"
         logger.info(
             f"[AutoRound] Model quantization: MXFP{instance.bits} (group_size={instance.group_size}) | "
-            f"Online rotations: [{rot_str}] | "
+            f"Online rotations: [{rot_str}] | activation_qdq=enabled(even) | "
+            f"runtime_backend={instance.runtime_backend} | "
             f"hidden_size={instance.hidden_size}, intermediate_size={instance.intermediate_size}"
         )
         return instance
@@ -173,7 +198,11 @@ class SpinQuantMXFP4Config(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "SpinQuantMXFP4LinearMethod | None":
         if isinstance(layer, LinearBase):
-            return SpinQuantMXFP4LinearMethod(self)
+            if self.runtime_backend == RUNTIME_BACKEND_QUARK_LIKE_DENSE:
+                return SpinQuantMXFP4QuarkLikeDenseLinearMethod(self)
+            if self.runtime_backend == RUNTIME_BACKEND_PREUNPACK_FP8:
+                return SpinQuantMXFP4PreunpackFP8LinearMethod(self)
+            return SpinQuantMXFP4PackedFusedLinearMethod(self)
         return None
 
 
@@ -183,7 +212,7 @@ class SpinQuantMXFP4Config(QuantizationConfig):
 
 
 class SpinQuantMXFP4LinearMethod(LinearMethodBase):
-    """Linear method implementing SpinQuant R1/R4 rotation + MXFP4 weight dequant + GEMM."""
+    """Base linear method implementing shared SpinQuant rotation handling."""
 
     def __init__(self, quant_config: SpinQuantMXFP4Config):
         self.quant_config = quant_config
@@ -200,6 +229,7 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
     ):
         output_size_per_partition = sum(output_partition_sizes)
         group_size = self.quant_config.group_size
+        layer.params_dtype = params_dtype
 
         # Packed MXFP4 weight: [N, K//2] uint8
         weight_packed = Parameter(
@@ -295,39 +325,49 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
         layer.register_parameter("spinquant_r4_matrix", spinquant_r4_matrix)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Pre-compute full rotation matrices for compile-friendly inference."""
+        """Prepare runtime rotation state once after checkpoint loading.
+
+        This mirrors Quark's exported online-R1 semantics:
+        - packed weights are already in their saved form and are never touched here
+        - only activation-side online rotation metadata/state is prepared
+        """
         # --- R1 rotation ---
         self._process_rotation(layer, prefix="r1")
         # --- R4 rotation ---
         self._process_rotation(layer, prefix="r4")
+        self._prepare_runtime_weight_backend(layer)
 
     def _process_rotation(self, layer: torch.nn.Module, prefix: str) -> None:
-        """Process rotation parameters for a given prefix (r1 or r4).
-
-        Builds the full rotation matrix from checkpoint metadata and stores
-        it as layer._<prefix>_rotation_matrix for use in apply().
-        """
+        """Prepare load-time rotation state for a given prefix (r1 or r4)."""
         type_attr = f"spinquant_{prefix}_type"
         size_attr = f"spinquant_{prefix}_size"
         matrix_attr = f"spinquant_{prefix}_matrix"
         result_attr = f"_{prefix}_rotation_matrix"
         rot_size_attr = f"_{prefix}_rot_size"
+        runtime_attr = f"_{prefix}_rotation_runtime"
+        hadamard_attr = f"_{prefix}_hadamard_K"
+        hadamard_factor_attr = f"_{prefix}_hadamard_factor"
+
+        setattr(layer, result_attr, None)
+        setattr(layer, rot_size_attr, 0)
+        setattr(layer, runtime_attr, ROTATION_RUNTIME_NONE)
+        setattr(layer, hadamard_attr, None)
+        setattr(layer, hadamard_factor_attr, 0)
 
         if not hasattr(layer, type_attr):
-            setattr(layer, result_attr, None)
             return
 
         rot_type = int(getattr(layer, type_attr).item())
         rot_size = int(getattr(layer, size_attr).item())
 
         if rot_size == 0:
-            setattr(layer, result_attr, None)
             # Free placeholder matrix
             if hasattr(layer, matrix_attr):
                 delattr(layer, matrix_attr)
             return
 
         device = layer.weight_packed.device
+        in_features = layer.weight_packed.shape[1] * 2
 
         if rot_type == ROTATION_TYPE_HADAMARD:
             is_po2 = (rot_size & (rot_size - 1) == 0) and rot_size > 0
@@ -342,7 +382,22 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
                         f"(non-power-of-2, K={K}, using matmul_hadU butterfly)"
                     )
                     setattr(self, f"_logged_{prefix}_non_po2", True)
-            R = _build_full_hadamard(rot_size, device)
+            hadamard_K, K = get_hadamard_K(rot_size)
+            hadamard_K = hadamard_K.to(device=device, dtype=torch.float32)
+            setattr(layer, rot_size_attr, rot_size)
+
+            if rot_size == in_features:
+                setattr(layer, runtime_attr, ROTATION_RUNTIME_HADAMARD)
+                setattr(layer, hadamard_attr, hadamard_K)
+                setattr(layer, hadamard_factor_attr, K)
+                R = None
+            elif in_features % rot_size == 0:
+                R = _build_block_hadamard(rot_size, hadamard_K, K, device)
+            else:
+                raise ValueError(
+                    f"{prefix.upper()} rotation_size={rot_size} is not compatible "
+                    f"with in_features={in_features}"
+                )
         elif rot_type in (ROTATION_TYPE_RANDOM, ROTATION_TYPE_TRAINED):
             if hasattr(layer, matrix_attr):
                 mat = getattr(layer, matrix_attr).data
@@ -369,12 +424,65 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
         if R is not None:
             setattr(layer, result_attr, R.to(torch.float16))
             setattr(layer, rot_size_attr, rot_size)
-        else:
-            setattr(layer, result_attr, None)
+            setattr(layer, runtime_attr, ROTATION_RUNTIME_MATRIX)
 
         # Free the original parameter to save memory
         if hasattr(layer, matrix_attr):
             delattr(layer, matrix_attr)
+
+    def _prepare_runtime_weight_backend(self, layer: torch.nn.Module) -> None:
+        """Prepare load-time weight representation for the selected runtime backend."""
+        backend = self.quant_config.runtime_backend
+        if backend == RUNTIME_BACKEND_PACKED_FUSED:
+            return
+
+        target_dtype = getattr(layer, "params_dtype", torch.bfloat16)
+        if backend == RUNTIME_BACKEND_QUARK_LIKE_DENSE:
+            weight_dense = _dequant_packed_mxfp4_weight(
+                layer.weight_packed.data,
+                layer.weight_scale.data,
+                self.quant_config.group_size,
+                target_dtype=target_dtype,
+            )
+            layer.register_parameter(
+                "weight_dense_qdq",
+                Parameter(weight_dense, requires_grad=False),
+            )
+            _clear_packed_weight_storage(layer)
+            return
+
+        if backend == RUNTIME_BACKEND_PREUNPACK_FP8:
+            weight_fp8, scale_bf16 = _preunpack_mxfp4_weight(
+                layer.weight_packed.data,
+                layer.weight_scale.data,
+                self.quant_config.group_size,
+            )
+            layer.register_parameter(
+                "weight_unpacked_fp8",
+                Parameter(weight_fp8, requires_grad=False),
+            )
+            layer.register_parameter(
+                "weight_scale_bf16",
+                Parameter(scale_bf16, requires_grad=False),
+            )
+            _clear_packed_weight_storage(layer)
+            return
+
+        raise ValueError(f"Unsupported SpinQuant runtime backend: {backend}")
+
+    def _prepare_activations(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+        """Apply online rotation and activation qdq before the backend-specific GEMM path."""
+        # Step 1: Apply R1 rotation (for q/k/v/gate/up layers)
+        if self.quant_config.online_r1:
+            x = self._apply_rotation(layer, x, prefix="r1")
+
+        # Step 2: Apply R4 rotation (for down_proj layers)
+        if self.quant_config.online_r4:
+            x = self._apply_rotation(layer, x, prefix="r4")
+
+        # Step 3: MXFP4 activation qdq (Quark/vllm-ext aligned)
+        x = torch.ops.auto_round.spinquant_mxfp4_act_qdq(x, self.quant_config.group_size)
+        return x
 
     def apply(
         self,
@@ -382,42 +490,40 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward: apply R1/R4 rotation + MXFP4 dequant + GEMM.
-
-        R1 applies to q/k/v/gate/up projections (ColumnParallel, input not sharded).
-        R4 applies to down_proj (RowParallel, input sharded by TP).
-        Both are compile-friendly matmuls with pre-computed matrices.
-        """
-        # Step 1: Apply R1 rotation (for q/k/v/gate/up layers)
-        if self.quant_config.online_r1:
-            x = self._apply_rotation(layer, x, "_r1_rotation_matrix", "_r1_rot_size")
-
-        # Step 2: Apply R4 rotation (for down_proj layers)
-        if self.quant_config.online_r4:
-            x = self._apply_rotation(layer, x, "_r4_rotation_matrix", "_r4_rot_size")
-
-        # Step 3: MXFP4 dequant + GEMM (custom op)
-        output = torch.ops.auto_round.spinquant_mxfp4_linear(
-            x, layer.weight_packed, layer.weight_scale, self.quant_config.group_size
-        )
-
-        if bias is not None:
-            output = output + bias
-        return output
+        """Compatibility dispatcher for direct instantiation in tests and local usage."""
+        backend = self.quant_config.runtime_backend
+        if backend == RUNTIME_BACKEND_QUARK_LIKE_DENSE:
+            return SpinQuantMXFP4QuarkLikeDenseLinearMethod(self.quant_config).apply(layer, x, bias)
+        if backend == RUNTIME_BACKEND_PREUNPACK_FP8:
+            return SpinQuantMXFP4PreunpackFP8LinearMethod(self.quant_config).apply(layer, x, bias)
+        return SpinQuantMXFP4PackedFusedLinearMethod(self.quant_config).apply(layer, x, bias)
 
     @staticmethod
     def _apply_rotation(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        matrix_attr: str,
-        size_attr: str,
+        prefix: str,
     ) -> torch.Tensor:
-        """Apply rotation if the layer has a pre-computed rotation matrix."""
+        """Apply a prepared rotation in the lightest available runtime form."""
+        runtime = getattr(layer, f"_{prefix}_rotation_runtime", ROTATION_RUNTIME_NONE)
+        rot_size = getattr(layer, f"_{prefix}_rot_size", 0)
+
+        if runtime == ROTATION_RUNTIME_HADAMARD:
+            hadamard_K = getattr(layer, f"_{prefix}_hadamard_K", None)
+            hadamard_factor = getattr(layer, f"_{prefix}_hadamard_factor", 0)
+            if hadamard_K is None or rot_size == 0:
+                return x
+            return matmul_hadU(
+                x,
+                hadamard_K=hadamard_K.to(device=x.device, dtype=x.dtype),
+                K=hadamard_factor,
+            ).to(x.dtype)
+
+        matrix_attr = f"_{prefix}_rotation_matrix"
         R = getattr(layer, matrix_attr, None)
         if R is None:
             return x
         R = R.to(dtype=x.dtype)
-        rot_size = getattr(layer, size_attr)
         in_features = x.shape[-1]
         if rot_size == in_features:
             return x @ R
@@ -426,20 +532,89 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
             x = x.reshape(*shape[:-1], -1, rot_size)
             return (x @ R).reshape(shape)
 
+    @staticmethod
+    def _apply_dense_linear(
+        weight: torch.Tensor,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run dense GEMM while keeping activation/output dtype stable."""
+        input_dtype = x.dtype
+        compute_dtype = weight.dtype
+        if x.dtype != compute_dtype:
+            x = x.to(compute_dtype)
+        if bias is not None and bias.dtype != compute_dtype:
+            bias = bias.to(compute_dtype)
+        output = torch.nn.functional.linear(x, weight, bias)
+        if output.dtype != input_dtype:
+            output = output.to(input_dtype)
+        return output
+
+
+class SpinQuantMXFP4PackedFusedLinearMethod(SpinQuantMXFP4LinearMethod):
+    """Packed low-bit runtime: activation qdq + fused weight dequant/GEMM."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = self._prepare_activations(layer, x)
+        output = torch.ops.auto_round.spinquant_mxfp4_linear(
+            x, layer.weight_packed, layer.weight_scale, self.quant_config.group_size
+        )
+        if bias is not None:
+            output = output + bias
+        return output
+
+
+class SpinQuantMXFP4QuarkLikeDenseLinearMethod(SpinQuantMXFP4LinearMethod):
+    """Dense runtime: load-time weight restore + activation qdq + F.linear."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = self._prepare_activations(layer, x)
+        return self._apply_dense_linear(layer.weight_dense_qdq, x, bias)
+
+
+class SpinQuantMXFP4PreunpackFP8LinearMethod(SpinQuantMXFP4LinearMethod):
+    """Pre-unpack runtime: load-time FP8 unpack + per-forward weight restore + F.linear."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = self._prepare_activations(layer, x)
+        weight_dense = _dequant_preunpacked_mxfp4_weight(
+            layer.weight_unpacked_fp8,
+            layer.weight_scale_bf16,
+            target_dtype=getattr(layer, "params_dtype", x.dtype),
+        )
+        return self._apply_dense_linear(weight_dense, x, bias)
+
 
 # =============================================================================
-# Hadamard utilities (used at load time only, not in forward path)
+# Hadamard utilities
 # =============================================================================
 
 
 try:
     from auto_round.algorithms.transforms.spinquant.rotation_utils import (
         get_hadamard_K as _auto_round_get_hadamard_K,
+        matmul_hadU as _auto_round_matmul_hadU,
     )
     _HAS_AUTO_ROUND_HAD = True
 except ImportError:
     _HAS_AUTO_ROUND_HAD = False
     _auto_round_get_hadamard_K = None
+    _auto_round_matmul_hadU = None
 
 
 def get_hadamard_K(n: int) -> tuple[torch.Tensor, int]:
@@ -451,6 +626,14 @@ def get_hadamard_K(n: int) -> tuple[torch.Tensor, int]:
     raise ValueError(
         f"Dimension {n} is not a power of 2. Install auto-round for full Hadamard support."
     )
+
+
+def matmul_hadU(X: torch.Tensor, hadamard_K: torch.Tensor | None = None, K: int | None = None) -> torch.Tensor:
+    """Apply the normalized Hadamard transform to the last dimension of X."""
+    if _auto_round_matmul_hadU is not None:
+        return _auto_round_matmul_hadU(X, hadamard_K=hadamard_K, K=K)
+    H = _build_full_hadamard(X.shape[-1], X.device).to(dtype=X.dtype)
+    return X @ H
 
 
 def _describe_hadamard(rot_type: str, size: int) -> str:
@@ -518,6 +701,23 @@ def _build_full_hadamard(n: int, device: torch.device) -> torch.Tensor:
     return H
 
 
+def _build_block_hadamard(
+    rotation_size: int,
+    hadamard_K: torch.Tensor,
+    K: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a normalized explicit Hadamard block for block-wise rotation."""
+    rot_mat = hadamard_K.to(device=device, dtype=torch.float32)
+    if rot_mat.shape[0] != rotation_size:
+        had_1, _ = get_hadamard_K(rotation_size // K)
+        rot_mat = torch.kron(
+            rot_mat.to(device="cpu", dtype=torch.float32),
+            had_1.to(device="cpu", dtype=torch.float32),
+        ).to(device=device)
+    return rot_mat / math.sqrt(rotation_size)
+
+
 def _generate_random_orthogonal(n: int, device: torch.device) -> torch.Tensor:
     """Generate a random orthogonal matrix [n, n] via QR decomposition.
 
@@ -531,9 +731,114 @@ def _generate_random_orthogonal(n: int, device: torch.device) -> torch.Tensor:
     return Q.to(device=device)
 
 
+def _resolve_runtime_backend(config: dict[str, Any]) -> str:
+    """Resolve runtime backend from env or config."""
+    sq_config = config.get("spinquant_config", {})
+    backend = (
+        os.getenv("AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND")
+        or sq_config.get("runtime_backend")
+        or config.get("runtime_backend")
+        or RUNTIME_BACKEND_PACKED_FUSED
+    )
+    if backend not in VALID_RUNTIME_BACKENDS:
+        raise ValueError(
+            f"Unsupported SpinQuant runtime backend {backend!r}. "
+            f"Expected one of {sorted(VALID_RUNTIME_BACKENDS)}."
+        )
+    return backend
+
+
+def _clear_packed_weight_storage(layer: torch.nn.Module) -> None:
+    """Drop packed-weight storage once an alternate runtime backend is prepared."""
+    if hasattr(layer, "weight_packed"):
+        del layer.weight_packed
+        layer.register_parameter("weight_packed", None)
+    if hasattr(layer, "weight_scale"):
+        del layer.weight_scale
+        layer.register_parameter("weight_scale", None)
+
+
+def _unpack_mxfp4_values(weight_packed: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+    """Unpack packed E2M1 MXFP4 values to unscaled floating-point values."""
+    N, K_half = weight_packed.shape
+    K = K_half * 2
+
+    low = (weight_packed & 0x0F).to(torch.int32)
+    high = ((weight_packed >> 4) & 0x0F).to(torch.int32)
+    unpacked = torch.stack([low, high], dim=-1).reshape(N, K)
+
+    e2m1_lut = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        dtype=torch.float32,
+        device=weight_packed.device,
+    )
+    sign = torch.where(unpacked >= 8, -1.0, 1.0)
+    mag_idx = unpacked & 0x07
+    abs_val = e2m1_lut[mag_idx]
+    return (abs_val * sign).to(target_dtype)
+
+
+def _e8m0_to_scale(weight_scale: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+    """Convert e8m0 exponents to floating-point scale values."""
+    return torch.pow(2.0, weight_scale.to(torch.int32).float() - 127.0).to(target_dtype)
+
+
+def _dequant_packed_mxfp4_weight(
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+    target_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Fully dequantize packed MXFP4 weights to a dense floating-point tensor."""
+    N, K_half = weight_packed.shape
+    K = K_half * 2
+    fp_values = _unpack_mxfp4_values(weight_packed, target_dtype=target_dtype)
+    scale_float = _e8m0_to_scale(weight_scale, target_dtype=target_dtype)
+    fp_values = fp_values.reshape(N, -1, group_size)
+    return (fp_values * scale_float.unsqueeze(-1)).reshape(N, K)
+
+
+def _preunpack_mxfp4_weight(
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert packed MXFP4 weight to an unpacked FP8+scale representation."""
+    fp_values = _unpack_mxfp4_values(weight_packed, target_dtype=torch.float32)
+    weight_fp8 = fp_values.to(torch.float8_e4m3fn)
+    scale_bf16 = _e8m0_to_scale(weight_scale, target_dtype=torch.bfloat16).reshape(-1, 1)
+    if group_size != MXFP4_BLOCK_SIZE:
+        raise ValueError(
+            f"preunpack_fp8 backend currently expects group_size={MXFP4_BLOCK_SIZE}, got {group_size}"
+        )
+    return weight_fp8, scale_bf16
+
+
+def _dequant_preunpacked_mxfp4_weight(
+    weight_fp8: torch.Tensor,
+    scale_bf16: torch.Tensor,
+    target_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequantize unpacked FP8+scale weights back to a dense tensor for GEMM."""
+    origin_shape = weight_fp8.shape
+    weight_fp8 = weight_fp8.reshape(-1, MXFP4_BLOCK_SIZE)
+    scale = scale_bf16.reshape(-1, 1).to(target_dtype)
+    return (weight_fp8.to(target_dtype) * scale).reshape(origin_shape)
+
+
 # =============================================================================
-# Custom Op: MXFP4 Linear (opaque to torch.compile, no graph break)
+# Custom Ops: MXFP4 activation QDQ + MXFP4 Linear
 # =============================================================================
+
+try:
+    from auto_round_extension.vllm_ext.mxfp4_qdq_utils import qdq_mxfp4 as _vllm_ext_qdq_mxfp4
+except ImportError:
+    _vllm_ext_qdq_mxfp4 = None
+
+try:
+    from quark.torch.kernel import mx as _quark_mx
+except ImportError:
+    _quark_mx = None
 
 try:
     from auto_round.triton_kernels.mxfp4_gemm import triton_mxfp4_gemm as _triton_mxfp4_gemm
@@ -541,6 +846,25 @@ try:
 except (ImportError, RuntimeError):
     _HAS_TRITON_MXFP4 = False
     _triton_mxfp4_gemm = None
+
+
+def _spinquant_mxfp4_act_qdq_impl(x: torch.Tensor, group_size: int) -> torch.Tensor:
+    """QDQ the rotated activation to MXFP4 semantics before GEMM."""
+    if group_size <= 0 or x.shape[-1] % group_size != 0:
+        raise ValueError(
+            f"MXFP4 activation qdq requires the last dim to be divisible by group_size, "
+            f"got shape={tuple(x.shape)}, group_size={group_size}"
+        )
+    if group_size == MXFP4_BLOCK_SIZE and _quark_mx is not None and x.dtype in (torch.float16, torch.bfloat16):
+        return _quark_mx.qdq_mxfp4(x, scale_calculation_mode="even")
+    if group_size == MXFP4_BLOCK_SIZE and _vllm_ext_qdq_mxfp4 is not None:
+        return _vllm_ext_qdq_mxfp4(x)
+    return _mxfp4_act_qdq_fallback(x, group_size)
+
+
+def _spinquant_mxfp4_act_qdq_fake(x: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Fake implementation for torch.compile tracing."""
+    return torch.empty_like(x)
 
 
 def _spinquant_mxfp4_linear_impl(
@@ -583,34 +907,60 @@ def _mxfp4_dequant_linear_fallback(
     group_size: int,
 ) -> torch.Tensor:
     """Pure PyTorch fallback for MXFP4 dequant + linear."""
-    N, K_half = weight_packed.shape
-    K = K_half * 2
-
-    # Unpack: low nibble = even cols, high nibble = odd cols
-    low = (weight_packed & 0x0F).to(torch.int32)
-    high = ((weight_packed >> 4) & 0x0F).to(torch.int32)
-    unpacked = torch.stack([low, high], dim=-1).reshape(N, K)
-
-    # E2M1 decode
-    E2M1_LUT = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
-        dtype=torch.float32, device=x.device,
+    w_dequant = _dequant_packed_mxfp4_weight(
+        weight_packed,
+        weight_scale,
+        group_size,
+        target_dtype=x.dtype,
     )
-    sign = torch.where(unpacked >= 8, -1.0, 1.0)
-    mag_idx = unpacked & 0x07
-    abs_val = E2M1_LUT[mag_idx]
-    fp_values = (abs_val * sign).to(x.dtype)
-
-    # Apply scale
-    scale_float = torch.pow(
-        2.0,
-        weight_scale.to(torch.int32).float() - 127.0,
-    ).to(x.dtype)
-    fp_values = fp_values.reshape(N, -1, group_size)
-    scale_float = scale_float.unsqueeze(-1)
-    w_dequant = (fp_values * scale_float).reshape(N, K)
-
     return torch.nn.functional.linear(x, w_dequant, None)
+
+
+def _mxfp4_act_qdq_fallback(x: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Pure PyTorch MXFP4 QDQ fallback aligned with Quark/vllm-ext even mode."""
+    if group_size <= 0 or x.shape[-1] % group_size != 0:
+        raise ValueError(
+            f"MXFP4 activation qdq requires the last dim to be divisible by group_size, "
+            f"got shape={tuple(x.shape)}, group_size={group_size}"
+        )
+
+    original_dtype = x.dtype
+    original_shape = x.shape
+    x_fp32 = x.to(torch.float32).reshape(-1, group_size)
+
+    sign = x_fp32.sign()
+    x_abs = x_fp32.abs()
+    amax = x_abs.amax(dim=-1, keepdim=True)
+
+    # Match Quark's "even" scale mode: round the max value before extracting the exponent.
+    rounded_bits = (amax.contiguous().view(torch.int32) + 0x200000) & 0x7F800000
+    rounded_max = rounded_bits.view(torch.float32)
+    safe_max = torch.where(rounded_max > 0, rounded_max, torch.full_like(rounded_max, F32_MIN_NORMAL))
+
+    scale_exp = torch.floor(torch.log2(safe_max)) - 2.0
+    scale_exp = torch.clamp(scale_exp, min=-127, max=127)
+    scale = torch.pow(2.0, scale_exp)
+    scale = torch.where(torch.isfinite(scale) & (scale > 0), scale, torch.ones_like(scale))
+
+    x_scaled = x_abs / scale
+    x_fp4 = _fp4_121_positive(x_scaled).clamp(max=FP4_E2M1_MAX)
+    x_qdq = (sign * x_fp4 * scale).reshape(original_shape)
+    return x_qdq.to(original_dtype)
+
+
+def _fp4_121_positive(x: torch.Tensor) -> torch.Tensor:
+    """Round positive values to the E2M1 FP4 grid."""
+    half_step = torch.round(2.0 * x) / 2.0
+    unit_step = torch.round(x)
+    two_step = 2.0 * torch.round(x / 2.0)
+
+    below_two = x < 2.0
+    below_four = x < 4.0
+    return (
+        half_step * below_two
+        + unit_step * (~below_two) * below_four
+        + two_step * (~below_two) * (~below_four)
+    )
 
 
 # Register custom op with vLLM's library system
@@ -619,6 +969,15 @@ from vllm.platforms import current_platform
 
 # Create our own library for the custom op
 _auto_round_lib = torch.library.Library("auto_round", "DEF")
+
+direct_register_custom_op(
+    op_name="spinquant_mxfp4_act_qdq",
+    op_func=_spinquant_mxfp4_act_qdq_impl,
+    mutates_args=[],
+    fake_impl=_spinquant_mxfp4_act_qdq_fake,
+    target_lib=_auto_round_lib,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 direct_register_custom_op(
     op_name="spinquant_mxfp4_linear",

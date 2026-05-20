@@ -239,42 +239,30 @@ Qwen2Model.load_weights(weights) 中处理 per-layer 权重:
 
 注意: o_proj 和 down_proj 的 spinquant_r1_type/size 在 safetensors 中不存在
       → create_weights 创建的参数保持默认值 0
-      → process_weights_after_loading 检测到 rot_size=0 → _rotation_matrix=None
+      → process_weights_after_loading 检测到 rot_size=0
+      → _r1_rotation_runtime = NONE, _r1_rotation_matrix = None
       → apply() 不执行旋转 (正确行为: 这些层不需要 R1 旋转)
 ```
 
-### Phase 5: 权重后处理（关键步骤）
+### Phase 5: 加载后旋转状态准备（关键步骤）
 
 ```
 method.process_weights_after_loading(layer)
   └─ rot_type = layer.spinquant_r1_type.item() = 0 (HADAMARD)
   └─ rot_size = layer.spinquant_r1_size.item() = 1024
 
-  └─ _build_full_hadamard(n=1024, device=cuda)
-       │
-       │  ┌─────────────────────────────────────────────────┐
-       │  │ 在 load time 构建完整 [1024, 1024] Hadamard 矩阵  │
-       │  │                                                  │
-       │  │ 1. get_hadamard_K(1024) → (H_K=[1×1], K=1)     │
-       │  │    (1024 = 2^10, 纯 power-of-2)                 │
-       │  │                                                  │
-       │  │ 2. Butterfly 展开:                               │
-       │  │    H = I(1024)                                   │
-       │  │    for level in [512, 256, 128, ..., 1]:         │
-       │  │      B = butterfly_matrix(n=1024, size=level)    │
-       │  │      H = B @ H                                   │
-       │  │                                                  │
-       │  │ 3. 归一化: H = H / sqrt(1024)                    │
-       │  │                                                  │
-       │  │ 结果: 正交矩阵, H @ H^T = I                      │
-       │  └─────────────────────────────────────────────────┘
-       │
-  └─ layer._rotation_matrix = H.to(float16)   # [1024, 1024] 缓存
-  └─ layer._rot_size = 1024
+  └─ get_hadamard_K(1024) → (hadamard_K=[1×1], K=1)
+  └─ 因为 rot_size == in_features:
+       layer._r1_rotation_runtime = HADAMARD
+       layer._r1_hadamard_K = hadamard_K
+       layer._r1_hadamard_factor = K
+       layer._r1_rotation_matrix = None
+       layer._r1_rot_size = 1024
 
-  注意: 这一步只在模型加载时执行一次。
-  将 O(n log n) 的 butterfly 算法"展开"为 [n, n] 矩阵，
-  后续推理只需 x @ R 一次 matmul，可被 torch.compile 编译和 CUDA graph 捕获。
+  注意:
+  1. 这一步只在模型加载时执行一次
+  2. 这里只准备 online rotation 的 runtime state，不会修改 layer.weight_packed
+  3. full-size Hadamard 不再展开成 [n, n] 显式矩阵，而是 forward 时走 butterfly
 ```
 
 ### Phase 6: torch.compile 编译
@@ -288,7 +276,8 @@ vLLM v1 默认使用 fullgraph=True 编译:
     │  对于 qkv_proj.forward → quant_method.apply(layer, x, bias):
     │    - x @ R.to(dtype=x.dtype)
     │        → 编译为 aten.mm (cuBLAS 高效 matmul)
-    │    - torch.ops.auto_round.spinquant_mxfp4_linear(x, w_packed, w_scale, 32)
+    │    - torch.ops.auto_round.spinquant_mxfp4_act_qdq(x, 32)
+    │    - torch.ops.auto_round.spinquant_mxfp4_linear(x_qdq, w_packed, w_scale, 32)
     │        → 编译器看到已注册的 custom op，用 fake_impl 推导输出 shape/dtype
     │        → 不展开内部实现，作为不透明节点插入计算图
     │    - output + bias
@@ -343,13 +332,17 @@ vLLM 捕获 CUDA graphs 加速推理:
 │    │    │ apply(layer, x=[B,1,1024], bias=None)        │     │   │
 │    │    │                                              │     │   │
 │    │    │ Step 1: R1 Rotation                          │     │   │
-│    │    │   R = layer._rotation_matrix  [1024,1024]    │     │   │
-│    │    │   x_rot = x @ R.to(bfloat16)                 │     │   │
-│    │    │   → cuBLAS gemm (在 CUDA graph 中重放)       │     │   │
+│    │    │   full-size Hadamard:                        │     │   │
+│    │    │     x_rot = matmul_hadU(x, hadamard_K, K)    │     │   │
+│    │    │   random/trained/block:                      │     │   │
+│    │    │     x_rot = x @ R                            │     │   │
 │    │    │                                              │     │   │
-│    │    │ Step 2: MXFP4 Dequant + GEMM                │     │   │
+│    │    │ Step 2: MXFP4 Activation QDQ                │     │   │
+│    │    │   x_qdq = qdq_mxfp4(x_rot)                   │     │   │
+│    │    │                                              │     │   │
+│    │    │ Step 3: MXFP4 Dequant + GEMM                │     │   │
 │    │    │   torch.ops.auto_round.spinquant_mxfp4_linear│     │   │
-│    │    │   (x_rot, weight_packed, weight_scale, 32)   │     │   │
+│    │    │   (x_qdq, weight_packed, weight_scale, 32)   │     │   │
 │    │    │   → Triton kernel 或 Python fallback:        │     │   │
 │    │    │     - 解包 uint8 → 2个 E2M1 FP4 值           │     │   │
 │    │    │     - 查表还原浮点值                           │     │   │
@@ -382,24 +375,60 @@ vLLM 捕获 CUDA graphs 加速推理:
 
 ## 核心设计决策
 
-### 1. 预计算完整旋转矩阵（而非运行时 butterfly）
+### 1. 旋转只准备 runtime state，不在 plugin 中重写 weight
 
-**问题**: Python butterfly Hadamard 有 `while` 循环和动态 shape，无法被 `torch.compile(fullgraph=True)` 编译。
+这次实现里，必须先区分两件事：
 
-**解决方案**: 在 `process_weights_after_loading()` 中一次性构建完整 `[n, n]` 矩阵，推理时只做 `x @ R`。
+1. **weight side 的旋转/量化处理**
+   - 发生在导出侧
+   - 导出的就是已经处理好的 `weight_packed/weight_scale`
+2. **activation side 的 online rotation**
+   - 由 vLLM plugin 在推理时执行
+   - plugin load 只负责准备它需要的 runtime state
 
 ```python
-# 加载时 (一次性):
-R = _build_full_hadamard(1024, device)  # [1024, 1024]
-layer._rotation_matrix = R
-
-# 推理时 (每个 token):
-x_rotated = x @ R  # 简单 matmul, torch.compile 友好
+def process_weights_after_loading(layer):
+    # 只准备旋转状态，不改 packed weight
+    self._process_rotation(layer, prefix="r1")
+    self._process_rotation(layer, prefix="r4")
 ```
 
-**代价**: 额外 `1024*1024*2 = 2MB` 内存/层（共 ~280MB for 140 layers）。对 vLLM 来说微不足道。
+换句话说：
 
-**收益**: cuBLAS matmul 在 L20 GPU 上 < 0.01ms，远快于 Python butterfly 的 0.74ms。
+- **改前后都不是 plugin 在“提前处理 weight”**
+- **改前后都是导出侧先把 weight 处理好**
+- 这次改的是：**plugin 如何准备和执行 activation-side rotation**
+
+### 2. 当前实现是 hybrid rotation runtime
+
+`process_weights_after_loading()` 现在按 rotation 类型准备不同的 runtime path：
+
+| 类型 | load 时准备什么 | forward 时怎么做 |
+|------|------------------|------------------|
+| full-size Hadamard | `hadamard_K + K + runtime=HADAMARD` | `matmul_hadU(x, hadamard_K, K)` |
+| block Hadamard | 显式 block 矩阵 `R` | `x @ R` |
+| random / trained | 从 checkpoint 读取显式矩阵 `R` | `x @ R` |
+| 无旋转 | `runtime=NONE` | 跳过 |
+
+代码上对应的是：
+
+```python
+if rot_type == ROTATION_TYPE_HADAMARD and rot_size == in_features:
+    layer._r1_rotation_runtime = ROTATION_RUNTIME_HADAMARD
+    layer._r1_hadamard_K = hadamard_K
+    layer._r1_hadamard_factor = K
+elif rot_type == ROTATION_TYPE_HADAMARD:
+    layer._r1_rotation_runtime = ROTATION_RUNTIME_MATRIX
+    layer._r1_rotation_matrix = _build_block_hadamard(...)
+elif rot_type in (ROTATION_TYPE_RANDOM, ROTATION_TYPE_TRAINED):
+    layer._r1_rotation_runtime = ROTATION_RUNTIME_MATRIX
+    layer._r1_rotation_matrix = loaded_matrix
+```
+
+这和旧实现最大的差别是：
+
+- **旧实现**：Hadamard / random / trained 基本都尽量变成显式矩阵 `_rotation_matrix`
+- **新实现**：只有 block Hadamard、random、trained 继续走显式矩阵；full-size Hadamard 改成结构化 butterfly runtime
 
 ### 2. Custom Op 注册（解决 fullgraph 编译）
 
@@ -646,6 +675,441 @@ auto_round/vllm_plugin/           ← 本插件 (spinquant + MXFP4)
 
 ---
 
+## 为什么 Quark 的 online R1 推理看起来更快
+
+### 先说结论
+
+Quark 示例里的 **online R1** 看起来很快，主要不是因为它把 R1 本身做得“更高级”，而是因为它走的是一条
+**更轻的推理路径**：
+
+1. **评测直接使用内存中的 PyTorch 模型对象**，不是重新加载导出的 packed 低比特模型。
+2. **线性层最终仍走 `F.linear` / cuBLAS dense GEMM**，不是每层都执行 packed weight dequant + custom low-bit GEMM。
+3. **激活 MXFP4 有专门的 dynamic fast path**：`mx.qdq_mxfp4(...)`。
+4. 示例配置里 **R1 只做 block rotation (`rotation_size=128`)**，不是 full hidden-size R1。
+
+因此，Quark 的“快”主要来自：
+
+- **更便宜的 activation QDQ**
+- **标准 dense linear**
+- **较小的 R1 block size**
+
+而不是说明 “在线 R1 本身几乎没有成本”。
+
+### Quark 的 dynamic MXFP4 fast code path 是什么
+
+Quark 在动态 MXFP4 激活量化时，有一条专门的快路径：
+
+```text
+QuantLinear.forward_with_weight(...)
+  -> QuantMixin.get_quant_input(x)
+     -> input_quantizer(x)
+        -> DynamicScaledFakeQuantize.forward(x)
+           -> self.fake_quantize_func(x, ...)
+              -> mxfp4_dynamic_fake_quantize(x, fake_quantizer, scale_calculation_mode)
+                 -> mx.qdq_mxfp4(x, scale_calculation_mode="even")
+                    -> qdq_mxfp4_hip(...)   或   qdq_mxfp4_triton(...)
+```
+
+关键代码位置：
+
+- `quark/torch/quantization/nn/modules/mixin.py`
+  - `get_quant_input()` 会调用 input quantizer
+- `quark/torch/quantization/tensor_quantize.py`
+  - `DynamicScaledFakeQuantize.forward()`
+  - 对 OCP MXFP4 + `scale_calculation_mode="even"`，直接走 `mxfp4_dynamic_fake_quantize`
+- `quark/torch/kernel/__init__.py`
+  - `mxfp4_dynamic_fake_quantize()` 直接调用 `mx.qdq_mxfp4(...)`
+- `quark/torch/kernel/mx/__init__.py`
+  - 根据 `QUARK_MXFP4_IMPL` 选择 HIP 或 Triton 实现
+- `quark/torch/kernel/mx/hip.py`
+  - `qdq_mxfp4_hip(x, ...) -> kernel_ext.qdq_mxfp4(x, 32)`
+- `quark/torch/kernel/mx/triton.py`
+  - `qdq_mxfp4_triton(...)` 走 Triton 的 `downcast_to_mxfp` + `upcast_from_mxfp`
+
+这条 fast path 的本质是：
+
+> **对激活直接做“设备端 fused qdq”**，避免 Python 侧 observer + pack/unpack + 普通张量运算组合。
+
+### Quark 为什么没有像我们当前 vLLM plugin 那样贵
+
+Quark 示例的训练/评测脚本是：
+
+- `examples/torch/language_modeling/rotation/train_rotation.py`
+- `quark/contrib/llm_eval/evaluation.py`
+
+这里的 `eval_model(...)` 直接把当前内存中的 `model` 对象传给 `lm_eval`，而不是重新从导出的
+real-quantized safetensors 模型里恢复一个 packed low-bit inference 模型。
+
+此外，Quark 在 `ModelQuantizer.freeze(model)` 之后：
+
+1. **非 dynamic 的 quantizer 会被冻结**
+2. 如果 `quantize=True`，权重会先被 fake-quant 一次，写回高精度 weight tensor
+3. 之后 `QuantLinear.forward_with_weight()` 里的 `get_quant_weight()` 看到 `frozen_params=True`，
+   就不会每次 forward 再做权重量化
+4. forward 最终仍然是：
+
+```python
+output = F.linear(quant_input, quant_weight, bias=quant_bias)
+```
+
+这意味着 Quark 的评测路径本质更接近：
+
+> **activation 走 dynamic MXFP4 qdq fast path + weight 用已量化好的高精度 tensor + cuBLAS dense linear**
+
+而不是：
+
+> **packed uint8 weight + shared exponent + 每层在线 dequant + 自定义 low-bit GEMM**
+
+### Quark R1 路径与我们当前 vLLM plugin 路径的逐层调用对比
+
+下表以 **R1 online + MXFP4** 为例，对比两条路径的关键步骤：
+
+| 阶段 | Quark example / `llm_eval` | 当前 vLLM plugin |
+|------|-----------------------------|------------------|
+| 模型来源 | 直接评测内存中的 PyTorch 模型对象 | 从导出的 auto-round 模型目录加载 |
+| R1 配置 | 示例常用 `rotation_size=128` block R1 | 常见为 full-size R1 或 block R1 |
+| R1 预处理 | 先对目标 linear weight 做一次 R1 融合，再包 `InputRotationWrapperHadamard` | 导出侧已处理好 weight；plugin load 只准备 R1 runtime state，不改 packed weight |
+| 激活 R1 执行 | `InputRotationWrapperHadamard.forward()` -> `HadamardTransform.forward()` | `_process_rotation()` 准备 Hadamard runtime 或显式矩阵，`apply()` 里先做 rotation，再做 activation qdq |
+| 激活量化 | `DynamicScaledFakeQuantize.forward()` -> `mx.qdq_mxfp4(...)` fast path | `spinquant_mxfp4_act_qdq`，优先对齐 `auto_round_extension/vllm_ext` / Quark 的 `qdq_mxfp4(even)` 语义 |
+| 权重形式 | freeze 后通常是“已 fake-quant 的高精度 weight” | `weight_packed:uint8` + `weight_scale:uint8` |
+| GEMM | `F.linear(...)`（dense GEMM, cuBLAS） | `triton_mxfp4_gemm(...)` 或 PyTorch fallback |
+| 每层是否反量化权重 | 通常**不需要**每层重建完整权重 | 需要在 GEMM 中按 tile dequant packed weight |
+| 主要瓶颈 | R1 transform + activation qdq | R1 transform + packed MXFP4 GEMM 临时 buffer / dequant |
+| 典型感受 | “online R1 也很快” | “online R1 + MXFP4 插件开销明显” |
+
+### 逐层解释：Quark 为什么更像“dense model + fast qdq”
+
+#### 1. R1 不是完全“裸在线”
+
+Quark 在 `RotationProcessor.apply_online_r1()` 中，并不是只在前向时对输入做旋转。
+它还会先对目标 layer 的权重做一次 R1 融合：
+
+```python
+layer.weight.data = matmul_hadU(layer.weight.data, hadamard_K=hadamard_K, K=K)
+layer_with_input_rotation = InputRotationWrapperHadamard(...)
+```
+
+也就是说它仍然用了：
+
+- **weight 预融合**
+- **input wrapper 在线补偿**
+
+这和我们当前的思路在数学上是一致的。
+
+#### 2. 它的线性层仍是普通 dense linear
+
+`QuantLinear.forward_with_weight()` 最终还是：
+
+```python
+quant_input = self.get_quant_input(args[0])
+quant_weight = self.get_quant_weight(weight)
+output = F.linear(quant_input, quant_weight, bias=quant_bias)
+```
+
+这意味着核心 GEMM 仍然交给成熟的 dense GEMM backend（通常是 cuBLAS），而不是走 packed low-bit kernel。
+
+#### 3. dynamic MXFP4 的快路径只处理 activation qdq
+
+Quark 的 `mx.qdq_mxfp4(...)` fast path 是：
+
+- 观测 + 计算 scale
+- 做 MXFP4 风格 qdq
+- 返回 **原 dtype 的激活 tensor**
+
+它解决的是“**激活量化快**”的问题，不是“**packed low-bit weight GEMM 快**”的问题。
+
+#### 4. block R1 比 full-size R1 便宜得多
+
+Quark 示例配置：
+
+```json
+"online_r1_rotation": true,
+"rotation_size": 128
+```
+
+这意味着它做的是 block-wise R1，不是 full hidden-size R1。
+对于 hidden_size 很大的模型，`rotation_size=128` 的代价远低于 full-size 旋转。
+
+### 为什么这不能直接推出“我们的实现有问题”
+
+Quark 快，并不自动说明我们当前 vLLM plugin 的 R1 实现有 correctness 或 engineering 问题。
+两边跑的不是同一类路径：
+
+- **Quark example**
+  - 更接近“高精度 weight + dynamic activation qdq + dense GEMM”
+- **当前 vLLM plugin**
+  - 更接近“packed real-quantized MXFP4 weight + online rotation + low-bit custom GEMM”
+
+两者比较时，最容易忽略的差异是：
+
+1. **权重是否还是高精度 tensor**
+2. **GEMM 是 dense 还是 low-bit packed**
+3. **R1 是 full-size 还是 block-size**
+4. **激活量化是否有专门 fused qdq fast path**
+
+### 对当前工程判断的启发
+
+这次对比给出的结论是：
+
+1. **Quark 的快，不代表 online R1 没成本**
+   - 只是它把大头开销放在了更成熟、更便宜的 dense 路径上
+
+2. **我们当前最贵的不是“R1 这个数学变换本身”，而是它和 packed MXFP4 inference path 叠加后的整体开销**
+
+3. **如果未来要缩小和 Quark 的差距，最有效的方向不是单独优化 Python hook，而是让 R1 更贴近 GEMM 执行路径**
+   - 例如 block-R1 融入 GEMM tile
+   - 或者引入更低峰值、更高效的 MXFP4 execution path
+
+4. **在没有 fused R1+GEMM 之前，Quark 这种“dynamic qdq + dense GEMM”路径在体感上很可能仍然更轻**
+
+### 一句话总结
+
+Quark 的 online R1 推理之所以“看起来很快”，本质上是因为它评测时仍然更接近：
+
+> **dense linear + activation dynamic MXFP4 fast qdq**
+
+而不是我们当前这条：
+
+> **packed real-quantized MXFP4 weight + online rotation + activation qdq + custom low-bit GEMM**
+
+所以它快的关键，不是 “R1 online 零成本”，而是 **它避开了我们这条部署路径中最贵的那部分**。
+
+---
+
+## Quark-like / preunpack 运行时后端
+
+### 目标
+
+如果当前目标不是只看默认的 packed 部署路径，而是同时比较：
+
+- 更接近 **Quark eval 语义**
+- 更接近 **auto_round_extension/vllm_ext 预解包语义**
+- 当前 **packed fused 部署语义**
+
+那么现在插件已经支持多运行时后端：
+
+| runtime backend | 目标 | 当前状态 |
+|------|------|------|
+| `packed_fused` | 当前默认部署路径：packed weight + activation qdq + fused dequant+GEMM | 已实现，默认 |
+| `quark_like_dense` | 更接近 Quark：rotate(x) + activation qdq + frozen dense weight + `F.linear` | 已实现 |
+| `preunpack_fp8` | 更接近 `auto_round_extension/vllm_ext`：load 时预解包到 FP8+scale | 已实现 |
+
+### 选择方式
+
+不需要改导出格式，可以通过环境变量或 `config.json` 中的可选字段切换：
+
+```bash
+export AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND=quark_like_dense
+# 或
+export AUTO_ROUND_SPINQUANT_RUNTIME_BACKEND=preunpack_fp8
+```
+
+也可以在模型 `config.json` / `quantization_config` 中显式加入：
+
+```json
+"runtime_backend": "quark_like_dense"
+```
+
+支持的值：
+
+- `packed_fused`
+- `quark_like_dense`
+- `preunpack_fp8`
+
+### 为什么 `quark_like_dense` 最接近 Quark
+
+Quark 示例评测时，本质更像：
+
+```text
+rotate(x)
+-> qdq_mxfp4(x)
+-> F.linear(x_qdq, frozen_fake_quant_weight)
+```
+
+也就是说：
+
+1. **activation 走 dynamic MXFP4 qdq**
+2. **weight 在 eval 时已经是“冻结后的量化值”**
+3. **forward 最终仍然是 dense GEMM**
+
+`quark_like_dense` 现在的实现是：
+
+```text
+load time:
+  packed weight -> 一次性 dequant 成 bf16/fp16 frozen weight
+  保留 R1/R4 runtime state
+
+forward:
+  x -> rotate(x) -> qdq_mxfp4(x) -> F.linear(x_qdq, weight_dense_qdq)
+```
+
+这和当前 `packed_fused` 的关键区别是：
+
+| 项目 | 当前 `packed_fused` | 提议 `quark_like_dense` |
+|------|---------------------|--------------------------|
+| weight 存储 | `weight_packed + weight_scale` | load 后转成 `weight_dense_qdq` |
+| weight dequant | 每次 forward 融合在 GEMM 里 | **load 时一次性完成** |
+| activation | `rotate -> qdq` | `rotate -> qdq` |
+| GEMM | low-bit custom GEMM | dense `F.linear` / cuBLAS |
+| 目标 | 部署/性能路径 | Quark 语义对齐路径 |
+
+### 代码层面需要怎么改
+
+建议只在 plugin 中加一个 runtime backend 选择，不改导出格式。
+
+#### 1. `SpinQuantMXFP4Config` 增加 backend 选项
+
+可以从 `quantization_config` 或环境变量读取，例如：
+
+```python
+SpinQuantMXFP4Config(
+    ...,
+    runtime_backend="packed_fused",  # default
+)
+```
+
+建议支持：
+
+- `packed_fused`
+- `quark_like_dense`
+- 预留 `preunpack_fp8`
+
+#### 2. 在 `process_weights_after_loading()` 中按 backend 分支
+
+当前：
+
+```python
+process_weights_after_loading():
+    _process_rotation(layer, "r1")
+    _process_rotation(layer, "r4")
+```
+
+提议改成：
+
+```python
+process_weights_after_loading():
+    _process_rotation(layer, "r1")
+    _process_rotation(layer, "r4")
+
+    if runtime_backend == "quark_like_dense":
+        layer.weight_dense_qdq = dequant_mxfp4_weight_once(
+            layer.weight_packed, layer.weight_scale
+        )
+```
+
+这里的 `dequant_mxfp4_weight_once(...)` 建议直接复用/参考已有实现：
+
+- 当前 plugin 中的 `_mxfp4_dequant_linear_fallback` 里的 weight unpack 逻辑
+- `auto_round_extension/vllm_ext/mxfp4_qdq_utils.py`
+  - `dequant_mxfp4_to_fp8(...)`
+  - `mxfp4_fp8_weight_to_bf16(...)`
+
+如果目标是**最接近 Quark 语义**，当前 backend 会直接得到：
+
+- `layer.weight_dense_qdq : bf16/fp16`
+
+而不是只得到：
+
+- `weight_unpacked_fp8 + scale_bf16`
+
+因为后者仍然更像 `vllm_ext`，不是 Quark 的 frozen dense eval 形式。
+
+#### 3. `apply()` 按 backend 分支
+
+当前：
+
+```python
+x = rotate(x)
+x = spinquant_mxfp4_act_qdq(x, 32)
+out = spinquant_mxfp4_linear(x, weight_packed, weight_scale, 32)
+```
+
+提议：
+
+```python
+x = rotate(x)
+x = spinquant_mxfp4_act_qdq(x, 32)
+
+if runtime_backend == "quark_like_dense":
+    out = F.linear(x, layer.weight_dense_qdq, bias)
+else:
+    out = spinquant_mxfp4_linear(x, weight_packed, weight_scale, 32)
+```
+
+这样就得到三条清晰的 A/B 路径：
+
+- **同一个导出模型**
+- **同一套 rotation runtime**
+- **同一套 activation qdq**
+- 只对比：
+  - dense frozen weight
+  - pre-unpacked FP8 weight
+  - packed fused low-bit GEMM
+
+这对分析 accuracy / perplexity / lm_eval 差异会非常干净。
+
+### `preunpack_fp8` 是什么
+
+`auto_round_extension/vllm_ext` 的思路是：
+
+```text
+load:
+  packed FP4 -> unpacked FP8 + bf16 scale
+
+forward:
+  qdq(x)
+  -> 再把 weight 乘 scale 恢复到 bf16
+  -> matmul
+```
+
+它更像是一个**工程折中态**：
+
+- 比完全 packed path 更容易调试
+- 比 dense frozen weight 更省一点 load-time 转换复杂度
+- 但 **forward 里仍然有 weight 恢复成本**
+
+所以如果目标是“更像 Quark”，它不是第一选择；但如果目标是看：
+
+> **每次 forward 的 packed unpack / dequant 开销到底占多少**
+
+那它是一个很合适的中间对照组。
+
+### 现在可以直接怎么比较
+
+建议直接做三组 benchmark：
+
+1. `packed_fused`
+2. `preunpack_fp8`
+3. `quark_like_dense`
+
+在相同模型、相同 batch、相同 `rotation_size` 下比较：
+
+- tokens/s
+- TTFT
+- decode latency
+- 显存占用
+
+### 这个方案最大的价值
+
+它能把当前问题拆开：
+
+| 问题 | `quark_like_dense` 能否帮助回答 |
+|------|-------------------------------|
+| rotation + qdq 语义是否对 | **能** |
+| packed weight / Triton GEMM 是否引入额外误差 | **能** |
+| 与 Quark lm_eval 结果为什么不同 | **能** |
+| 最终部署性能是否最好 | **不能，`packed_fused` 才是那条路** |
+
+### 一句话建议
+
+现在这三个 backend 都已经有了：
+
+- **如果看最终部署**：重点看 `packed_fused`
+- **如果看 unpack/dequant 代价**：重点看 `preunpack_fp8`
+- **如果看最像 Quark 的体感路径**：重点看 `quark_like_dense`
+
+---
+
 ## Tensor Parallelism (TP) 支持
 
 ### 使用方式
@@ -680,7 +1144,10 @@ llm = LLM(
 
 推理流程 (每个 rank):
   1. x 是完整 hidden_states (所有 rank 相同，ColumnParallel 输入不分片)
-  2. x_rot = x @ R  ← 每个 rank 独立计算，结果相同
+  2. x_rot = rotate(x)
+       - full-size Hadamard: matmul_hadU(x, hadamard_K, K)
+       - 其它路径: x @ R
+     每个 rank 独立计算，结果相同
   3. output_shard = custom_op(x_rot, weight_packed_shard)  ← 各自的权重分片
   4. all-gather output shards → 完整输出
 ```
@@ -705,7 +1172,7 @@ llm = LLM(
 |------|---------|------|
 | `spinquant_r1_type` | 所有 rank 相同值 | scalar, weight_loader 直接 copy |
 | `spinquant_r1_size` | 所有 rank 相同值 | scalar, weight_loader 直接 copy |
-| `_rotation_matrix` | 每个 rank 独立构建相同矩阵 | 确定性 Hadamard 算法 → 结果一致 |
+| rotation runtime state | 每个 rank 独立准备相同状态 | full-size Hadamard 用 `hadamard_K+K`，其余路径用显式矩阵 |
 | `weight_packed` | 每个 rank 不同 shard | 沿 output_dim 自动切分 |
 | `weight_scale` | 每个 rank 不同 shard | 沿 output_dim 自动切分 |
 
@@ -713,8 +1180,10 @@ llm = LLM(
 
 `apply()` 中的 block-wise 旋转逻辑:
 ```python
-if rot_size == in_features:
-    x = x @ R                          # 全维度旋转
+if runtime == HADAMARD and rot_size == in_features:
+    x = matmul_hadU(x, hadamard_K, K)   # 全维度 Hadamard
+elif rot_size == in_features:
+    x = x @ R                           # 全维度显式矩阵
 else:
     x = x.reshape(..., -1, rot_size)    # 分块旋转
     x = (x @ R).reshape(shape)          # 要求: in_features % rot_size == 0
@@ -794,8 +1263,8 @@ model.layers.{i}.mlp.down_proj.spinquant_r4_matrix [3072, 3072] float32  (仅 ra
 
 1. **Config 扩展** — `SpinQuantMXFP4Config` 新增 `online_r4`, `r4_type`, `intermediate_size`
 2. **create_weights** — 为 `down_proj` 层注册 `spinquant_r4_type/size/matrix` 参数
-3. **process_weights_after_loading** — 调用通用 `_process_rotation(layer, "r4")` 构建旋转矩阵
-4. **apply** — 调用通用 `_apply_rotation(x, layer, "r4")` 执行 `x @ R4`
+3. **process_weights_after_loading** — 调用通用 `_process_rotation(layer, "r4")` 准备 R4 runtime state
+4. **apply** — 调用通用 `_apply_rotation(x, layer, "r4")` 执行 `matmul_hadU(x)` 或 `x @ R4`
 
 ### TP 安全性 (R4)
 
@@ -827,11 +1296,42 @@ model.layers.{i}.mlp.down_proj.spinquant_r4_matrix [3072, 3072] float32  (仅 ra
 ```
 process_weights_after_loading():
   1. 读取 rot_type: 0=hadamard, 1=random, 2=trained
-  2. 若 rot_type != 0: 加载 layer.spinquant_r{1,4}_matrix → 用作旋转矩阵
-  3. 若 rot_type == 0: 从 rot_size 确定性地构建 Hadamard 矩阵
-  4. 验证矩阵正交性 (R @ R^T ≈ I)
-  5. 删除原始参数，只保留 _rotation_matrix 缓存
+  2. 若 rot_type != 0: 加载 layer.spinquant_r{1,4}_matrix → 缓存为 runtime 显式矩阵
+  3. 若 rot_type == 0:
+       - full-size Hadamard: 缓存 hadamard_K + K
+       - block Hadamard: 构建显式 block 矩阵
+  4. 删除原始 checkpoint 参数，只保留 runtime state
 ```
+
+这里的“显式矩阵路径”指的是：
+
+> 旋转矩阵 `R` 本身被直接保存/加载，并在 forward 中直接执行 `x @ R`。
+
+它适用于：
+
+- `random`
+- `trained`
+- block-wise Hadamard
+
+而 full-size Hadamard 当前不再保存/缓存完整 `[n, n]` 的显式矩阵，而是走 `matmul_hadU`。
+
+### 2026-05-20 代码修改前后对照
+
+这次最容易误解的一点是：**改动不在 weight side，而在 plugin 的 rotation runtime 准备方式。**
+
+| 问题 | 修改前 | 修改后 |
+|------|--------|--------|
+| weight 是谁处理的 | 导出侧先处理，再保存成 `weight_packed/weight_scale` | **不变** |
+| plugin load 会不会再改 weight | 不会 | **不会** |
+| full-size Hadamard | load 时展开整块 `_rotation_matrix` | load 时只缓存 `hadamard_K + K` |
+| block Hadamard | 显式矩阵 | 显式矩阵 |
+| random / trained | 加载显式矩阵 | 加载显式矩阵 |
+| activation qdq | 无 | `rotate(x)` 后增加 MXFP4 qdq |
+| forward 的 R1/R4 | 统一 `x @ R` | Hadamard(full) 走 `matmul_hadU`，其余仍 `x @ R`，随后统一做 `qdq_mxfp4` |
+
+一句话总结：
+
+> **weight side 没变；变的是 plugin 不再把 full-size Hadamard 强行展开成完整矩阵，而是改成加载时准备 butterfly runtime state。**
 
 ### 自定义 rotation_size (block-wise rotation)
 
@@ -1337,6 +1837,197 @@ SKIP_SAVE=1 bash run_qwen3_32b.sh
 
 **注意：** R4 使用 `rotation_size=32` 或 `128`（block rotation）以兼容 TP > 1。
 Full-size R4（rotation_size=intermediate_size）只能 TP=1 使用。
+
+### Qwen3-32B 多卡 OOM 报错分析与解决方案
+
+在 4 卡 TP=4 的 Qwen3-32B 评测中，`run_qwen3_32b.sh` 可能在第一个配置
+（例如 `R1_size32`）的 vLLM 阶段直接失败。典型报错如下：
+
+```text
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.56 GiB.
+...
+File ".../spinquant_mxfp4.py", line 554, in _spinquant_mxfp4_linear_impl
+    output = _triton_mxfp4_gemm(...)
+File ".../mxfp4_gemm.py", line 247, in triton_mxfp4_gemm
+    output = torch.empty((M, N), dtype=torch.float32, device=input.device)
+```
+
+#### 结论
+
+这类失败的主因是**显存不足**，不是 R1/R4 旋转逻辑错误，也不是 TP/NCCL 通信错误。
+根因是：**vLLM 已经把大部分显存分配给权重、KV cache 和 CUDA graph，随后
+SpinQuant MXFP4 Triton GEMM 还需要申请一个额外的 fp32 临时输出 buffer，最终触发 OOM。**
+
+#### 触发链路
+
+从日志可以看到，engine 初始化阶段显存已经非常紧张：
+
+```text
+Available KV cache memory: 33.83 GiB
+GPU KV cache size: 553,984 tokens
+CUDA graph pool memory: 1.67 GiB (actual)
+```
+
+而运行参数又比较激进：
+
+```text
+tensor_parallel_size=4
+max_model_len=4096
+max_num_batched_tokens=32768
+max_num_seqs=128
+gpu_memory_utilization=0.95
+dtype=bfloat16
+```
+
+此时再进入插件的 MXFP4 线性层：
+
+```python
+# auto_round/triton_kernels/mxfp4_gemm.py
+output = torch.empty((M, N), dtype=torch.float32, device=input.device)
+```
+
+这里会为 GEMM 分配一个 **`(M, N)` 的 float32 临时输出张量**。
+
+#### 为什么恰好是 1.56 GiB
+
+对 Qwen3-32B：
+
+- `hidden_size = 5120`
+- `intermediate_size = 25600`
+- `TP = 4`
+
+在 MLP 的 merged `gate_up_proj` 上，每个 rank 的输出维度为：
+
+```text
+N = 2 * intermediate_size / TP
+  = 2 * 25600 / 4
+  = 12800
+```
+
+日志里使用了：
+
+```text
+max_num_batched_tokens = 32768
+```
+
+在 chunked prefill / compile 路径下，`M` 可以达到这个 token budget，于是临时张量大小为：
+
+```text
+shape = (M, N) = (32768, 12800)
+dtype = float32
+bytes = 32768 * 12800 * 4
+      = 1,677,721,600
+      = 1.5625 GiB
+```
+
+这与日志中的：
+
+```text
+Tried to allocate 1.56 GiB
+```
+
+完全一致，因此可以确认是 **MXFP4 GEMM 临时 buffer** 导致的 OOM。
+
+#### 为什么 TP=4 也会爆
+
+虽然 TP=4 把权重分到了 4 张卡上，但每张卡仍然要同时容纳：
+
+1. 本 rank 的量化权重
+2. vLLM 预留的 KV cache
+3. CUDA graph capture / compile 的额外显存
+4. 当前 step 的 activation / temporary tensors
+5. SpinQuant MXFP4 GEMM 的 fp32 输出 buffer
+
+在日志里，OOM 前每卡只剩大约 **1.09~1.12 GiB** 可用显存，而插件一次就要申请
+**1.56 GiB**，因此四个 rank 都会几乎同时失败。
+
+#### 日志里哪些不是根因
+
+以下 warning 容易让人误判，但它们不是这次 crash 的根因：
+
+- `SymmMemCommunicator: Device capability 8.9 not supported`
+  - 只影响某些通信优化路径
+- `Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs`
+  - 只影响性能，不会直接导致 OOM
+- tokenizer regex warning
+  - 可能影响评测精度，不会导致显存申请失败
+
+#### 参数与显存的直接关系
+
+对当前插件实现，`max_num_batched_tokens` 直接决定 MXFP4 GEMM 临时输出的大小。
+
+以 Qwen3-32B、TP=4、merged `gate_up_proj` 为例：
+
+| `max_num_batched_tokens` | 临时 buffer 大小 |
+|---:|---:|
+| 32768 | 1.5625 GiB |
+| 24576 | 1.1719 GiB |
+| 16384 | 0.7812 GiB |
+| 12288 | 0.5859 GiB |
+| 8192  | 0.3906 GiB |
+
+这也是为什么**先降 token budget**往往最有效。
+
+#### 推荐解决方案
+
+建议按下面顺序收紧参数：
+
+1. **先降 `max_num_batched_tokens`**
+   - 从 `32768` 降到 `16384`
+   - 如果还不稳，先用 `8192`
+
+2. **降低 `gpu_memory_utilization`**
+   - 从 `0.95` 降到 `0.85`
+   - 更保守可用 `0.80`
+   - 这样 vLLM 不会把 KV cache 撑得过满
+
+3. **降低并发**
+   - `batch_size: 64 -> 32` 或 `16`
+   - `max_num_seqs: 128 -> 64`
+
+4. **必要时降低 graph / compile 压力**
+   - 关闭部分 graph capture 或 compile 路径可以回收一部分显存
+   - 代价是吞吐下降
+
+#### 推荐的保守起步参数
+
+对 Qwen3-32B + TP=4 + SpinQuant MXFP4，建议先从更保守的参数起步：
+
+```text
+gpu_memory_utilization = 0.80 ~ 0.85
+max_num_batched_tokens = 8192 ~ 16384
+max_num_seqs = 64
+batch_size = 16 ~ 32
+```
+
+如果这些参数稳定，再逐步放大吞吐。
+
+#### 一个实用判断准则
+
+如果日志里已经出现：
+
+- KV cache 很大（例如 30+ GiB）
+- CUDA graph pool 还有 1~2+ GiB
+- OOM 前 free memory 只剩 1 GiB 左右
+
+那么只要你的 MXFP4 GEMM 临时输出再需要 **1 GiB 以上**，就很容易在第一个大 prefill
+batch 上直接爆掉。
+
+#### 后续优化方向
+
+当前 Triton kernel 的实现是：
+
+```python
+output = torch.empty((M, N), dtype=torch.float32, device=input.device)
+```
+
+这对精度是安全的，但峰值显存较高。后续若需要进一步优化 32B/70B 场景，可以考虑：
+
+- 降低 `M`（调度层面）
+- 避免一次性 materialize 整个大输出
+- 研究更低峰值的分块输出 / accumulate 策略
+
+不过在现阶段，**先收紧 vLLM 的并发与 token budget** 是最直接、最稳定的解决办法。
 
 ### 验证输出示例
 
