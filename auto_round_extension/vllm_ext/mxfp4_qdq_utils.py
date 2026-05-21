@@ -12,12 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Union
 
 import torch
+from vllm.logger import init_logger
 
 from auto_round_extension.vllm_ext.fp4_utils import cast_to_fp4, pack_fp4_to_uint8, unpack_fp4_from_uint8
 from auto_round_extension.vllm_ext.utils import _to_mx_rceil, get_fp_scale
+from auto_round_extension.vllm_ext._mxfp4_qdq_ext import qdq_mxfp4 as _local_qdq_mxfp4
+
+logger = init_logger(__name__)
+
+# Lazy import for Triton QDQ — avoids triggering Triton compilation at import time.
+_triton_qdq = None
+_triton_qdq_loaded = False
+
+
+def _get_triton_qdq():
+    """Lazily import the vendored Triton MXFP4 QDQ kernel on first use."""
+    global _triton_qdq, _triton_qdq_loaded
+    if _triton_qdq_loaded:
+        return _triton_qdq
+    _triton_qdq_loaded = True
+    try:
+        from auto_round_extension.vllm_ext._triton_mxfp4_qdq import qdq_mxfp4_triton
+        _triton_qdq = qdq_mxfp4_triton
+    except (ImportError, RuntimeError) as e:
+        logger.debug("Triton MXFP4 QDQ not available: %s", e)
+        _triton_qdq = None
+    return _triton_qdq
 
 F4_E2M1_MAX = 6.0
 F32_EXP_BIAS = 127
@@ -205,17 +229,76 @@ def fp4_121_scaled_even_rounding(x: torch.Tensor) -> torch.Tensor:
     return sign * x_fp4_abs
 
 
+def _qdq_mxfp4_fallback(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """Pure-Python MXFP4 activation QDQ fallback (slow, device-agnostic)."""
+    block_size = 32
+    shape = x.shape
+    x = x.reshape(-1, block_size)
+    x = fp4_121_scaled_even_rounding(x)
+    x = x.reshape(shape)
+    return x
+
+
+_qdq_backend_logged = False
+
+
+def _log_qdq_backend(name: str) -> None:
+    """Log QDQ backend selection once."""
+    global _qdq_backend_logged
+    if not _qdq_backend_logged:
+        logger.info("[AutoRound] MXFP4 activation QDQ backend: %s", name)
+        _qdq_backend_logged = True
+
+
 # https://github.com/Anonymous1252022/fp4-all-the-way/blob/main/experimental/fp4.py
 def qdq_mxfp4(
     x: torch.Tensor,
 ) -> torch.Tensor:
-    # TODO: select the rounding mode based on config
+    """MXFP4 activation quantize-dequantize with smart backend dispatch.
+
+    Backend selection priority (unless overridden by AUTO_ROUND_MXFP4_QDQ_BACKEND):
+        local_ext (CUDA kernel) > triton > fallback (pure PyTorch)
+
+    Environment variable AUTO_ROUND_MXFP4_QDQ_BACKEND can force a specific backend:
+        local_ext | triton | fallback
+    """
     block_size = 32
-    shape = x.shape
-    x = x.reshape(-1, block_size)
 
-    x = fp4_121_scaled_even_rounding(x)
+    forced_backend = os.environ.get("AUTO_ROUND_MXFP4_QDQ_BACKEND", "").lower().strip()
+    is_cuda_fp16_bf16 = x.is_cuda and x.dtype in (torch.float16, torch.bfloat16)
 
-    x = x.reshape(shape)
+    # --- forced backend selection ---
+    if forced_backend == "local_ext":
+        if is_cuda_fp16_bf16:
+            local_out = _local_qdq_mxfp4(x, block_size)
+            if local_out is not None:
+                _log_qdq_backend("local_ext (forced)")
+                return local_out
+        logger.warning("Forced QDQ backend 'local_ext' unavailable, using fallback")
+        return _qdq_mxfp4_fallback(x)
+    if forced_backend == "triton":
+        triton_fn = _get_triton_qdq()
+        if is_cuda_fp16_bf16 and triton_fn is not None:
+            _log_qdq_backend("triton (forced)")
+            return triton_fn(x, scale_calculation_mode="even")
+        logger.warning("Forced QDQ backend 'triton' unavailable, using fallback")
+        return _qdq_mxfp4_fallback(x)
+    if forced_backend == "fallback":
+        _log_qdq_backend("fallback (forced)")
+        return _qdq_mxfp4_fallback(x)
 
-    return x
+    # --- auto selection (priority: local_ext > triton > fallback) ---
+    if is_cuda_fp16_bf16:
+        local_out = _local_qdq_mxfp4(x, block_size)
+        if local_out is not None:
+            _log_qdq_backend("local_ext")
+            return local_out
+    if is_cuda_fp16_bf16:
+        triton_fn = _get_triton_qdq()
+        if triton_fn is not None:
+            _log_qdq_backend("triton")
+            return triton_fn(x, scale_calculation_mode="even")
+    _log_qdq_backend("fallback (pytorch)")
+    return _qdq_mxfp4_fallback(x)

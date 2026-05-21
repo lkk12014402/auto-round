@@ -32,6 +32,12 @@ if VLLM_ENABLE_AR_EXT:
     auto_round_module.AutoRoundConfig = AutoRoundExtensionConfig
     from auto_round_extension.vllm_ext.envs_ext import extra_environment_variables
 
+    # Register SpinQuant/QuaRot rotation plugin (spinquant_mxfp4 quantization method)
+    from auto_round_extension.vllm_ext.spinquant_mxfp4 import SpinQuantMXFP4Config  # noqa: F401
+    from auto_round_extension.vllm_ext._weight_loading_patch import apply_weight_loading_patch
+
+    apply_weight_loading_patch()
+
 
 else:
     print("*****************************************************************************")

@@ -27,6 +27,10 @@ extra_environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AR_MXFP4_MODULAR_MOE": lambda: os.getenv("VLLM_AR_MXFP4_MODULAR_MOE", "1") in ("1", "true", "True"),
     "VLLM_AR_POST_PROCESS_GPTOSS": lambda: os.getenv("VLLM_AR_POST_PROCESS_GPTOSS", "0") in ("1", "true", "True"),
     "VLLM_AR_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(os.getenv("VLLM_AR_FLASHINFER_WORKSPACE_BUFFER_SIZE", "0")),
+    # MXFP4 QDQ backend selection: local_ext | triton | fallback (auto if empty)
+    "AUTO_ROUND_MXFP4_QDQ_BACKEND": lambda: os.getenv("AUTO_ROUND_MXFP4_QDQ_BACKEND", ""),
+    # Disable local CUDA MXFP4 QDQ kernel JIT build
+    "AUTO_ROUND_DISABLE_LOCAL_MXFP4_QDQ": lambda: os.getenv("AUTO_ROUND_DISABLE_LOCAL_MXFP4_QDQ", "0") in ("1", "true", "True"),
 }
 # Add the extra environment variables to vllm.envs
 import vllm.envs as envs
