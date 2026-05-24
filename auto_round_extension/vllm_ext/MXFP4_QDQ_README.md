@@ -23,11 +23,11 @@ Three QDQ backends are available, automatically selected by priority:
 
 ### Backend Details
 
-| Backend | Implementation | Speed (256×4096) | Source |
-|---------|---------------|-----------------|--------|
-| `local_ext` | CUDA C++ kernel via `torch.utils.cpp_extension.load()` | ~0.012ms | Vendored from Quark (MIT) |
-| `triton` | Triton JIT kernel | ~0.085ms | Vendored from Quark (MIT) |
-| `fallback` | Pure PyTorch (no compilation needed) | ~0.186ms | Original implementation |
+| Backend | Implementation | Speed (256×4096) | Shape Constraint | Source |
+|---------|---------------|-----------------|-----------------|--------|
+| `local_ext` | CUDA C++ kernel via `torch.utils.cpp_extension.load()` | ~0.012ms | `numel % 64 == 0` | Vendored from Quark (MIT) |
+| `triton` | Triton JIT kernel | ~0.085ms | `numel % 32 == 0` | Vendored from Quark (MIT) |
+| `fallback` | Pure PyTorch (no compilation needed) | ~0.186ms | `last_dim % 32 == 0` | Original implementation |
 
 ### GEMM Backend
 
@@ -62,6 +62,43 @@ to full precision at runtime.
 - Only supports `group_size = 32`
 - Only supports bf16 and fp16 input
 - First invocation triggers JIT compilation (~30s); subsequent uses hit cache
+
+### Why `numel % 64 == 0`?
+
+The CUDA kernel computes the MXFP4 block-max scale using **warp-level shuffle
+reduction** (`__shfl_xor`):
+
+```cuda
+// Each thread holds 1 element; 32 threads cooperate to find block-max
+for (int i = 1; i < 32; i *= 2) {
+    block_max = hmax(block_max, habs(__shfl_xor_sync(0xffffffff, block_max, i)));
+}
+```
+
+This requires the CUDA thread block size to be a multiple of 32 (warp size).
+The kernel launch uses `blockDim = 64` or `128` (2 or 4 MXFP4 blocks per thread
+block), so `numel` must be evenly divisible by the thread block size.
+
+**This is Quark's original design** — our vendored kernel is unchanged from
+`quark/torch/kernel/hw_emulation/csrc/mxfp4/fake.cu`.
+
+### Graceful Fallback
+
+When `numel % 64 != 0` (e.g., Qwen2.5-72B with `intermediate_size=29568`,
+TP=4 → `down_proj` input dim = 7392, batch=1 → numel=7392, `7392 % 64 = 32`),
+the CUDA kernel cannot be used. The dispatch automatically falls back to:
+
+1. **Triton kernel** (no `numel % 64` constraint — only requires `numel % 32 == 0`)
+2. **Pure PyTorch fallback** (works on any shape divisible by group_size)
+
+This only affects small batch sizes during CUDA graph warmup. For batch ≥ 2,
+`numel = 2 × 7392 = 14784` which is divisible by 64.
+
+### Triton Kernel — No Such Constraint
+
+The Triton kernel (also vendored from Quark, `quark/torch/kernel/mx/triton.py`)
+uses `tl.program_id` with block_size=32, so it only needs `numel % 32 == 0`.
+This makes it a natural fallback for edge cases the CUDA kernel cannot handle.
 
 ## Known Issue: CUDA vs Triton Tie-Breaking Difference
 
@@ -154,10 +191,12 @@ weight processing path (`preunpack_fp8`, `quark_like_dense`, etc.).
 
 ## Dependencies
 
-- **No Quark dependency** — all kernels are vendored
+- **No Quark runtime dependency** — both CUDA and Triton QDQ kernels are vendored from
+  AMD Quark (MIT license) and compiled/run independently
 - PyTorch (required)
-- Triton (optional — for triton backend)
-- CUDA toolkit (optional — for local_ext JIT compilation)
+- Triton (optional — for triton QDQ backend; serves as fallback when CUDA kernel
+  cannot handle the tensor shape)
+- CUDA toolkit (optional — for local_ext JIT compilation, highest performance)
 
 ## SpinQuant/QuaRot Rotation Plugin
 

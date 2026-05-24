@@ -86,9 +86,13 @@ def is_available() -> bool:
 def qdq_mxfp4(x: torch.Tensor, group_size: int = 32) -> torch.Tensor | None:
     """Run MXFP4 activation QDQ using the local CUDA kernel.
 
-    Returns None if the extension is unavailable or group_size != 32.
+    Returns None if the extension is unavailable, group_size != 32,
+    or numel is not a multiple of 64 (CUDA warp-level shuffle constraint).
     """
     if group_size != 32:
+        return None
+    # CUDA kernel uses warp-level shuffles requiring numel % 64 == 0
+    if x.numel() % 64 != 0:
         return None
     ext = _load_extension()
     if ext is None:
