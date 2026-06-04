@@ -333,6 +333,33 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("spinquant_r4_matrix", spinquant_r4_matrix)
 
+        # =====================================================================
+        # Backend-specific weight placeholders (ALL backends register ALL names)
+        # This prevents torch.compile cache collisions: when vLLM caches an AOT
+        # compiled graph that accesses e.g. layer.weight_dense_qdq, switching to
+        # another backend that never registered that name would cause a KeyError.
+        # By always registering all parameter names (as tiny dummies for unused
+        # backends), the compiled graph never hits a missing key; shape guards
+        # will simply trigger healthy re-compilation instead.
+        # =====================================================================
+        weight_dense_qdq = Parameter(
+            torch.empty(1, dtype=params_dtype), requires_grad=False
+        )
+        set_weight_attrs(weight_dense_qdq, {"ignore_warning": True})
+        layer.register_parameter("weight_dense_qdq", weight_dense_qdq)
+
+        weight_unpacked_fp8 = Parameter(
+            torch.empty(1, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        set_weight_attrs(weight_unpacked_fp8, {"ignore_warning": True})
+        layer.register_parameter("weight_unpacked_fp8", weight_unpacked_fp8)
+
+        weight_scale_bf16 = Parameter(
+            torch.empty(1, dtype=torch.bfloat16), requires_grad=False
+        )
+        set_weight_attrs(weight_scale_bf16, {"ignore_warning": True})
+        layer.register_parameter("weight_scale_bf16", weight_scale_bf16)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Prepare runtime rotation state once after checkpoint loading.
 
@@ -440,9 +467,18 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
             delattr(layer, matrix_attr)
 
     def _prepare_runtime_weight_backend(self, layer: torch.nn.Module) -> None:
-        """Prepare load-time weight representation for the selected runtime backend."""
+        """Prepare load-time weight representation for the selected runtime backend.
+
+        All backend-specific parameters (weight_dense_qdq, weight_unpacked_fp8,
+        weight_scale_bf16) are pre-registered as 1-element dummies in create_weights().
+        This method populates the active backend's parameters with real data while
+        shrinking unused packed storage. Dummy params for inactive backends remain
+        as-is, ensuring torch.compile never hits a missing parameter KeyError.
+        """
         backend = self.quant_config.runtime_backend
         if backend == RUNTIME_BACKEND_PACKED_FUSED:
+            # Packed weights (weight_packed, weight_scale) stay as loaded.
+            # Dummy params for other backends stay as 1-element placeholders.
             return
 
         target_dtype = getattr(layer, "params_dtype", torch.bfloat16)
@@ -453,10 +489,7 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
                 self.quant_config.group_size,
                 target_dtype=target_dtype,
             )
-            layer.register_parameter(
-                "weight_dense_qdq",
-                Parameter(weight_dense, requires_grad=False),
-            )
+            layer.weight_dense_qdq = Parameter(weight_dense, requires_grad=False)
             _clear_packed_weight_storage(layer)
             return
 
@@ -466,14 +499,8 @@ class SpinQuantMXFP4LinearMethod(LinearMethodBase):
                 layer.weight_scale.data,
                 self.quant_config.group_size,
             )
-            layer.register_parameter(
-                "weight_unpacked_fp8",
-                Parameter(weight_fp8, requires_grad=False),
-            )
-            layer.register_parameter(
-                "weight_scale_bf16",
-                Parameter(scale_bf16, requires_grad=False),
-            )
+            layer.weight_unpacked_fp8 = Parameter(weight_fp8, requires_grad=False)
+            layer.weight_scale_bf16 = Parameter(scale_bf16, requires_grad=False)
             _clear_packed_weight_storage(layer)
             return
 
@@ -758,13 +785,22 @@ def _resolve_runtime_backend(config: dict[str, Any]) -> str:
 
 
 def _clear_packed_weight_storage(layer: torch.nn.Module) -> None:
-    """Drop packed-weight storage once an alternate runtime backend is prepared."""
-    if hasattr(layer, "weight_packed"):
-        del layer.weight_packed
-        layer.register_parameter("weight_packed", None)
-    if hasattr(layer, "weight_scale"):
-        del layer.weight_scale
-        layer.register_parameter("weight_scale", None)
+    """Replace packed-weight storage with scalar dummies once an alternate runtime backend is prepared.
+
+    We use 1-element dummy tensors instead of deleting/None so that torch.compile
+    cached graphs never encounter a missing key (KeyError). Shape guards will
+    detect the mismatch and trigger a healthy re-compilation.
+    """
+    device = "cpu"
+    if hasattr(layer, "weight_packed") and layer.weight_packed is not None:
+        device = layer.weight_packed.device
+        layer.weight_packed = Parameter(
+            torch.empty(1, dtype=torch.uint8, device=device), requires_grad=False
+        )
+    if hasattr(layer, "weight_scale") and layer.weight_scale is not None:
+        layer.weight_scale = Parameter(
+            torch.empty(1, dtype=torch.uint8, device=device), requires_grad=False
+        )
 
 
 def _unpack_mxfp4_values(weight_packed: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
@@ -844,23 +880,27 @@ try:
 except ImportError:
     _vllm_ext_qdq_mxfp4 = None
 
-# Lazy import for Quark — avoids triggering JIT kernel compilation at import time.
-_quark_mx = None
-_quark_mx_loaded = False
+# Lazy import for Triton QDQ — no numel%64 constraint, works on any shape divisible by 32
+_triton_qdq_fn = None
+_triton_qdq_loaded = False
 
 
-def _get_quark_mx():
-    """Lazily import quark.torch.kernel.mx on first use."""
-    global _quark_mx, _quark_mx_loaded
-    if _quark_mx_loaded:
-        return _quark_mx
-    _quark_mx_loaded = True
+def _get_triton_qdq():
+    """Lazily import the Triton MXFP4 QDQ kernel on first use."""
+    global _triton_qdq_fn, _triton_qdq_loaded
+    if _triton_qdq_loaded:
+        return _triton_qdq_fn
+    _triton_qdq_loaded = True
     try:
-        from quark.torch.kernel import mx as _mod
-        _quark_mx = _mod
-    except ImportError:
-        _quark_mx = None
-    return _quark_mx
+        from auto_round.vllm_plugin._triton_mxfp4_qdq import qdq_mxfp4_triton
+        _triton_qdq_fn = qdq_mxfp4_triton
+    except (ImportError, RuntimeError):
+        try:
+            from auto_round_extension.vllm_ext._triton_mxfp4_qdq import qdq_mxfp4_triton
+            _triton_qdq_fn = qdq_mxfp4_triton
+        except (ImportError, RuntimeError):
+            _triton_qdq_fn = None
+    return _triton_qdq_fn
 
 try:
     from auto_round.triton_kernels.mxfp4_gemm import triton_mxfp4_gemm as _triton_mxfp4_gemm
@@ -874,7 +914,11 @@ def _spinquant_mxfp4_act_qdq_impl(x: torch.Tensor, group_size: int) -> torch.Ten
     """QDQ the rotated activation to MXFP4 semantics before GEMM.
 
     Backend selection priority (unless overridden by AUTO_ROUND_MXFP4_QDQ_BACKEND):
-        local_ext > quark > vllm_ext > fallback
+        local_ext > triton > vllm_ext > fallback
+
+    Note: local_ext (CUDA kernel) requires numel%64==0. When this constraint
+    is not met (e.g. batch=1 with non-power-of-2 intermediate_size/TP), it
+    automatically falls back to triton or pure-Python.
     """
     if group_size <= 0 or x.shape[-1] % group_size != 0:
         raise ValueError(
@@ -895,12 +939,12 @@ def _spinquant_mxfp4_act_qdq_impl(x: torch.Tensor, group_size: int) -> torch.Ten
                 return local_out
         logger.warning("Forced QDQ backend 'local_ext' unavailable, using fallback")
         return _mxfp4_act_qdq_fallback(x, group_size)
-    if forced_backend == "quark":
-        quark = _get_quark_mx()
-        if block_ok and is_cuda_fp16_bf16 and quark is not None:
-            _log_qdq_backend("quark (forced)")
-            return quark.qdq_mxfp4(x, scale_calculation_mode="even")
-        logger.warning("Forced QDQ backend 'quark' unavailable, using fallback")
+    if forced_backend == "triton":
+        triton_fn = _get_triton_qdq()
+        if block_ok and is_cuda_fp16_bf16 and triton_fn is not None:
+            _log_qdq_backend("triton (forced)")
+            return triton_fn(x, scale_calculation_mode="even")
+        logger.warning("Forced QDQ backend 'triton' unavailable, using fallback")
         return _mxfp4_act_qdq_fallback(x, group_size)
     if forced_backend == "vllm_ext":
         if block_ok and _vllm_ext_qdq_mxfp4 is not None:
@@ -912,17 +956,17 @@ def _spinquant_mxfp4_act_qdq_impl(x: torch.Tensor, group_size: int) -> torch.Ten
         _log_qdq_backend("fallback (forced)")
         return _mxfp4_act_qdq_fallback(x, group_size)
 
-    # --- auto selection (priority: local_ext > quark > vllm_ext > fallback) ---
+    # --- auto selection (priority: local_ext > triton > vllm_ext > fallback) ---
     if block_ok and is_cuda_fp16_bf16:
         local_out = _local_qdq_mxfp4(x, group_size)
         if local_out is not None:
             _log_qdq_backend("local_ext")
             return local_out
     if block_ok and is_cuda_fp16_bf16:
-        quark = _get_quark_mx()
-        if quark is not None:
-            _log_qdq_backend("quark")
-            return quark.qdq_mxfp4(x, scale_calculation_mode="even")
+        triton_fn = _get_triton_qdq()
+        if triton_fn is not None:
+            _log_qdq_backend("triton")
+            return triton_fn(x, scale_calculation_mode="even")
     if block_ok and _vllm_ext_qdq_mxfp4 is not None:
         _log_qdq_backend("vllm_ext")
         return _vllm_ext_qdq_mxfp4(x)

@@ -266,10 +266,10 @@ def test_quark_like_dense_backend():
     layer = layer.to(device)
 
     method.process_weights_after_loading(layer)
-    assert layer.weight_packed is None
-    assert layer.weight_scale is None
-    assert "weight_packed" in layer._parameters and layer._parameters["weight_packed"] is None
-    assert "weight_scale" in layer._parameters and layer._parameters["weight_scale"] is None
+    # After quark_like_dense processing, packed weights are replaced with 1-element
+    # dummies (not deleted) to prevent torch.compile cache collisions
+    assert layer.weight_packed.numel() == 1
+    assert layer.weight_scale.numel() == 1
     assert hasattr(layer, "weight_dense_qdq")
     assert layer.weight_dense_qdq.shape == (N, K)
     assert layer.weight_dense_qdq.dtype == torch.bfloat16
@@ -317,10 +317,10 @@ def test_preunpack_fp8_backend():
     layer = layer.to(device)
 
     method.process_weights_after_loading(layer)
-    assert layer.weight_packed is None
-    assert layer.weight_scale is None
-    assert "weight_packed" in layer._parameters and layer._parameters["weight_packed"] is None
-    assert "weight_scale" in layer._parameters and layer._parameters["weight_scale"] is None
+    # After preunpack_fp8 processing, packed weights are replaced with 1-element
+    # dummies (not deleted) to prevent torch.compile cache collisions
+    assert layer.weight_packed.numel() == 1
+    assert layer.weight_scale.numel() == 1
     assert hasattr(layer, "weight_unpacked_fp8")
     assert hasattr(layer, "weight_scale_bf16")
     assert layer.weight_unpacked_fp8.shape == (N, K)

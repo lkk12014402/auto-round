@@ -66,6 +66,9 @@ def is_available() -> bool:
 def qdq_mxfp4(x: torch.Tensor, group_size: int = 32) -> torch.Tensor | None:
     if group_size != 32:
         return None
+    # CUDA kernel uses warp-level shuffles requiring numel % 64 == 0
+    if x.numel() % 64 != 0:
+        return None
     ext = _load_extension()
     if ext is None:
         return None
