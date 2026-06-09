@@ -145,11 +145,70 @@ class HadamardRotation(BaseRotation):
 
         modules = [(name, module) for name, module in model.named_modules() if isinstance(module, target_types)]
 
+        # ---- Selective rotation: decide per-layer ----
+        from auto_round.algorithms.transforms.rotation.selective import LayerSelector
+
+        selector = LayerSelector.from_config(cfg)
+
+        # For "auto" mode, run activation profiling if a dataloader is provided.
+        if cfg.layer_selection == "auto":
+            calibration_dataloader = kwargs.get("calibration_dataloader")
+            if calibration_dataloader is not None:
+                compute_device = kwargs.get("compute_device")
+                selector.profile(model, calibration_dataloader, num_samples=32, device=compute_device)
+            else:
+                from auto_round.utils import logger as ar_logger
+
+                ar_logger.warning(
+                    "layer_selection='auto' but no calibration_dataloader provided via kwargs. "
+                    "Falling back to structural priors only (no activation profiling)."
+                )
+
+        if cfg.layer_selection != "all":
+            from auto_round.utils import logger as ar_logger
+            ar_logger.info(
+                "┌─── Selective Rotation: Per-Layer Decisions (%s mode) ───────────────┐",
+                cfg.layer_selection,
+            )
+
         _desc = desc or f"Applying {cfg.hadamard_type} transforms"
+        applied_count = 0
+        skipped_count = 0
         for name, module in tqdm.tqdm(modules, desc=_desc, disable=not use_tqdm):
             if "lm_head" in name:
+                skipped_count += 1
+                continue
+            if not selector.should_rotate(name, module):
+                skipped_count += 1
                 continue
             _apply_to_module(model, module, cfg, location, data_type)
+            applied_count += 1
+
+        # Log selection summary.
+        if cfg.layer_selection != "all":
+            from auto_round.utils import logger as ar_logger
+
+            ar_logger.info(
+                "└─── Selective rotation result: applied=%d, skipped=%d / %d total ───┘",
+                applied_count, skipped_count, len(modules),
+            )
+            ar_logger.info(
+                "  Rotation coverage: %.1f%% of Linear layers rotated (%.1f%% skipped)",
+                100 * applied_count / max(len(modules), 1),
+                100 * skipped_count / max(len(modules), 1),
+            )
+
+            # Store the decisions for debugging/inspection.
+            decisions = selector.get_decisions()
+            setattr(model, "rotation_decisions", decisions)
+
+            # INFO: compact summary (type breakdown + outlier analysis)
+            # DEBUG: full per-layer decision table
+            import logging as _logging
+
+            sel_logger = _logging.getLogger("autoround.selective_rotation")
+            sel_logger.info("\n%s", selector.summary(verbose=False))
+            sel_logger.debug("\n%s", selector.summary(verbose=True))
 
         # Store config on model for serialisation / downstream inspection.
         setattr(model, "rotation_config", cfg.model_dump())

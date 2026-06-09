@@ -81,6 +81,25 @@ class RotationConfig(BaseModel, BaseRotationConfig):
     # for random hadamard (transform path)
     random_seed: bool = Field(default=False, exclude=True)
 
+    # ---- selective rotation (transform backend) ----
+    # Controls which layers receive Hadamard rotation.
+    #   "all"        — apply to all Linear layers (current default behavior)
+    #   "structural" — use structural priors to skip harmful layers
+    #                  (down_proj, o_proj, v_proj, lm_head)
+    #   "auto"       — run calibration profiling + structural priors
+    #                  (uses kurtosis + energy concentration ratio)
+    layer_selection: str = Field(default="all")
+
+    # Explicit layer name patterns to always include/exclude (fnmatch patterns).
+    # These override both structural and auto decisions.
+    include_layers: Optional[list[str]] = Field(default=None)
+    exclude_layers: Optional[list[str]] = Field(default=None)
+
+    # Thresholds for "auto" mode statistics-based decision.
+    kurtosis_threshold: float = Field(default=5.0)
+    ecr_threshold: float = Field(default=0.05)
+    score_threshold: float = Field(default=1.5)
+
     model_config = {"arbitrary_types_allowed": True}
 
     @field_validator("backend")
@@ -95,6 +114,14 @@ class RotationConfig(BaseModel, BaseRotationConfig):
     def _validate_hadamard_type(cls, v: str) -> str:
         if v not in HADAMARD_TYPES:
             raise ValueError(f"Unsupported hadamard_type: {v!r}. Supported values: {sorted(HADAMARD_TYPES)}")
+        return v
+
+    @field_validator("layer_selection")
+    @classmethod
+    def _validate_layer_selection(cls, v: str) -> str:
+        valid = {"all", "structural", "auto"}
+        if v not in valid:
+            raise ValueError(f"Unsupported layer_selection: {v!r}. Supported values: {sorted(valid)}")
         return v
 
 

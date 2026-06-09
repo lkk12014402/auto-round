@@ -239,6 +239,13 @@ def linear_loop_experts_forward(
 
         # Get this expert's container with its projection layers
         expert = getattr(self, str(expert_idx))
+
+        # Handle multi-device: expert weights may be on a different device than
+        # hidden_states (e.g., when model is dispatched across GPUs with accelerate).
+        expert_device = expert.gate_proj.weight.device
+        if expert_device != device:
+            expert_input = expert_input.to(expert_device)
+
         gate_out = expert.gate_proj(expert_input)  # (num_samples, intermediate_dim)
         up_out = expert.up_proj(expert_input)  # (num_samples, intermediate_dim)
 
@@ -251,6 +258,10 @@ def linear_loop_experts_forward(
 
         # Down projection
         expert_out = expert.down_proj(gated_out)  # (num_samples, hidden_dim)
+
+        # Move back to original device if needed
+        if expert_device != device:
+            expert_out = expert_out.to(device)
 
         # Store results
         out_per_sample[mask] = expert_out.to(out_per_sample.dtype)

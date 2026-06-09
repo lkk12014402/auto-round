@@ -974,12 +974,55 @@ class BaseCompressor(object):
         if not self.rotation_configs:
             return
         logger.info("Applying Hadamard transform to the model.")
+
+        # Build a calibration dataloader for selective rotation "auto" mode.
+        # Reuses the same dataset/tokenizer/nsamples that quantization will use.
+        calibration_dataloader = self._get_rotation_calibration_dataloader()
+
+        # Determine the compute device for profiling. At this point the model
+        # is still on CPU, so we pass the intended device explicitly.
+        from auto_round.utils.device_manager import device_manager as _dm
+        compute_device = str(_dm.device) if _dm.device is not None else None
+
         for rotation_cfg in self.rotation_configs:
             self.model_context.model = apply_rotation(
                 self.model_context.model,
                 rotation_cfg,
                 data_type=self.quantize_config.data_type,
+                calibration_dataloader=calibration_dataloader,
+                compute_device=compute_device,
             )
+
+    def _get_rotation_calibration_dataloader(self):
+        """Build a lightweight calibration dataloader for selective rotation profiling.
+
+        Returns None if the dataset is not available or not a string (custom dataset).
+        The profiling only needs ~32 samples, so we reuse the same dataset config
+        that quantization will use.
+        """
+        try:
+            dataset = getattr(self._calibration_state, "dataset", None)
+            if dataset is None or not isinstance(dataset, str):
+                return None
+
+            from auto_round.calib_dataset import get_dataloader
+
+            tokenizer = getattr(self.model_context, "tokenizer", None)
+            if tokenizer is None:
+                return None
+
+            seqlen = self._calibration_state.seqlen
+            seed = getattr(self, "seed", 42)
+            # Only need 32 samples for profiling (not the full nsamples)
+            nsamples = min(32, self._calibration_state.nsamples)
+
+            dataloader = get_dataloader(
+                tokenizer, seqlen, dataset.replace(" ", ""), seed, 1, nsamples,
+            )
+            return dataloader
+        except Exception as e:
+            logger.debug("Could not build calibration dataloader for rotation profiling: %s", e)
+            return None
 
     def _patch_model(self) -> None:
         """Phase 3 – Model structure patching.
