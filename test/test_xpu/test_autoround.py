@@ -155,7 +155,7 @@ class TestAutoRoundXPU:
 
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             quantized_model_path,
-            torch_dtype="auto",
+            torch_dtype="float16",
             device_map=self.device,
             quantization_config=quantization_config,
         )

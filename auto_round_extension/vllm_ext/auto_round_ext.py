@@ -19,7 +19,14 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.auto_round import AutoRoundConfig as _BaseAutoRoundConfig
+from vllm.model_executor.layers.quantization import register_quantization_config
+
+# vLLM 0.19+: "auto-round" is mapped to INCConfig; older versions had a
+# standalone AutoRoundConfig module. We try the old import first for compat.
+try:
+    from vllm.model_executor.layers.quantization.auto_round import AutoRoundConfig as _BaseConfig
+except (ImportError, ModuleNotFoundError):
+    from vllm.model_executor.layers.quantization.inc import INCConfig as _BaseConfig
 
 from auto_round.schemes import QuantizationScheme
 from auto_round_extension.vllm_ext.quant_method_linear import AutoRoundQuantLinearMethod
@@ -28,9 +35,23 @@ from auto_round_extension.vllm_ext.quant_method_moe import AutoRoundMoEMethod
 logger = init_logger(__name__)
 
 
-class AutoRoundExtensionConfig(_BaseAutoRoundConfig):
-    SUPPORTED_DTYPES = _BaseAutoRoundConfig.SUPPORTED_DTYPES.union({"mx_fp"})
-    SUPPORTED_FORMATS = _BaseAutoRoundConfig.SUPPORTED_FORMATS.union({"auto_round:llm_compressor"})
+@register_quantization_config("auto-round")
+class AutoRoundExtensionConfig(_BaseConfig):
+    SUPPORTED_DTYPES = _BaseConfig.SUPPORTED_DTYPES.union({"mx_fp"})
+    SUPPORTED_FORMATS = getattr(_BaseConfig, "SUPPORTED_FORMATS", {"auto_round:auto_gptq"}).union(
+        {"auto_round:llm_compressor"}
+    )
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "auto-round"
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> "str | None":
+        """Claim the 'auto-round' quant method before INCConfig can override it."""
+        if hf_quant_cfg.get("quant_method", None) == "auto-round":
+            return cls.get_name()
+        return None
 
     def __init__(
         self,
@@ -66,7 +87,11 @@ class AutoRoundExtensionConfig(_BaseAutoRoundConfig):
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         # FIXME: (yi) make it compatible with `AutoRoundConfig`
-        from vllm.attention.layer import Attention, MLAAttention
+        try:
+            from vllm.attention.layer import Attention, MLAAttention
+        except (ImportError, ModuleNotFoundError):
+            from vllm.model_executor.layers.attention.attention import Attention
+            from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 
         if isinstance(layer, (Attention, MLAAttention)):
 
@@ -92,7 +117,8 @@ class AutoRoundExtensionConfig(_BaseAutoRoundConfig):
         return quant_scheme
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> _BaseAutoRoundConfig:
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "AutoRoundExtensionConfig":
         ar_config = cls(
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
@@ -113,7 +139,6 @@ class AutoRoundExtensionConfig(_BaseAutoRoundConfig):
         # TODO: (yi) refine below implementation
         quant_scheme = AutoRoundExtensionConfig._parse_quant_scheme(config)
         layer_schemes = {}
-        layer_schemes = {}  # ensure dict
         extra_config = getattr(ar_config, "extra_config", None)
         if extra_config is not None:
             for layer_name, layer_config in extra_config.items():
@@ -125,9 +150,3 @@ class AutoRoundExtensionConfig(_BaseAutoRoundConfig):
         ar_config.quant_scheme = quant_scheme
         ar_config.layer_schemes = layer_schemes
         return ar_config
-
-
-# Patch vLLM’s AutoRoundConfig at import time
-import vllm.model_executor.layers.quantization.auto_round as _auto_round_module
-
-_auto_round_module.AutoRoundConfig = AutoRoundExtensionConfig

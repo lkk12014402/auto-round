@@ -27,8 +27,6 @@
     - [API 用法](#api-用法)
     - [AutoScheme 中的超参数](#autoscheme-超参数说明)
   + [OPT RTN 模式](#opt-rtn-模式)
-  + [AWQ 算法-实验性功能](#awq-算法)
-  + [免模型架构量化模式](#免模型架构量化模式)
   + [GGUF 格式](#gguf-格式量化)
   + [量化成本](#量化成本)
   + [设备及多卡量化设置](#设备及多卡量化设置)
@@ -148,7 +146,7 @@ AutoRound 支持多种量化配置：
 
 **LLM-Compressor 格式**：**支持 NVFP4、MXFP4（kernel 开发中）、MXFP8** 等。需设置 `--format llm_compressor`。
 
-**MLX 格式(实验性功能)**：面向 Apple Silicon (M1/M2/M3/...)，可直接被 [`mlx-lm`](https://github.com/ml-explore/mlx-lm)（纯文本 LLM）或 [`mlx-vlm`](https://github.com/Blaizzy/mlx-vlm)（多模态 VLM）加载推理。
+**MLX 格式**：面向 Apple Silicon (M1/M2/M3/...)，可直接被 [`mlx-lm`](https://github.com/ml-explore/mlx-lm)（纯文本 LLM）或 [`mlx-vlm`](https://github.com/Blaizzy/mlx-vlm)（多模态 VLM）加载推理。
 - 支持 **2、3、4、5、6、8 bits**（其中 5/6 bits 是 MLX 独有，GPTQ/AWQ 没有标准打包格式）。
 - 原生支持 **混合 bit / 混合 group_size**：通过 `layer_config` 或 AutoScheme（如 `--target_bits 3.5 --options "..."`），按层覆盖会写入 `config.json["quantization"]`，
 - `--format mlx` 导出原生 MLX checkpoint；`--format auto_round:mlx` 则让 HuggingFace `transformers` + AutoRound 加载它（在 Darwin 上 post-init 会把每层重新打包成 MLX 的 `QuantLinear`）。
@@ -158,16 +156,16 @@ AutoRound 支持多种量化配置：
 
 > 灰色背景的 schemes 表示它没有专门优化的内核，或只有效率极低的参考内核。
 
-| 格式                              | 支持的量化方案                                                                                                                                                                                                 |
-|:--------------------------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **auto_round**                  | W4A16、W2A16、W3A16、W8A16、W2A16G64、W2A16G32、`MXFP4`、`MXFP8`、`MXFP4_RCEIL`、`MXFP8_RCEIL`、`NVFP4`、`FPW8A16`、`FP8_STATIC`、`FP8_BLOCK`、`BF16`, `MXINT4`                                                               |
-| **auto_awq**                    | W4A16、BF16                                                                                                                                                                                                   |
-| **auto_gptq**                   | W4A16、W2A16、W3A16、W8A16、W2A16G64、W2A16G32、BF16                                                                                                                                                           |
-| **llm_compressor**              | NVFP4、`MXFP4`、`MXFP8`、`FPW8A16`、`FP8_STATIC`、FP8_BLOCK                                                                                                                                                              |
-| **mlx** / **auto_round:mlx** (实验性功能) | W2A16、W3A16、W4A16、W5A16、W6A16、W8A16、BF16、混合 bit / 混合 group_size（仅 Apple Silicon）                                                                                                                  |
-| **gguf**                        | GGUF:Q4_K_M、GGUF:Q2_K_S、GGUF:Q3_K_S、GGUF:Q3_K_M、GGUF:Q3_K_L、GGUF:Q4_K_S、GGUF:Q5_K_S、GGUF:Q5_K_M、GGUF:Q6_K、GGUF:Q4_0、GGUF:Q4_1、GGUF:Q5_0、GGUF:Q5_1、GGUF:Q8_0                                           |
-| **fp8**                         | FP8_BLOCK  |
-| **fake**                        | `所有方案（仅用于研究场景）`                                                                                                                                                                                   |
+| 格式            | 支持的量化方案                                                                                                                                                                                                 |
+|:-------------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **auto_round**  | W4A16、W2A16、W3A16、W8A16、W2A16G64、W2A16G32、`MXFP4`、`MXFP8`、`MXFP4_RCEIL`、`MXFP8_RCEIL`、`NVFP4`、`FPW8A16`、`FP8_STATIC`、`FP8_BLOCK`、`BF16`, `MXINT4`                                                               |
+| **auto_awq**    | W4A16、BF16                                                                                                                                                                                                   |
+| **auto_gptq**   | W4A16、W2A16、W3A16、W8A16、W2A16G64、W2A16G32、BF16                                                                                                                                                           |
+| **llm_compressor** | NVFP4、`MXFP4`、`MXFP8`、`FPW8A16`、`FP8_STATIC`、FP8_STATIC                                                                                                                                                              |
+| **mlx** / **auto_round:mlx** | W2A16、W3A16、W4A16、W5A16、W6A16、W8A16、BF16、混合 bit / 混合 group_size（仅 Apple Silicon）                                                                                                                  |
+| **gguf**        | GGUF:Q4_K_M、GGUF:Q2_K_S、GGUF:Q3_K_S、GGUF:Q3_K_M、GGUF:Q3_K_L、GGUF:Q4_K_S、GGUF:Q5_K_S、GGUF:Q5_K_M、GGUF:Q6_K、GGUF:Q4_0、GGUF:Q4_1、GGUF:Q5_0、GGUF:Q5_1、GGUF:Q8_0                                           |
+| **fp8**         | FP8_BLOCK  |
+| **fake**        | `所有方案（仅用于研究场景）`                                                                                                                                                                                   |
 
 ### 硬件兼容性
 
@@ -202,22 +200,6 @@ AutoRound 支持多种量化配置：
   
   ```bash
   auto-round-light --model Qwen/Qwen3-0.6B  --scheme "W4A16"  --format "auto_gptq,auto_awq,auto_round"
-  ```
-
-- **AutoRoundOptRTN 优化 RTN 超参（无需梯度下降）**：
-
-  该方案启用优化版 RTN（Round-To-Nearest，就近舍入）模式（`iters=0` 且 `disable_opt_rtn=False`）。**无需标定数据**，相比基础方案快数倍，同时仍会执行 AutoRound 在 RTN 侧的优化（如更优的 scale/zero-point 搜索、GGUF 中借鉴 llamacpp 的优化等）。**推荐在标定数据不足或调优时间有限的场景下作为快速基线使用**。详情参见 [OPT-RTN 模式](#opt-rtn-模式)章节。
-
-  ```bash
-  auto-round-opt-rtn --model Qwen/Qwen3-0.6B  --scheme "W4A16"  --format "auto_round"
-  ```
-
-- **AutoRoundRTN 原始 RTN 超参（不做任何优化，不需要任何数据）**：
-
-  该方案使用原始 RTN（`iters=0` 且 `disable_opt_rtn=True`），不启用任何 AutoRound 优化。**速度最快、显存占用最低**，但精度通常低于 `auto-round-opt-rtn`。当搭配受支持的 INT WOQ scheme 时，会自动路由至[免模型架构量化模式](#免模型架构量化模式)，进一步降低内存占用。适合用作快速验证或等价于传统 RTN 的无标定基线。
-
-  ```bash
-  auto-round-rtn --model Qwen/Qwen3-0.6B  --scheme "W4A16"  --format "auto_round"
   ```
 
 ### API 使用方法
@@ -303,13 +285,11 @@ ar.quantize_and_save(output_dir, format="auto_round")
 <details>
   <summary>各配置方案详细参数</summary>
 
-| 配置方案 | 批次大小 | 迭代次数 | 序列长度 | 标定样本数 | 学习率 | disable_opt_rtn |
-|---------|----------|----------|----------|-------|--------|-----------------|
-| 基础版（default）   | 8        | 200      | 2048     | 128   | 自动适配 | False           |
-| 高精度版（best）    | 8        | 1000     | 2048     | 512   | 自动适配 | False           |
-| 高速版（light）     | 8        | 50       | 2048     | 128   | 5e-3   | False           |
-| 优化 RTN（opt_rtn） | 8        | 0        | 2048     | 128   | 自动适配 | False           |
-| 原始 RTN（rtn）     | 8        | 0        | 2048     | 0     | 自动适配 | True            |
+| 配置方案 | 批次大小 | 迭代次数 | 序列长度 | 标定样本数 | 学习率 |
+|---------|----------|----------|----------|-------|--------|
+| 基础版   | 8        | 200      | 2048     | 128   | 自动适配 |
+| 高精度版 | 8        | 1000     | 2048     | 512   | 自动适配 |
+| 高速版   | 8        | 50       | 2048     | 128   | 5e-3   |
 
 </details>
 
@@ -338,53 +318,13 @@ W2G64 在 13 个任务上的平均精度与耗时
 
 </details>
 
-### AWQ 算法
-
-实验性功能：原始实现中未使用 weight clipping（权重裁剪）逻辑，因此相比原版 AWQ 算法，可能会存在一定精度下降
-
-AWQ（Activation-Aware Weight Quantization，激活感知权重量化）是一种可选的量化算法。AWQ 通过分析激活模式来保护关键权重通道，在标准量化前对权重施加通道级缩放，从而降低量化误差。
-
-AWQ 的标准部署路径是 **W4A16**，通过 vLLM 的 AWQ/Marlin CUDA 内核提供服务。**W8A8** 搭配 AWQ 平滑化也可通过 vLLM 的 compressed_tensors 后端（cutlass INT8 GEMM）提供服务。
-
-#### 命令行用法
-
-```bash
-auto-round --model Qwen/Qwen3-0.6B --scheme "W4A16" --algorithm awq --format "auto_round"
-```
-
-AWQ 专用选项：
-- `--duo_scaling`：同时使用激活和权重计算缩放因子。选项：`true`、`false` 或 `both`（搜索两种模式并选择最佳）。（默认：True）。
-- `--n_grid`：缩放比率搜索的网格点数（默认：20）。
-
-#### API 用法
-
-W8A8 搭配 AWQ 平滑化：
-
-```python
-from auto_round import AutoRound
-
-ar = AutoRound(
-    "Qwen/Qwen3-0.6B",
-    scheme="INT8",
-    algorithm="awq",
-)
-
-output_dir = "./tmp_awq"
-ar.quantize_and_save(output_dir, format="auto_round:llm_compressor")
-```
-
-
 ### AutoScheme 自动混合精度量化方案
+AutoScheme 采用自动化算法，可生成 **自适应的混合精度与数据类型** 的量化方案（mixed bits/data type quantization recipes）。相关测试结果请参考[《AutoScheme精度报告》](./auto_scheme_acc.md)。
 
-AutoScheme 自动生成自适应的混合比特/混合数据类型量化方案。精度测试结果请参考 [AutoScheme 精度报告](./auto_scheme_acc.md)。
-
-**说明：** 混合数据类型支持调优，但目前无法将其导出到实际模型中。
+**注意**：混合数据类型方案在训练阶段可用，但当前版本还不支持导出至实际模型。
 
 #### 命令行用法
-
-- **`--iters 0`**：基于 RTN 的 量化方案，速度快（秒到分钟级）。
-- **`--iters 200`**：调优感知的量化方案，更精确但慢很多。
-
+如需启动训练建议设置 `iters=200`
 ~~~bash
 auto_round \
   --model_name  $model_name \
@@ -482,28 +422,10 @@ ar.quantize_and_save()
 #### 局限性
 AutoScheme 目前还**不支持对嵌入层（Embedding layer）进行自动量化**。该层将直接采用候选方案中精度最高的配置。
 
-### OPT-RTN 模式
+## OPT-RTN 模式
 AutoRound 还提供优化版 RTN（Round-To-Nearest，就近舍入）模式，无需标定数据即可实现快速基线量化。**启用方式为 `iters=0`**。同时为获得更好的效果，推荐搭配 `group_size=32` 。RTN 与 OPT RTN 模式的精度对比详见[《精度对比报告》](./opt_rtn.md)。
 
 对于 GGUF 格式，我们参考 llamacpp 的思路，优化了 RTN 算法。若需使用原始（非优化）RTN 算法，开启 `--disable_opt_rtn` 即可。
-
-#### 命令行使用
-
-我们提供了两个专用的 CLI 入口作为快捷方式：
-
-- `auto-round-opt-rtn` — 等价于 `auto-round --iters 0 --enable_opt_rtn`（优化版 RTN，推荐使用）。
-- `auto-round-rtn` — 等价于 `auto-round --iters 0 --disable_opt_rtn`（原始 RTN，不做任何优化；对于受支持的 INT WOQ scheme 会自动路由到[免模型架构量化模式](#免模型架构量化模式)）。
-
-```bash
-# 优化版 RTN（推荐的快速基线方案）
-auto-round-opt-rtn --model Qwen/Qwen3-0.6B --scheme "W4A16" --format "auto_round"
-
-# 原始 RTN（速度最快、显存占用最低；仅作基线参考）
-auto-round-rtn --model Qwen/Qwen3-0.6B --scheme "W4A16" --format "auto_round"
-```
-
-#### API 使用
-
 ```python
 from auto_round import AutoRound
 
@@ -517,94 +439,6 @@ ar = AutoRound(
 output_dir = "./tmp_autoround"
 ar.quantize_and_save(output_dir, format="auto_round")
 ```
-
-### 免模型架构量化模式
-
-免模型架构量化模式（Model-Free Mode）可以**无需将完整模型加载到内存中**即可执行 RTN WOQ 量化。它直接下载 safetensors 文件，逐分片地对每个 Linear 权重张量进行量化并保存打包结果。当您需要快速、无标定数据的量化且资源有限时，该模式非常实用。
-
-> **默认自动启用。** 自 v0.13 起，当您同时传入 `--iters 0 --disable_opt_rtn` 与一个受支持的 INT WOQ scheme 时，CLI 会自动走免模型路径。该路径与原始 `--iters 0 --disable_opt_rtn` 流程**位级（bit-exact）等价**，但内存占用大幅降低。如需关闭自动路由、强制使用原始流程，可加 `--disable_model_free`。
-
-**主要特性：**
-- **无需模型对象** — 仅需 `config.json` 和 safetensors 文件
-- **低磁盘内存** (如果无本地模型) — 逐个下载并量化分片，处理完成后立即删除源分片
-- **逐层配置** — 支持 `--layer_config` 设置逐层位宽，以及 `--ignore_layers` 保持特定层全精度
-- **预定义忽略层** — 根据模型配置自动跳过特定层（如 MoE 门控层、MTP 层等）
-- 与标准 `--iters 0 --disable_opt_rtn` 流程对所有受支持的 scheme **位级等价**
-
-<details>
-  <summary>点击展开支持的 Scheme 与示例</summary>
-
-**支持的 Scheme**
-
-免模型模式当前支持以下整数权重量化预设（均使用 `auto_round:auto_gptq` 打包格式）：
-
-| Preset | Bits | Group size | Sym |
-| --- | --- | --- | --- |
-| `W2A16` | 2 | 128 | true |
-| `W2A16G32` | 2 | 32 | true |
-| `W2A16G64` | 2 | 64 | true |
-| `W4A16`（默认） | 4 | 128 | true |
-| `W4A16_MIXED` | 4 | 128 | true |
-| `W8A16` | 8 | 128 | true |
-
-上述 2-bit 和 8-bit 预设（`W2A16`、`W2A16G32`、`W2A16G64`、`W8A16`）同样支持**非对称量化**（`sym=False`），输出使用 `auto_round:auto_gptq` 打包格式，并与标准流程**位级等价**。4-bit 非对称量化时标准流程建议使用 `auto_round:auto_awq` 打包格式，如需该场景请使用标准 AutoRound 流程。
-
-也可以传入自定义的 `QuantizationScheme(bits=N, group_size=G, sym=True/False, data_type="int", act_bits=16)`，其中 `bits ∈ {2, 4, 8}`，group_size / sym 可任意设置。
-
-需要特殊打包内核的 scheme（`W3A16`、`FPW8A16`、`BF16`、`MXFP4`、`MXFP8`、`MXINT4`、`NVFP4`、`FP8_BLOCK`、`FP8_STATIC`、`INT8_W8A8`、`GGUF:*` 等）**不被支持**，传入会抛 `ValueError`。这些请使用标准 AutoRound 流程。
-
-#### 命令行用法
-
-```bash
-# 最简单：--iters 0 --disable_opt_rtn 自动路由到免模型
-auto_round meta-llama/Llama-3.2-1B-Instruct \
-  --scheme W4A16 \
-  --iters 0 --disable_opt_rtn \
-  --output_dir ./int4-llama
-
-# 等价的显式调用
-auto_round meta-llama/Llama-3.2-1B-Instruct \
-  --model_free \
-  --scheme W4A16 \
-  --output_dir ./int4-llama
-
-# 关闭自动路由，强制使用原始流程
-auto_round meta-llama/Llama-3.2-1B-Instruct \
-  --scheme W4A16 \
-  --iters 0 --disable_opt_rtn --disable_model_free \
-  --output_dir ./int4-llama
-
-# 搭配逐层配置和忽略层
-auto_round meta-llama/Llama-3.2-1B-Instruct \
-  --model_free \
-  --scheme W4A16 \
-  --group_size 32 \
-  --asym \
-  --layer_config "{k_proj:{bits:8},v_proj:{bits:8}}" \
-  --ignore_layers "mlp" \
-  --output_dir ./int4-llama
-```
-
-#### API 用法
-
-```python
-from auto_round import AutoRound
-
-AutoRound(
-    model="meta-llama/Llama-3.2-1B-Instruct",
-    scheme="W4A16",  # 也支持 QuantizationScheme 对象自定义 group_size / sym
-    layer_config={
-        ".*k_proj": {"bits": 8, "group_size": 32},
-        ".*v_proj": {"bits": 8, "group_size": 32},
-    },
-    ignore_layers="mlp",
-    model_free=True,
-).quantize_and_save("./int4-llama")
-```
-
-> **注意：** 免模型量化模式仅支持 `auto_round` 输出格式，并使用 RTN（无标定数据、无迭代调优）。如需更高质量的量化结果或使用受支持列表外的 scheme，请使用标准 AutoRound 流程。
-
-</details>
 
 ### GGUF 格式量化
 实验性功能。该格式适用 CPU 设备，在社区应用广泛。
@@ -769,6 +603,8 @@ auto-round --model_name Qwen/Qwen3-0.6B  --scheme "W4A16" --quant_lm_head --form
 #### 使用 AdamW 优化器
 添加 `--adam` 参数即可启用；**注意**：在我们的多项测试场景中，AdamW 优化器的效果均不如符号梯度下降（sign gradient descent）。
 
+
+
 ### 旋转（Rotation）
 
 AutoRound 支持基于旋转的变换技术来提升量化精度。旋转在量化前对权重和激活中的离群点进行重分布，使分布更加均匀，从而对量化更友好。
@@ -816,21 +652,21 @@ from auto_round import AutoRound
 from auto_round.algorithms.transforms.spinquant import SpinQuantConfig
 
 # 仅 R1（速度快，良好的基准提升）
-ar = AutoRound(model_name, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True))
 
 # R1 + R2（更好，融合后无运行时开销）
-ar = AutoRound(model_name, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True))
 
 # R1 + R2 + R3 + R4（最佳精度，hook 带来少许运行时开销）
-ar = AutoRound(model_name, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
 ```
 
 ##### 字符串快捷方式
 
 | 值 | 等价配置 |
 |----|---------|
-| `"quarot"` | `SpinQuantConfig(r1=True, r2=True, trainable_rotation=False, trainable_smooth=False)` — 确定性 Hadamard，无需训练 |
-| `"spinquant"` | `SpinQuantConfig(r1=True, r2=True, trainable_rotation=True, trainable_smooth=True)` — **实验性**（需要提供 dataloader） |
+| `"quarot"` | `SpinQuantConfig(r1=True, r2=True, r3=True, r4=True)` — 确定性 Hadamard，无需训练 |
+| `"spinquant"` | `SpinQuantConfig(r1=True, r2=True, r3=True, r4=True, trainable_rotation=True)` — **实验性**，见下方说明 |
 
 > ⚠️ **SpinQuant 可训练旋转**（`trainable_rotation=True`）启用通过 Cayley SGD 优化的可学习旋转矩阵。此功能为**实验性**，尚未完全验证。生产环境建议使用 `"quarot"`（固定 Hadamard）。
 
@@ -838,11 +674,11 @@ ar = AutoRound(model_name, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=Tr
 
 ```python
 # 确定性（默认）：固定 Hadamard 矩阵，无需额外存储
-ar = AutoRound(model_name, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
+ar = AutoRound(model, scheme="MXFP4", rotation_config=SpinQuantConfig(r1=True, r2=True, r3=True, r4=True))
 
-# 随机：H × diag(±1)，离群点抑制效果略好，需保存旋转矩阵
+# 随机：H × diag(±1)，离群点抑制效果略好，需保存随机符号向量
 ar = AutoRound(
-    model_name,
+    model,
     scheme="MXFP4",
     rotation_config=SpinQuantConfig(
         r1=True, r2=True, r3=True, r4=True, random_r1=True, random_r2=True, random_r3=True, random_r4=True
@@ -854,12 +690,11 @@ ar = AutoRound(
 
 | 参数 | 默认值 | 描述 |
 |------|--------|------|
-| `r1` / `r2` / `r3` / `r4` | `True / True / False / False` | 启用各位置的旋转 |
+| `r1` / `r2` / `r3` / `r4` | `False` | 启用各位置的旋转 |
 | `online_r1_rotation` | `True` | R1 通过 hook 应用（`True`）或融合到权重中（`False`） |
-| `random_r1` / `random_r2` / `random_r3` / `random_r4` | `False` | 使用随机 Hadamard（H×diag(±1)）而非确定性 |
+| `random_r1` / `r2` / `r3` / `r4` | `False` | 使用随机 Hadamard（H×diag(±1)）而非确定性 |
 | `rotation_size` | `None`（自动） | 块旋转维度；从模型维度自动检测 |
-| `trainable_rotation` | `False` | 启用 SpinQuant 可学习旋转（**实验性**，需要 dataloader） |
-| `trainable_smooth` | `False` | 启用可学习 smooth 值（**实验性**，需要 dataloader） |
+| `trainable_rotation` | `False` | 启用 SpinQuant 可学习旋转（**实验性**） |
 
 ##### 保存与加载
 
@@ -875,9 +710,9 @@ from transformers import AutoModelForCausalLM
 model = AutoModelForCausalLM.from_pretrained("./my_model", device_map="auto")
 ```
 
-- **确定性旋转**：仅存储元数据（类型 + rotation_size）——矩阵在加载时重建
-- **随机旋转**：以 `int8`（±1）旋转矩阵形式存储（大小约为 rotation_size² 字节）
-- **在线旋转**：在模型加载时重建（R1/R4 通过 QuantLinear forward patch；R3 通过配置触发的 monkeypatch）
+- **确定性旋转**（R1–R4）：仅存储元数据（类型 + 种子）——矩阵在加载时重新生成
+- **随机旋转**：随机符号向量以紧凑的 int8 buffer 存储（约 hidden_size 字节）
+- **在线 hook**（R3/R4）：在模型加载时自动重新注册
 
 #### 逐线性层块旋转（实验性）
 
@@ -1015,9 +850,10 @@ print(tokenizer.decode(model.generate(**inputs, max_new_tokens=50, do_sample=Fal
 | ark                     | cpu            | 4              | FP32/FP16/BF16 | 6    | awq             | auto-round-lib<br/>torch>=2.8.0 |
 | ark                     | xpu            | 4、8           | FP32/FP16/BF16 | 6    | gptq/gptq_zp+-1 | auto-round-lib<br/>torch>=2.8.0 |
 | ark                     | xpu            | 4              | FP32/FP16/BF16 | 6    | awq             | auto-round-lib<br/>torch>=2.8.0 |
+| ipex（即将废弃）        | cpu/xpu        | 4              | BF16/FP16    | 5      | gptq_zp+-1/awq  | intel-extension-for-pytorch    |
 | marlin                  | cuda           | 4、8           | BF16/FP16    | 6      | gptq/gptq_zp+-1 | gptqmodel                      |
-| exllamav2/<br/>gptqmodel:exllamav2 | cuda    | 4              | BF16/FP16    | 5      | gptq/gptq_zp+-1 | gptqmodel                      |
-| exllamav2/<br/>gptq:exllamav2      | cuda    | 4              | FP16         | 3      | gptq_zp+-1      | auto-gptq<br/>transformers<5.0.0  |
+| exllamav2/<br/>gptqmodel:exllamav2 | cuda    | 4              | BF16/FP16    | 5      | gptq            | gptqmodel                      |
+| exllamav2/<br/>gptq:exllamav2      | cuda    | 4              | FP16         | 5      | gptq_zp+-1      | auto-gptq<br/>transformers<5.0.0  |
 | gptq:cuda               | cuda           | 2、3、4、8     | FP16         | 1      | gptq_zp+-1      | auto-gptq<br/>transformers<5.0.0  |
 | triton                  | xpu/cuda       | 2、4、8        | BF16/FP16    | 2      | gptq/gptq_zp+-1 | auto-round                     |
 | awq                     | cuda           | 4              | FP16         | 5      | awq             | auto-awq<br/>transformers<4.57.0 |

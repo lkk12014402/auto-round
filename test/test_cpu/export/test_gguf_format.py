@@ -53,18 +53,6 @@ class TestGGUF:
         assert gguf_file.endswith(".gguf"), "Saved file is not in gguf format"
         # Accuracy test is covered in test_cuda/export/test_gguf_format.py::TestAutoRound::test_q4_0_accuracy
 
-    def test_q2_k_s_routes_calibrated_rtn(self, tiny_qwen_model_path):
-        autoround = AutoRound(
-            tiny_qwen_model_path,
-            scheme="gguf:q2_k_s",
-            iters=0,
-            nsamples=1,
-            seqlen=8,
-        )
-
-        assert type(autoround).__name__ == "CalibratedRTNCompressor"
-        assert autoround.quantize_config._alg_cls == "OptimizedRTNQuantizer"
-
     def test_func(self):
         bits, group_size, sym = 4, 128, True
         autoround = AutoRound(
@@ -142,19 +130,10 @@ class TestGGUF:
                 assert False, "cmd line test fail, please have a check"
             shutil.rmtree("../../tmp_autoround", ignore_errors=True)
 
-        # test q2_k_mixed with iters=0 (RTN) on non-MoE model — should still work
+        # test mixed q2_k_s
         res = os.system(
             f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --model {model_name}"
             f" --bs 16 --iters 0 --disable_opt_rtn --nsamples 1 --seqlen 16 --scheme GGUF:Q2_K_MIXED"
-        )
-        if res > 0 or res == -1:
-            assert False, "cmd line test fail, please have a check"
-        shutil.rmtree("../../tmp_autoround", ignore_errors=True)
-
-        # test q2_k_mixed with iters=1 on non-MoE model — should fallback to q4_k_m
-        res = os.system(
-            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --model {model_name}"
-            f" --bs 16 --iters 1 --nsamples 1 --seqlen 16 --format gguf:q2_k_mixed"
         )
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
@@ -200,7 +179,7 @@ class TestGGUF:
             else:
                 assert abs(file_size - 264) < 5.0
 
-    def test_qtype_setting(self, tiny_qwen_vl_model_path):
+    def test_qtype_setting(self):
         # Qwen2.5-0.5B-Instruct no output, token_embed q6_k fallbakc to q8_0 336M
         # Qwen3-0.6B output q6_k, token_embed q4_0  448M
         # Qwen3-8B output q6_k, token_embed q4_0 4.5G
@@ -227,7 +206,7 @@ class TestGGUF:
         assert ar.layer_config["model.embed_tokens"]["bits"] == 8
         assert "lm_head" not in ar.layer_config
 
-        model_name = get_model_path("Qwen/Qwen3-0.6B")
+        model_name = "Qwen/Qwen3-0.6B"
         ar = AutoRound(model=model_name, scheme="gguf:q4_0", iters=0)
         ar.formats = ["gguf:q4_0"]
         ar.layer_config, _, _ = set_layer_config(
@@ -271,36 +250,6 @@ class TestGGUF:
             and ar.layer_config["model.embed_tokens"]["super_bits"] == 8
         )
 
-        ar = AutoRound(model=tiny_qwen_vl_model_path, scheme="gguf:q4_0", iters=0)
-        ar.formats = ["gguf:q4_0"]
-        ar.layer_config, _, _ = set_layer_config(
-            ar.model,
-            ar.layer_config,
-            ar.scheme,
-            ar.scale_dtype,
-            ar.supported_types,
-            ar.inner_supported_types,
-            ar.quant_block_list,
-            ar.ignore_layers,
-            ar.quant_lm_head,
-            enable_gguf_official_mixed=True,
-            is_mllm=ar.mllm,
-        )
-        assert ar.layer_config["model.language_model.embed_tokens"]["bits"] == 6
-        assert ar.layer_config["model.language_model.embed_tokens"]["super_bits"] == 8
-
-        ar = AutoRound(
-            model=tiny_qwen_vl_model_path,
-            format="gguf:q4_0",
-            iters=0,
-            disable_opt_rtn=True,
-            disable_model_free=True,
-            quant_nontext_module=False,
-        )
-        ar.post_init()
-        assert ar.quantizer.layer_config["model.language_model.embed_tokens"]["bits"] == 6
-        assert ar.quantizer.layer_config["model.language_model.embed_tokens"]["super_bits"] == 8
-
     def test_q2k_mixed(self, tiny_qwen_moe_model_path):
         model_name = tiny_qwen_moe_model_path
         autoround = AutoRound(
@@ -322,25 +271,3 @@ class TestGGUF:
         assert gguf_model.get_tensor(2).tensor_type.name == "Q4_K"
         assert gguf_model.get_tensor(9).name == "blk.0.ffn_up_exps.weight"
         assert gguf_model.get_tensor(9).tensor_type.name == "Q2_K"
-
-    def test_q2k_mixed_keeps_only_three_dim_expert_weights_at_q2k(self, tiny_qwen_moe_model_path):
-        model_name = tiny_qwen_moe_model_path
-        autoround = AutoRound(
-            model_name,
-            iters=0,
-            nsamples=1,
-            seqlen=16,
-            disable_opt_rtn=True,
-        )
-        _, quantized_model_path = autoround.quantize_and_save(output_dir=self.save_dir, format="gguf:q2_k_mixed")
-        gguf_file = os.listdir(quantized_model_path)[0]
-        from gguf.gguf_reader import GGUFReader
-
-        gguf_model = GGUFReader(os.path.join(quantized_model_path, gguf_file))
-        tensor_types = {tensor.name: tensor.tensor_type.name for tensor in gguf_model.tensors}
-
-        assert tensor_types["token_embd.weight"] == "Q8_0"
-        assert tensor_types["output.weight"] == "Q8_0"
-        assert tensor_types["blk.0.attn_k.weight"] == "Q4_K"
-        assert tensor_types["blk.0.ffn_down_exps.weight"] == "Q5_0"
-        assert tensor_types["blk.0.ffn_up_exps.weight"] == "Q2_K"

@@ -14,6 +14,40 @@
 
 import os
 
+
+def register_auto_round_vllm_plugin():
+    """Entry point for vLLM general_plugins.
+
+    Called automatically by vLLM's plugin loading mechanism when
+    'auto_round_extension' is registered under the 'vllm.general_plugins'
+    entry point group.
+    """
+    VLLM_ENABLE_AR_EXT = os.environ.get("VLLM_ENABLE_AR_EXT", "") in [
+        "1",
+        "true",
+        "True",
+    ]
+
+    if not VLLM_ENABLE_AR_EXT:
+        print("*****************************************************************************")
+        print(
+            "* Sitecustomize is loaded, but VLLM_ENABLE_AR_EXT is not set, skipping auto_round_vllm_extension *"
+        )
+        print("*****************************************************************************")
+        return
+
+    print("*****************************************************************************")
+    print(f"* !!! VLLM_ENABLE_AR_EXT is set to {VLLM_ENABLE_AR_EXT}, applying auto_round_vllm_extension *")
+    print("*****************************************************************************")
+
+    # Register AutoRoundExtensionConfig via @register_quantization_config("auto-round")
+    # This overrides vLLM's built-in INCConfig mapping for the "auto-round" quant method
+    from auto_round_extension.vllm_ext.auto_round_ext import AutoRoundExtensionConfig  # noqa: F401
+
+    from auto_round_extension.vllm_ext.envs_ext import extra_environment_variables  # noqa: F401
+
+
+# Legacy: support direct import (e.g., `import auto_round_extension.vllm_ext.sitecustomize`)
 VLLM_ENABLE_AR_EXT = os.environ.get("VLLM_ENABLE_AR_EXT", "") in [
     "1",
     "true",
@@ -21,21 +55,4 @@ VLLM_ENABLE_AR_EXT = os.environ.get("VLLM_ENABLE_AR_EXT", "") in [
 ]
 
 if VLLM_ENABLE_AR_EXT:
-    print("*****************************************************************************")
-    print(f"* !!! VLLM_ENABLE_AR_EXT is set to {VLLM_ENABLE_AR_EXT}, applying auto_round_vllm_extension *")
-    print("*****************************************************************************")
-
-    import vllm.model_executor.layers.quantization.auto_round as auto_round_module
-
-    from auto_round_extension.vllm_ext.auto_round_ext import AutoRoundExtensionConfig
-
-    auto_round_module.AutoRoundConfig = AutoRoundExtensionConfig
-    from auto_round_extension.vllm_ext.envs_ext import extra_environment_variables
-
-
-else:
-    print("*****************************************************************************")
-    print(
-        f"* Sitecustomize is loaded, but VLLM_ENABLE_AR_EXT is set to {VLLM_ENABLE_AR_EXT}, skipping auto_round_vllm_extension *"
-    )
-    print("*****************************************************************************")
+    register_auto_round_vllm_plugin()

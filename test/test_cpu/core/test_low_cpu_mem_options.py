@@ -34,6 +34,7 @@ class TestLowCpuMemUsage:
             bits=4,
             low_cpu_mem_usage=True,
             iters=0,
+            disable_opt_rtn=True,
             nsamples=1,
             seqlen=32,
         )
@@ -44,6 +45,7 @@ class TestLowCpuMemUsage:
             bits=4,
             low_cpu_mem_usage=False,
             iters=0,
+            disable_opt_rtn=True,
             nsamples=1,
             seqlen=32,
         )
@@ -56,6 +58,7 @@ class TestLowCpuMemUsage:
             bits=4,
             low_cpu_mem_usage=False,
             iters=0,
+            disable_opt_rtn=True,
             nsamples=1,
             seqlen=32,
         )
@@ -76,7 +79,6 @@ class TestLowCpuMemUsage:
             disable_opt_rtn=True,
             nsamples=1,
             seqlen=32,
-            disable_model_free=True,  # Ensure offloading is enabled for this test
         )
 
         dummy_block = torch.nn.Linear(4, 4)

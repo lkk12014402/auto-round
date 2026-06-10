@@ -1,1 +1,1 @@
-compressed_tensors<0.16
+compressed_tensors

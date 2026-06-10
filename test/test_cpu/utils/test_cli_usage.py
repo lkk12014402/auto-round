@@ -13,7 +13,6 @@ AUTO_ROUND_PATH = "/".join(AUTO_ROUND_PATH[: AUTO_ROUND_PATH.index("test")])
 
 
 class TestAutoRoundCmd:
-
     @pytest.fixture(autouse=True)
     def setup_save_dir(self, tmp_path):
         self.save_dir = str(tmp_path / "saved")
@@ -27,59 +26,51 @@ class TestAutoRoundCmd:
 
     def test_auto_round_cmd(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
         python_path = sys.executable
+
+        # Test llm script
         res = os.system(f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round -h")
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd2(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
         res = os.system(
-            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --model {tiny_opt_model_path} --seqlen 32 --iter 2 --nsamples 1 --format auto_gptq,auto_round --output_dir {self.save_dir} --tasks piqa --limit 2"
+            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --model {tiny_opt_model_path} --seqlen 32 --iter 2 --nsamples 1 --format auto_gptq,auto_round --output_dir {self.save_dir}  --tasks piqa"
         )
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd3(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
         res = os.system(
-            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --model {tiny_opt_model_path} --seqlen 8 --iter 1 --nsamples 1 --eval_task_by_task --tasks openbookqa --bs 32 --limit 2"
+            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --model {tiny_opt_model_path} --seqlen 8 --iter 1 --nsamples 1 --eval_task_by_task --tasks openbookqa --bs 32"
         )
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd4(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
         res = os.system(
-            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -c 'from auto_round.__main__ import run_light; run_light()' --seqlen 8 --iter 2 --nsamples 8 --output_dir {self.save_dir} --tasks lambada_openai --limit 2"
+            f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -c 'from auto_round.__main__ import run_light; run_light()' --seqlen 8 --iter 2 --nsamples 8 --output_dir {self.save_dir} --tasks lambada_openai"
         )
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd5(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
+        # test mllm script
+
+        # test auto_round_mllm --eval help
         res = os.system(f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --eval -h")
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd6(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
+        # test auto_round_mllm --lmms help
         res = os.system(f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --eval --lmms -h")
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd7(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
         res = os.system(
             f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --mllm --model {tiny_qwen_vl_model_path} --iter 2 --nsamples 2 --seqlen 32 --format auto_round --output_dir {self.save_dir}"
         )
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
 
-    def test_auto_round_cmd8(self, tiny_opt_model_path, tiny_qwen_vl_model_path):
-        python_path = sys.executable
         res = os.system(
             f"PYTHONPATH='{AUTO_ROUND_PATH}:$PYTHONPATH' {python_path} -m auto_round --mllm --iter 2 --nsamples 2 --model {tiny_qwen_vl_model_path} --seqlen 32 --format auto_round"
-            f" --quant_nontext_module --output_dir {self.save_dir}"
+            f" --quant_nontext_module --output_dir {self.save_dir} "
         )
         if res > 0 or res == -1:
             assert False, "cmd line test fail, please have a check"
@@ -128,99 +119,3 @@ def test_parse_layer_config_with_single_escaped_regex_keys():
         r"model.language_model.layers.\d+.self_attn..": {"bits": 8},
         r"model.language_model.layers.\d+.mlp..": {"bits": 8},
     }
-
-
-def test_run_rtn_uses_zero_shot_recipe(monkeypatch):
-    from auto_round import __main__ as cli_main
-
-    captured = {}
-
-    def fake_tune(args):
-        captured["args"] = args
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "auto_round_rtn",
-            "--model",
-            "dummy-model",
-        ],
-    )
-    monkeypatch.setattr(cli_main, "tune", fake_tune)
-
-    cli_main.run_rtn()
-
-    args = captured["args"]
-    assert args.model_name == "dummy-model"
-    assert args.iters == 0
-    assert args.disable_opt_rtn is True
-    assert args.batch_size == 8
-    assert args.nsamples == 1
-
-
-def test_run_rtn_preserves_eval_args(monkeypatch, tmp_path):
-    from auto_round import __main__ as cli_main
-
-    captured = {}
-
-    def fake_tune(args):
-        captured["args"] = args
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "auto_round_rtn",
-            "--model",
-            "dummy-model",
-            "--tasks",
-            "mmlu",
-            "--format",
-            "fake",
-            "--output_dir",
-            str(tmp_path / "out"),
-            "--eval_model_dtype",
-            "bf16",
-        ],
-    )
-    monkeypatch.setattr(cli_main, "tune", fake_tune)
-
-    cli_main.run_rtn()
-
-    args = captured["args"]
-    assert args.tasks == "mmlu"
-    assert args.format == "fake"
-    assert args.eval_model_dtype == "bf16"
-    assert args.output_dir == str(tmp_path / "out")
-    assert args.iters == 0
-    assert args.disable_opt_rtn is True
-
-
-def test_run_opt_rtn_uses_recipe(monkeypatch):
-    from auto_round import __main__ as cli_main
-
-    captured = {}
-
-    def fake_tune(args):
-        captured["args"] = args
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "auto_round_opt_rtn",
-            "--model",
-            "dummy-model",
-        ],
-    )
-    monkeypatch.setattr(cli_main, "tune", fake_tune)
-
-    cli_main.run_opt_rtn()
-
-    args = captured["args"]
-    assert args.model_name == "dummy-model"
-    assert args.iters == 0
-    assert args.disable_opt_rtn is False
-    assert args.batch_size == 8
-    assert args.nsamples == 128
