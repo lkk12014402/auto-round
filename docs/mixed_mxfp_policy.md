@@ -69,4 +69,5 @@ Policy defaults are merged before `set_layer_config()` expands the final configu
 ## Limitations / fallback guidance
 
 - Unknown or custom `trust_remote_code` models may not expose enough structure for automatic detection. In that case, keep using explicit `layer_config` and/or `ignore_layers`.
+- Policy detection follows AutoRound's existing `trust_remote_code` setting. For untrusted repositories, pass `--disable_trust_remote_code` or `trust_remote_code=False`.
 - Model-free MXFP policy detection builds a lightweight meta model from config; if that fails, AutoRound falls back to the explicit scheme and user overrides only.

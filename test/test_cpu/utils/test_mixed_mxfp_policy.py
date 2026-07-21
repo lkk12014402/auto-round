@@ -192,7 +192,7 @@ def test_dense_gated_mlp_gate_proj_is_not_treated_as_router():
     assert layer_config["layers.0.feed_forward.gate_proj"]["bits"] == 4
 
 
-def test_explicit_layer_config_and_ignore_layers_override_policy_defaults():
+def test_explicit_overrides_take_precedence_over_policy():
     model = _TransformerFixture(_HybridSparseBlock, num_layers=1)
 
     layer_config, _, _ = _set_mixed_policy_config(

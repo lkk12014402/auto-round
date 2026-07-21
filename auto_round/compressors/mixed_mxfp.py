@@ -243,6 +243,13 @@ def _children_look_like_experts(
     collection_module: torch.nn.Module,
     child_entries: list[tuple[str, torch.nn.Module, list[str]]],
 ) -> bool:
+    """Return True when a module's children structurally resemble repeated experts.
+
+    The detector prefers explicit collections (`ModuleList`/`Sequential`/`ModuleDict`).
+    For unfused custom wrappers, it falls back to repeated non-leaf children with
+    similar types or similar numbers of supported linear descendants.
+    """
+
     if len(child_entries) < 2:
         return False
     if isinstance(collection_module, _MODULE_COLLECTION_TYPES):
@@ -277,7 +284,7 @@ def _is_router_candidate(
         return True
     if leaf_name == "gate":
         return True
-    if "gate" in leaf_name and not leaf_name.endswith("gate_proj") and not descendants_by_ancestor.get(module_name):
+    if _is_gate_router_fallback(leaf_name, module_name, descendants_by_ancestor):
         return True
     return False
 
@@ -314,3 +321,11 @@ def _is_attention_candidate(module_name: str, module: torch.nn.Module) -> bool:
         return True
     leaf_name = module_name.rsplit(".", 1)[-1].lower()
     return any(token in leaf_name for token in _ATTENTION_NAME_HINTS)
+
+
+def _is_gate_router_fallback(
+    leaf_name: str,
+    module_name: str,
+    descendants_by_ancestor: dict[str, list[str]],
+) -> bool:
+    return "gate" in leaf_name and not leaf_name.endswith("gate_proj") and not descendants_by_ancestor.get(module_name)

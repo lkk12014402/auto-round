@@ -69,4 +69,5 @@ ar.quantize_and_save("./qmodel", format="llm_compressor")
 ## 限制与回退建议
 
 - 对于未知结构或自定义 `trust_remote_code` 模型，自动检测可能拿不到足够的结构信息。这种情况下，仍建议显式传入 `layer_config` 和/或 `ignore_layers`。
+- 策略检测会沿用 AutoRound 现有的 `trust_remote_code` 设置。若模型仓库不可信，请显式传入 `--disable_trust_remote_code` 或 `trust_remote_code=False`。
 - 在 model-free 模式下，MXFP 策略会先根据配置构建一个轻量级 meta model 做检测；若该步骤失败，AutoRound 会回退到显式 scheme 与用户自定义覆盖规则。
