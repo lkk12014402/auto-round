@@ -211,6 +211,17 @@ class TestParseLayerConfig:
         assert core.layer_config[".moe."]["bits"] == 4
         assert core.layer_config[".shared_expert."]["bits"] == 8
 
+    def test_mixed_mxfp_policy_resolves_default_scheme_for_model_free(self):
+        core = _ModelFreeCompressorCore(
+            model_name_or_path="dummy",
+            output_dir="dummy_out",
+            scheme="W4A16",
+            mixed_mxfp_policy="moe_balanced",
+        )
+        core._parse_scheme()
+        assert core.default_scheme["bits"] == 8
+        assert core.default_scheme["data_type"] == "mx_fp"
+
 
 # ===========================================================================
 #  _process_shard

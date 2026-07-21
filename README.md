@@ -231,6 +231,12 @@ ar = AutoRound(model_name_or_path, scheme="W4A16")
 ar.quantize_and_save(output_dir="./qmodel", format="auto_round")
 ```
 
+### Architecture-aware MXFP mixed precision
+
+AutoRound also provides reusable architecture-aware MXFP policies for dense and MoE language models. See
+[docs/mixed_mxfp_policy.md](./docs/mixed_mxfp_policy.md) for commands, API usage, precedence rules, and
+detection limitations/fallbacks.
+
 <details>
 <summary>Important Hyperparameters</summary>
 
@@ -240,6 +246,7 @@ ar.quantize_and_save(output_dir="./qmodel", format="auto_round")
 - **`group_size` (int)**: Size of the quantization group (default is `None`). If not None, it will override the scheme setting.
 - **`sym` (bool)**: Whether to use symmetric quantization (default is `None`). If not None, it will override the scheme setting.
 - **`layer_config` (dict)**: Configuration for layer_wise scheme (default is `None`), mainly for customized mixed schemes.
+- **`mixed_mxfp_policy` (str|None)**: Architecture-aware MXFP policy for dense/MoE language models. Supported values: `dense_mxfp4`, `moe_conservative`, `moe_balanced`. When set, explicit `layer_config` and `ignore_layers` still take precedence over the policy defaults.
 
 ##### Algorithm Settings
 - **`enable_alg_ext` (bool)**: [Experimental Feature] Only for `iters>0`. Enable algorithm variants for specific schemes (e.g., MXFP4/W2A16) that could bring notable improvements. Default is `False`.
@@ -415,4 +422,3 @@ Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ,
 
 ## 🌟 Support Us
 If you find AutoRound helpful, please ⭐ star the repo and share it with your community!
-
