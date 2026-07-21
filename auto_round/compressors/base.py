@@ -28,6 +28,12 @@ from auto_round.algorithms.transforms import (
 )
 from auto_round.auto_scheme.gen_auto_scheme import AutoScheme
 from auto_round.compressors.shard_writer import ShardWriter
+from auto_round.compressors.mixed_mxfp import (
+    build_mixed_mxfp_policy_defaults,
+    merge_mixed_mxfp_policy_defaults,
+    normalize_mixed_mxfp_policy,
+    resolve_mixed_mxfp_policy_scheme,
+)
 from auto_round.compressors.utils import _get_save_folder_name, is_mx_fp, is_nv_fp, set_layer_config
 from auto_round.context.compress import CompressContext
 from auto_round.context.model import ModelContext
@@ -101,6 +107,7 @@ class SerializedCompressorConfig:
     super_bits: Optional[int] = None
     super_group_size: Optional[int] = None
     to_quant_block_names: Optional[list[str]] = None
+    mixed_mxfp_policy: Optional[str] = None
     rotation_configs: Optional[list[dict[str, Any]]] = None
 
 
@@ -166,6 +173,7 @@ class BaseCompressor(object):
     regex_config: dict = None
     quant_block_list: list = None
     to_quant_block_names = None
+    mixed_mxfp_policy = None
     ignore_layers: str = ""
     quant_lm_head: bool = False
     _scheme_resolved: bool = False
@@ -210,6 +218,7 @@ class BaseCompressor(object):
         ignore_layers: str = "",
         quant_lm_head: bool = False,
         to_quant_block_names: Optional[Union[str, list[str]]] = None,
+        mixed_mxfp_policy: Optional[str] = None,
         **kwargs,
     ) -> None:
         # ``CalibrationState`` is the single source of truth for calibration
@@ -273,6 +282,7 @@ class BaseCompressor(object):
         self.ignore_layers = ignore_layers
         self.quant_lm_head = quant_lm_head
         self.to_quant_block_names = to_quant_block_names
+        self.mixed_mxfp_policy = normalize_mixed_mxfp_policy(mixed_mxfp_policy)
         # ``post_init()`` may run before ``quantize_and_save()`` in tests and
         # compatibility paths, so seed the same default used by
         # ``quantize_and_save(..., inplace=True)`` here.
@@ -690,6 +700,21 @@ class BaseCompressor(object):
                     quant_lm_head=self.quant_lm_head,
                     mllm=self.model_context.is_mllm,
                 )
+
+        if self.mixed_mxfp_policy is not None:
+            self.scheme = resolve_mixed_mxfp_policy_scheme(self.mixed_mxfp_policy, self.scheme)
+            policy_defaults = build_mixed_mxfp_policy_defaults(
+                self.model_context.model,
+                self.mixed_mxfp_policy,
+                supported_types=SUPPORTED_LAYER_TYPES,
+                inner_supported_types=INNER_SUPPORTED_LAYER_TYPES,
+                quant_block_list=self.quant_block_list,
+            )
+            self.layer_config, self.ignore_layers = merge_mixed_mxfp_policy_defaults(
+                policy_defaults,
+                self.layer_config,
+                self.ignore_layers,
+            )
 
         fill_default_value = not self.is_auto_scheme
         self.layer_config, self.has_qlayer_outside_block, self.regex_config = set_layer_config(

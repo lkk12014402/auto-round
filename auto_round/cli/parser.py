@@ -87,6 +87,12 @@ def add_common_quantization_arguments(group) -> None:
         "--quant_lm_head", default=False, action=argparse.BooleanOptionalAction, help="Quantize the lm_head module."
     )
     group.add_argument(
+        "--mixed_mxfp_policy",
+        default=None,
+        choices=["dense_mxfp4", "moe_conservative", "moe_balanced"],
+        help="Architecture-aware MXFP mixed-precision policy. Overrides the default W4A16 base scheme to MXFP4/MXFP8 when needed.",
+    )
+    group.add_argument(
         "--to_quant_block_names", default=None, type=str, help="Comma-separated subset of block names to quantize."
     )
 

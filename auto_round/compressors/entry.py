@@ -24,7 +24,7 @@ from auto_round.schemes import QuantizationScheme, parse_scheme
 from auto_round.utils.device_manager import normalize_default_device_map
 
 _ENTRY_ROUTE_KWARGS = {"model_free", "disable_model_free", "disable_opt_rtn"}
-_ENTRY_COMPRESSOR_KWARGS = {"scale_dtype", "ignore_layers", "quant_lm_head", "to_quant_block_names"}
+_ENTRY_COMPRESSOR_KWARGS = {"scale_dtype", "ignore_layers", "quant_lm_head", "to_quant_block_names", "mixed_mxfp_policy"}
 _ENTRY_BASE_KWARGS = {
     "format",
     "dataset",
@@ -512,6 +512,7 @@ class AutoRoundCompatible:
             "ignore_layers": kwargs.pop("ignore_layers", ""),
             "quant_lm_head": kwargs.pop("quant_lm_head", False),
             "to_quant_block_names": kwargs.pop("to_quant_block_names", None),
+            "mixed_mxfp_policy": kwargs.pop("mixed_mxfp_policy", None),
         }
 
     @staticmethod

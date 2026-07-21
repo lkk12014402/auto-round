@@ -103,9 +103,16 @@ from typing import Any, Callable, Optional, Union
 import torch
 
 from auto_round import envs
+from auto_round.compressors.mixed_mxfp import (
+    build_mixed_mxfp_policy_defaults,
+    merge_mixed_mxfp_policy_defaults,
+    normalize_mixed_mxfp_policy,
+    resolve_mixed_mxfp_policy_scheme,
+)
 from auto_round.compressors.utils import is_mx_fp
 from auto_round.logger import logger
 from auto_round.schemes import PRESET_SCHEMES, QuantizationScheme, preset_name_to_scheme
+from auto_round.utils import INNER_SUPPORTED_LAYER_TYPES, SUPPORTED_LAYER_TYPES
 from auto_round.utils.common import AUDIO_MM_KEYS, VISION_MM_KEYS, compress_layer_names, to_standard_regex
 from auto_round.utils.device import clear_memory, memory_monitor
 from auto_round.utils.missing_tensors import quantize_weight_rtn, split_fused_expert_tensors
@@ -1667,6 +1674,8 @@ class _ModelFreeCompressorCore:
         device: str = "cpu",
         quant_lm_head: bool = False,
         quant_nontext_module: bool = False,
+        mixed_mxfp_policy: Optional[str] = None,
+        trust_remote_code: bool = True,
     ) -> None:
         # --- raw inputs ---
         self.model_name_or_path = model_name_or_path
@@ -1678,6 +1687,8 @@ class _ModelFreeCompressorCore:
         self.device = device
         self.quant_lm_head = quant_lm_head
         self.quant_nontext_module = quant_nontext_module
+        self.mixed_mxfp_policy = normalize_mixed_mxfp_policy(mixed_mxfp_policy)
+        self.trust_remote_code = trust_remote_code
 
         # --- derived state populated during run() ---
         self.scheme_obj: QuantizationScheme | None = None
@@ -1711,7 +1722,7 @@ class _ModelFreeCompressorCore:
             )
 
     def _parse_scheme(self) -> None:
-        scheme_in = self.scheme_input
+        scheme_in = resolve_mixed_mxfp_policy_scheme(self.mixed_mxfp_policy, self.scheme_input)
         if isinstance(scheme_in, str) and scheme_in.upper() == "W4A16_MIXED":
             # Match regular-flow mixed recipe behavior in model-free mode:
             # default non-expert linear layers use 8-bit; expert overrides are
@@ -1719,7 +1730,7 @@ class _ModelFreeCompressorCore:
             self.scheme_obj = _normalize_scheme("W8A16")
         else:
             self.scheme_obj = _normalize_scheme(scheme_in)
-        _validate_supported_scheme(self.scheme_obj, self.scheme_input)
+        _validate_supported_scheme(self.scheme_obj, scheme_in)
         ds = asdict(self.scheme_obj)
         self.default_scheme = {k: v for k, v in ds.items() if v is not None}
 
@@ -1826,6 +1837,45 @@ class _ModelFreeCompressorCore:
                     "Only the transformer component will be quantized; other sub-components are skipped."
                 )
             self.config = _load_config(self.source_dir)
+
+    def _apply_mixed_mxfp_policy(self) -> None:
+        if self.mixed_mxfp_policy is None:
+            return
+
+        from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+
+        model_dir = self.work_dir if self.is_streaming else self.source_dir
+        if not model_dir:
+            return
+
+        try:
+            config = AutoConfig.from_pretrained(model_dir, trust_remote_code=self.trust_remote_code)
+            with torch.device("meta"):
+                try:
+                    model = AutoModelForCausalLM.from_config(config, trust_remote_code=self.trust_remote_code)
+                except Exception:
+                    model = AutoModel.from_config(config, trust_remote_code=self.trust_remote_code)
+        except Exception as exc:
+            logger.warning(
+                "Failed to build a meta model for mixed_mxfp_policy=%s: %s. "
+                "Falling back to the explicit scheme/layer_config only.",
+                self.mixed_mxfp_policy,
+                exc,
+            )
+            return
+
+        policy_defaults = build_mixed_mxfp_policy_defaults(
+            model,
+            self.mixed_mxfp_policy,
+            supported_types=SUPPORTED_LAYER_TYPES,
+            inner_supported_types=INNER_SUPPORTED_LAYER_TYPES,
+        )
+        self.layer_config, merged_ignore = merge_mixed_mxfp_policy_defaults(
+            policy_defaults,
+            self.layer_config,
+            ",".join(self.ignore_patterns),
+        )
+        self.ignore_patterns = [p for p in merged_ignore.split(",") if p]
 
     def _check_conv1d_and_embedding(self) -> None:
         """Detect Conv1d and embedding layers and automatically add them to the ignore list."""
@@ -2131,6 +2181,7 @@ class _ModelFreeCompressorCore:
 
         # ---- source resolution ----
         self._resolve_source()
+        self._apply_mixed_mxfp_policy()
         self._check_conv1d_and_embedding()
         self._apply_predefined_ignore_layers()
         self._detect_fp8_source()
@@ -2261,6 +2312,8 @@ class ModelFreeCompressor(_ModelFreeCompressorCore):
             device=device,
             quant_lm_head=quant_lm_head,
             quant_nontext_module=quant_nontext_module,
+            mixed_mxfp_policy=kwargs.pop("mixed_mxfp_policy", None),
+            trust_remote_code=kwargs.pop("trust_remote_code", True),
         )
 
         # Compressor-role state (mirrors BaseCompressor attributes used by

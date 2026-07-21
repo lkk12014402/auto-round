@@ -219,6 +219,11 @@ ar = AutoRound(model_name_or_path, scheme="W4A16")
 ar.quantize_and_save(output_dir="./qmodel", format="auto_round")
 ```
 
+### 面向模型结构的 MXFP 混合精度策略
+
+AutoRound 现在还提供了面向 dense / MoE 语言模型的可复用 MXFP 策略。命令示例、API 用法、优先级规则以及检测限制/回退行为请参考
+[docs/mixed_mxfp_policy_CN.md](./docs/mixed_mxfp_policy_CN.md)。
+
 <details>
 <summary>核心超参数</summary>
 
@@ -229,6 +234,7 @@ ar.quantize_and_save(output_dir="./qmodel", format="auto_round")
 - ​**​`group_size`​**​（int）：量化分组大小（默认值为 `None`）。若指定此参数，将覆盖 scheme 中的设置。
 - ​**​`sym`​**​（bool）：是否使用对称量化（默认值为 `None`）。若指定此参数，将覆盖 scheme 中的设置。
 - ​**​`layer_config`​**​（dict）：层级自定义配置（默认值为 `None`）。主要用于自定义混合化方案，可以对每一层设置专门的量化参数。
+- ​**​`mixed_mxfp_policy`​**​（str | None）：面向 dense / MoE 语言模型的结构感知 MXFP 策略。支持 `dense_mxfp4`、`moe_conservative`、`moe_balanced`。启用后，用户显式传入的 `layer_config` 与 `ignore_layers` 仍然优先于策略默认值。
 
 ##### 算法相关设置
 

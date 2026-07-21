@@ -80,6 +80,7 @@ def _build_entry_compressor_kwargs(args) -> dict:
         "scale_dtype": args.scale_dtype,
         "ignore_layers": args.ignore_layers,
         "quant_lm_head": args.quant_lm_head,
+        "mixed_mxfp_policy": args.mixed_mxfp_policy,
         "to_quant_block_names": args.to_quant_block_names,
     }
 
