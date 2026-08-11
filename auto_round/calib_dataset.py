@@ -468,6 +468,259 @@ def get_opencode_instruct_dataset(
     return calib_dataset
 
 
+def _stringify_message_content(content):
+    """Best-effort convert a chat message ``content`` field into plain text.
+
+    Handles plain strings, ``None``, OpenAI-style content-part lists
+    (``[{"type": "text", "text": ...}]``) and dict payloads.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict):
+        text = content.get("text") or content.get("content") or ""
+        return text if isinstance(text, str) else ""
+    return str(content)
+
+
+def _normalize_chat_messages(messages):
+    """Normalize a raw messages list into ``[{"role", "content"}]`` with string content.
+
+    Non-dict entries and messages with empty content (e.g. assistant turns that
+    only carry tool calls) are dropped.
+    """
+    normalized = []
+    if not messages:
+        return normalized
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role") or "user"
+        content = _stringify_message_content(msg.get("content"))
+        if content.strip() == "":
+            continue
+        normalized.append({"role": str(role), "content": content})
+    return normalized
+
+
+def _render_chat_sample(messages, tokenizer, apply_chat_template, system_prompt):
+    """Render a normalized message list into a single calibration text string."""
+    if not messages:
+        return None
+    if apply_chat_template:
+        chat = []
+        if system_prompt is not None and system_prompt != "":
+            chat.append({"role": "system", "content": system_prompt})
+        chat.extend(messages)
+        try:
+            return tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
+        except Exception:
+            logger.warning("Failed to apply chat template. removing the system role in chat history.")
+            chat = [msg for msg in chat if msg["role"] != "system"]
+            return tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
+    return "\n\n".join(msg["content"] for msg in messages)
+
+
+def _build_chat_calib_dataset(
+    rows_iter,
+    extract_messages_fn,
+    tokenizer,
+    seqlen,
+    seed,
+    apply_chat_template,
+    system_prompt,
+    max_total_chars=32 * 1024 * 1024,
+):
+    """Shared builder for chat/``messages``-style calibration datasets.
+
+    Iterates raw rows, extracts a message list from each row via
+    ``extract_messages_fn``, renders it to a single text string (optionally with
+    the chat template applied) and tokenizes the result.  Because the text is
+    pre-rendered, the final ``map`` always tokenizes plainly to avoid applying
+    the chat template twice.
+
+    ``max_total_chars`` bounds how much raw text is materialized in memory.  Some
+    of these datasets (e.g. long agentic/coding conversations) have very large
+    rows, and streaming ``take(N)`` rows can materialize gigabytes of text and
+    OOM the calibration preprocessing subprocess.  Collection stops early once
+    the budget is reached; ~32M chars is far more than enough to pack the largest
+    calibration request (nsamples * seqlen tokens) after ``concat``.
+    """
+    samples = []
+    total_chars = 0
+    for data in rows_iter:
+        messages = _normalize_chat_messages(extract_messages_fn(data))
+        text = _render_chat_sample(messages, tokenizer, apply_chat_template, system_prompt)
+        if text is None or text.strip() == "":
+            continue
+        samples.append({"text": text})
+        total_chars += len(text)
+        if total_chars >= max_total_chars:
+            break
+
+    if not samples:
+        raise RuntimeError("No calibration samples could be built from the dataset.")
+
+    random.Random(seed).shuffle(samples)
+    calib_dataset = Dataset.from_list(samples)
+    tokenizer_function = get_tokenizer_function(
+        tokenizer, seqlen, apply_chat_template=False, system_prompt=system_prompt
+    )
+    calib_dataset = calib_dataset.map(
+        tokenizer_function,
+        batched=True,
+        new_fingerprint=_make_map_fingerprint(
+            calib_dataset, tokenizer, seqlen, apply_chat_template, system_prompt, "text"
+        ),
+    )
+    return calib_dataset
+
+
+@register_dataset(["allenai/IF_multi_constraints_upto5", "IF_multi_constraints_upto5"])
+def get_if_multi_constraints_dataset(
+    tokenizer,
+    seqlen,
+    dataset_name="allenai/IF_multi_constraints_upto5",
+    split=None,
+    seed=42,
+    apply_chat_template=False,
+    system_prompt=None,
+):
+    """Instruction-following calibration data (allenai/IF_multi_constraints_upto5).
+
+    Each row carries a ``messages`` chat list (mostly user prompts describing
+    multi-constraint instruction-following tasks).
+    """
+    split = "train" if split is None else (split[0] if isinstance(split, list) else split)
+
+    dataset = load_dataset("allenai/IF_multi_constraints_upto5", split=split, streaming=True)
+    dataset = dataset.shuffle(seed=seed).take(10000)
+
+    return _build_chat_calib_dataset(
+        dataset,
+        lambda data: data.get("messages"),
+        tokenizer,
+        seqlen,
+        seed,
+        apply_chat_template,
+        system_prompt,
+    )
+
+
+@register_dataset(["nvidia/Nemotron-SFT-Math-v3", "Nemotron-SFT-Math-v3"])
+def get_nemotron_sft_math_dataset(
+    tokenizer,
+    seqlen,
+    dataset_name="nvidia/Nemotron-SFT-Math-v3",
+    split=None,
+    seed=42,
+    apply_chat_template=False,
+    system_prompt=None,
+):
+    """Math SFT calibration data (nvidia/Nemotron-SFT-Math-v3).
+
+    Each row carries a ``messages`` chat list with a math ``problem`` prompt and
+    a worked ``assistant`` solution.
+    """
+    split = "train" if split is None else (split[0] if isinstance(split, list) else split)
+
+    dataset = load_dataset("nvidia/Nemotron-SFT-Math-v3", split=split, streaming=True)
+    dataset = dataset.shuffle(seed=seed).take(10000)
+
+    return _build_chat_calib_dataset(
+        dataset,
+        lambda data: data.get("messages"),
+        tokenizer,
+        seqlen,
+        seed,
+        apply_chat_template,
+        system_prompt,
+    )
+
+
+@register_dataset(["nvidia/Nemotron-SFT-OpenCode-v1", "Nemotron-SFT-OpenCode-v1"])
+def get_nemotron_sft_opencode_dataset(
+    tokenizer,
+    seqlen,
+    dataset_name="nvidia/Nemotron-SFT-OpenCode-v1",
+    split=None,
+    seed=42,
+    apply_chat_template=False,
+    system_prompt=None,
+):
+    """Coding SFT calibration data (nvidia/Nemotron-SFT-OpenCode-v1).
+
+    The dataset is organized into multiple task splits
+    (``general``, ``bash_only_tool``, ``agent_skills`` ...); ``general`` is used
+    by default.  Each row carries a ``messages`` chat list.
+    """
+    split = "general" if split is None else (split[0] if isinstance(split, list) else split)
+
+    dataset = load_dataset("nvidia/Nemotron-SFT-OpenCode-v1", split=split, streaming=True)
+    dataset = dataset.shuffle(seed=seed).take(10000)
+
+    return _build_chat_calib_dataset(
+        dataset,
+        lambda data: data.get("messages"),
+        tokenizer,
+        seqlen,
+        seed,
+        apply_chat_template,
+        system_prompt,
+    )
+
+
+@register_dataset(["nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1", "Nemotron-RL-Agentic-SWE-Pivot-v1"])
+def get_nemotron_rl_agentic_swe_dataset(
+    tokenizer,
+    seqlen,
+    dataset_name="nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1",
+    split=None,
+    seed=42,
+    apply_chat_template=False,
+    system_prompt=None,
+):
+    """Agentic software-engineering calibration data (Nemotron-RL-Agentic-SWE-Pivot-v1).
+
+    Each row stores the agent conversation under
+    ``responses_create_params.input`` and the reference assistant turn under
+    ``ref_message``.  They are concatenated into a single chat message list.
+    """
+    split = "train" if split is None else (split[0] if isinstance(split, list) else split)
+
+    dataset = load_dataset("nvidia/Nemotron-RL-Agentic-SWE-Pivot-v1", split=split, streaming=True)
+    dataset = dataset.shuffle(seed=seed).take(10000)
+
+    def extract_messages(data):
+        params = data.get("responses_create_params") or {}
+        messages = list(params.get("input") or [])
+        ref_message = data.get("ref_message")
+        if isinstance(ref_message, dict):
+            messages.append(ref_message)
+        return messages
+
+    return _build_chat_calib_dataset(
+        dataset,
+        extract_messages,
+        tokenizer,
+        seqlen,
+        seed,
+        apply_chat_template,
+        system_prompt,
+    )
+
+
 @register_dataset(["HuggingFaceH4/ultrachat_200k", "ultrachat_200k"])
 def get_ultrachat_dataset(
     tokenizer,
@@ -919,12 +1172,14 @@ def _get_dataset_impl(tokenizer, seqlen, dataset_name="NeelNanda/pile-10k", seed
 
     def concat_dataset_element(dataset):
         input_ids, concat_input_ids = [eg["input_ids"] for eg in dataset], []
-        attention_mask_list, attention_mask = [], torch.ones([1, seqlen]).to(torch.int64)
+        attention_mask_list, attention_mask = [], torch.ones([seqlen]).to(torch.int64)
         buffer_input_id = torch.Tensor().to(torch.int64)
         bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
         os_cnt, have_bos, have_eos = 0, False, False
 
         for input_id in input_ids:
+            if not isinstance(input_id, torch.Tensor):
+                input_id = torch.tensor(input_id, dtype=torch.int64)
             if input_id[0] == bos_token_id:
                 input_id = input_id[1:]
                 os_cnt, have_bos = os_cnt + 1, True
