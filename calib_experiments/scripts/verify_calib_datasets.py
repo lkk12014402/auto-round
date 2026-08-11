@@ -71,6 +71,49 @@ def list_registered():
         print(f"  {k}")
 
 
+def install_max_rows_patch(max_rows):
+    """Truncate every raw (tokenized) dataset to ``max_rows`` rows *before* the
+    concat/packing + cast steps run.
+
+    The heavy cost in ``_get_dataset_impl`` is ``dataset.cast(Features(...))``,
+    which runs over the *entire* packed dataset (~10k+ sequences) even though we
+    only need a handful of calibration samples. By capping the raw dataset that
+    each ``CALIB_DATASETS`` getter returns, the downstream concat and cast become
+    near-instant while producing byte-identical packing/format for the first few
+    sequences (which is all we inspect).
+
+    Returns a restore() callable to undo the patch.
+    """
+    from datasets import IterableDataset as _IterDS
+
+    originals = dict(cd.CALIB_DATASETS)
+
+    def make_wrapper(orig_getter):
+        def wrapped(*a, **k):
+            ds = orig_getter(*a, **k)
+            try:
+                if isinstance(ds, _IterDS):
+                    # streaming dataset: materialize just the first rows
+                    from datasets import Dataset as _DS
+                    ds = _DS.from_list(list(ds.take(max_rows)))
+                else:
+                    n = min(max_rows, len(ds))
+                    ds = ds.select(range(n))
+            except Exception as e:  # pragma: no cover - best effort cap only
+                print(f"    [max-rows] could not cap dataset ({e}); using full set")
+            return ds
+        return wrapped
+
+    for key, getter in list(cd.CALIB_DATASETS.items()):
+        cd.CALIB_DATASETS[key] = make_wrapper(getter)
+
+    def restore():
+        cd.CALIB_DATASETS.clear()
+        cd.CALIB_DATASETS.update(originals)
+
+    return restore
+
+
 def analyze_sequence(ids, attn, tokenizer, seqlen):
     """Return a dict of per-sequence diagnostics."""
     bos_id = tokenizer.bos_token_id
@@ -99,7 +142,8 @@ def analyze_sequence(ids, attn, tokenizer, seqlen):
     }
 
 
-def dump_dataset(dsl, tokenizer, seqlen, nsamples, bs, preview, decode_chars):
+def dump_dataset(dsl, tokenizer, seqlen, nsamples, bs, preview, decode_chars,
+                 full_decode=False):
     print(SEP)
     print(f"DATASET DSL : {dsl}")
     print(f"tokenizer   : {tokenizer.name_or_path}  "
@@ -169,7 +213,12 @@ def dump_dataset(dsl, tokenizer, seqlen, nsamples, bs, preview, decode_chars):
                 tail_ids = ids[si][-24:].tolist()
                 print(f"    first 24 ids: {head_ids}")
                 print(f"    last  24 ids: {tail_ids}")
-                if decode_chars > 0:
+                if full_decode:
+                    txt = tokenizer.decode(ids[si].tolist(), skip_special_tokens=False)
+                    print(f"    decoded[FULL {len(txt)}c]:")
+                    print(txt)
+                    print(f"    <<< end decoded sample #{shown} >>>")
+                elif decode_chars > 0:
                     txt = tokenizer.decode(ids[si].tolist(), skip_special_tokens=False)
                     head = txt[:decode_chars].replace("\n", "\\n")
                     tail = txt[-decode_chars:].replace("\n", "\\n")
@@ -205,6 +254,14 @@ def main():
                     help="How many sequences to dump in detail per dataset.")
     ap.add_argument("--decode-chars", type=int, default=300,
                     help="Chars of decoded head/tail to print (0 to disable decoding).")
+    ap.add_argument("--max-rows", type=int, default=400,
+                    help="Cap each raw dataset to this many rows before concat/cast "
+                         "for fast verification (0 = no cap, uses the full dataset "
+                         "-- slow, ~15min/concat dataset). Format/packing of the "
+                         "first sequences is identical either way.")
+    ap.add_argument("--full-decode", action="store_true",
+                    help="Print the COMPLETE decoded text of each previewed "
+                         "sequence (no head/tail truncation).")
     ap.add_argument("--list", action="store_true",
                     help="List every registered dataset name and exit.")
     args = ap.parse_args()
@@ -213,15 +270,29 @@ def main():
         list_registered()
         return
 
+    # Run preprocessing in-process (avoid auto_round's fork+rerun double pass) so
+    # our monkeypatch is guaranteed to apply and we don't cast the dataset twice.
+    os.environ["AR_DISABLE_DATASET_SUBPROCESS"] = "1"
+
     print(f"Loading tokenizer: {args.tokenizer}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+
+    restore = None
+    if args.max_rows and args.max_rows > 0:
+        print(f"Fast mode: capping each raw dataset to {args.max_rows} rows "
+              f"before concat/cast (use --max-rows 0 for the full dataset).")
+        restore = install_max_rows_patch(args.max_rows)
 
     datasets = args.datasets if args.datasets else DEFAULT_DATASETS
     print(f"Will verify {len(datasets)} dataset(s): {datasets}\n")
 
-    for dsl in datasets:
-        dump_dataset(dsl, tokenizer, args.seqlen, args.nsamples, args.bs,
-                     args.preview, args.decode_chars)
+    try:
+        for dsl in datasets:
+            dump_dataset(dsl, tokenizer, args.seqlen, args.nsamples, args.bs,
+                         args.preview, args.decode_chars, args.full_decode)
+    finally:
+        if restore is not None:
+            restore()
 
     print(SEP)
     print("Done. Review the SUMMARY blocks above for correctness "
