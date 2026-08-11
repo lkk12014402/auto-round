@@ -78,7 +78,7 @@ except Exception:
 
 ---
 
-## 3. 待修复(重点):concat 时的 EOS / 文档边界处理
+## 3. concat 时的 EOS / 文档边界处理(问题分析,修复见 §3.5)
 
 ### 3.1 concat 是怎么做的
 
@@ -149,6 +149,170 @@ EOS/BOS 处理:每条原始样本自带的 bos/eos **先被剥掉**,打包后只
 
 ---
 
+## 3.5 ✅ 已修复:concat 打包重写(EOS 分隔 + BOS 可配 + 计数 bug)
+
+> 状态:**已实现并跨 6 个模型系列验证通过**。修改文件:`auto-round/auto_round/calib_dataset.py`。
+
+### 3.5.1 实现
+
+抽出模块级共享函数,原来 **两处重复** 的内联打包逻辑
+(`concat_dataset_element` 通用路径 + `get_opencode_instruct_dataset` 内置 concat)
+统一调用它,彻底消除重复与 `os_cnt/have_bos/have_eos` 不重置的 bug:
+
+```python
+def tokenizer_adds_bos(tokenizer): ...      # 探测 tokenizer 是否原生在首位加 BOS
+def pack_documents(input_ids_iterable, seqlen, tokenizer,
+                   add_eos_separator=True, add_bos="auto"): ...
+def concat_dataset_element(dataset, seqlen, tokenizer,
+                           add_eos_separator=True, add_bos="auto"): ...
+```
+
+**贪心打包算法**:逐文档独立处理(不再有跨样本残留状态)——
+1. 剥掉该文档自带的前导 BOS / 末尾 EOS(归一化);
+2. 追加到 buffer,并在文档之间插入 1 个 EOS 作分隔(`add_eos_separator`);
+3. buffer 满 `content_len` 就切出一条,若需要在首位补 1 个 BOS(`add_bos`);
+   `content_len = seqlen - (1 if 补BOS else 0)`,保证每条恰好 `seqlen`;
+4. 末尾未攒满的残余丢弃(与旧行为一致)。
+
+每条输出:`input_ids` / `attention_mask` 均为一维 `int64`,`attention_mask` 全 1。
+
+### 3.5.2 默认值(设计取舍)
+
+指导原则:**校准数据应尽量贴近推理时模型真实看到的输入分布**
+(PTQ 是数据驱动的,激活分布决定选出的 round/scale)。
+
+| 参数 | 默认 | 理由 |
+|---|---|---|
+| `add_eos_separator`(文档间 EOS 分隔) | **True** | 避免同一条 2048 内 A/B 文档跨界"串味"(注意力污染);EOS-then-text 模型训练时(多轮/packed 预训练)见过,in-distribution;是标准打包做法。 |
+| `add_bos`(每条 chunk 补 BOS) | **"auto"** | **跟随 tokenizer 原生行为**:Llama/Gemma 推理首位总有 BOS→补;Qwen/gpt-oss 原生不加→不补。不能无脑"有 bos_token_id 就补"。 |
+
+⚠️ **关键坑**:判断"是否补 BOS"**必须用探测法,不能读 `add_bos_token` 属性**。
+Llama-3 的 `add_bos_token=False`,但它实际会通过 post-processor 在首位注入 BOS。
+`tokenizer_adds_bos()` 用 `tokenizer("a", add_special_tokens=True)[0] == bos_id` 探测,
+才能得到正确答案。
+
+### 3.5.3 DSL 用法(和 `concat` 一样可配)
+
+```
+ultrachat_200k:concat=true                       # 默认: eos=true, bos=auto
+ultrachat_200k:concat=true:eos=false             # 关闭文档间 EOS 分隔
+ultrachat_200k:concat=true:bos=true              # 强制每条补 BOS
+ultrachat_200k:concat=true:bos=false             # 强制不补 BOS
+ultrachat_200k:concat=true:bos=false:eos=false   # 完全直连(≈旧行为)
+```
+
+编程调用:
+```python
+from auto_round.calib_dataset import pack_documents
+packed = pack_documents(docs, seqlen, tokenizer,
+                        add_eos_separator=True, add_bos="auto")
+```
+
+### 3.5.4 如何确认"Qwen/gpt-oss 推理首位不加 BOS"(实证方法)
+
+**不要凭直觉,用两步实测**(见下方复现脚本):
+
+1. **原生 plain 分词**:`tokenizer("Hello world", add_special_tokens=True)`,
+   看首 token 是否 == `bos_token_id`。
+2. **真实推理输入(chat template)**:`tokenizer.apply_chat_template(msg,
+   tokenize=True, add_generation_prompt=True)`,看**真正喂给模型**的首 token 是什么。
+
+**实测结果(2026-08,transformers 官方仓库 tokenizer)**:
+
+| 模型 | `bos_token_id` | plain 首 token | **chat template 首 token(真实推理)** | 推理首位加 BOS? |
+|---|---|---|---|---|
+| Qwen3-0.6B | **None** | 9707(普通词) | `151644 <|im_start|>` | **否** |
+| Llama-3.1-8B-Instruct | 128000 | `128000 <|begin_of_text|>` | `128000 <|begin_of_text|>` | **是** |
+| gpt-oss-20b | 199998 `<|startoftext|>` | 13225(普通词) | `200006 <|start|>` | **否**(用 harmony `<|start|>`,不是 BOS) |
+| gemma-2-9b | 2 | `2 <bos>` | (base 无 chat template) | 是(plain 即加) |
+| gemma-3-4b-it | 2 | `2 <bos>` | `2 <bos>` | **是** |
+
+**结论**:
+- Qwen3 `bos_token_id` 本身就是 `None`,谈不上加 BOS;推理首位是 `<|im_start|>` 角色标记。
+- gpt-oss **虽然定义了** `bos=199998 <|startoftext|>`,但**原生和 chat template 首位都不用它**
+  (harmony 格式用 `<|start|>`=200006)。所以"有 bos_token_id ≠ 应该补 BOS"——
+  这正是默认必须用 `auto`(探测)而非"非 None 就补"的原因。
+- Llama/Gemma 推理首位确实是各自 BOS(`<|begin_of_text|>` / `<bos>`),`auto` 会正确补上。
+
+### 3.5.5 跨模型验证(全部 PASS)
+
+用真实 tokenizer 对 `pack_documents` 做端到端校验(每条恰好 seqlen、attention 全 1、
+id 在 embedding 范围内、`auto` 补 BOS 行为 == tokenizer 原生行为):
+
+| 模型 | bos | eos | `auto` 补 BOS | EOS 分隔生效 | max_id < emb | 结果 |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B | None | 151645 | 否 | ✅ | 151645<151669 | PASS |
+| Llama-3.1-8B | 128000 | 128009 | 是(128000) | ✅ | 128009<128256 | PASS |
+| Llama-2-7B | 1 | 2 | 是(1) | ✅ | <32000 | PASS |
+| gpt-oss-20b | 199998 | 200002 | 否 | ✅ | 200002<200019 | PASS |
+| gemma-2-9b | 2 | 1 | 是(2) | ✅ | <256000 | PASS |
+| gemma-3-4b-it | 2 | 1 | 是(2) | ✅ | <262145 | PASS |
+
+> 注:Llama-3.1 / gpt-oss 的特殊 token id **等于或高于 base `vocab_size`**
+> (bos 恰好 = vocab_size),但都 **< 模型 embedding 尺寸 `len(tokenizer)`**,是合法输入。
+> 校验/量化时 id 上界应取 `max(len(tokenizer), vocab_size)`,不是 base `vocab_size`。
+
+### 3.5.6 复现脚本
+
+```bash
+# 用真实 tokenizer 确认推理首位 BOS 行为(需要 HF_TOKEN 访问 gated 仓库)
+cd /home/hshen/lkk/calib_feat/auto-round
+HF_TOKEN=<your_token> CUDA_VISIBLE_DEVICES="" python - <<'PY'
+from transformers import AutoTokenizer
+def to_ids(x):
+    if hasattr(x,"input_ids"):
+        v=x.input_ids; return list(v[0]) if v and isinstance(v[0],(list,tuple)) else list(v)
+    try: return list(x["input_ids"])
+    except Exception: pass
+    if hasattr(x,"ids"): return list(x.ids)   # tokenizers.Encoding (gpt-oss)
+    return list(x)
+msg=[{"role":"user","content":"Hello, who are you?"}]
+for mid in ["Qwen/Qwen3-0.6B","meta-llama/Llama-3.1-8B-Instruct",
+            "openai/gpt-oss-20b","google/gemma-3-4b-it"]:
+    t=AutoTokenizer.from_pretrained(mid, trust_remote_code=True); bos=t.bos_token_id
+    plain=to_ids(t("Hello world", add_special_tokens=True))
+    ct=to_ids(t.apply_chat_template(msg, tokenize=True, add_generation_prompt=True))
+    print(mid, "bos=",bos, "plain_first=",plain[0], "chat_first=",ct[0],
+          "chat_first_tok=",t.convert_ids_to_tokens([ct[0]])[0])
+PY
+
+# 用校准验证脚本看打包后 EOS 分隔符是否出现(eos_inside > 0)
+cd /home/hshen/lkk/calib_feat/calib_experiments
+CUDA_VISIBLE_DEVICES="" python scripts/verify_calib_datasets.py \
+  --datasets "ultrachat_200k:concat=true" --nsamples 4 --preview 1 --max-rows 400
+```
+
+### 3.5.7 补充:开关行为验证矩阵 + 复现注意事项
+
+**(a) `bos` / `eos` 开关确实生效(实测,SEQ=64,5 段合成文档)**——
+`auto` 与各家原生 BOS 行为完全一致,强制开关按预期改变每条 chunk 首 token 与 EOS 分隔数:
+
+| 模型 | natural_bos | **auto** 首 token | 强制 `bos=true` | 强制 `bos=false` | eos 默认分隔数 | `eos=false` |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B | False | 785(不补) | 785(bos=None 无法补) | 785 | 3 | 0 |
+| Llama-3.1-8B | True | 128000 | 128000 | 791(不补) | 3 | 0 |
+| Llama-2-7B | True | 1 | 1 | 450(不补) | 4 | 0 |
+| gpt-oss-20b | False | 976(不补) | 199998(强制补) | 976 | 3 | 0 |
+| gemma-2-9b | True | 2 | 2 | 651(不补) | 3 | 0 |
+| gemma-3-4b-it | True | 2 | 2 | 818(不补) | 3 | 0 |
+
+断言 `auto 补 BOS == tokenizer 原生行为` 对 6 个系列**全部通过**。要点:
+- `bos=false` 能把 Llama/Gemma 的强制去掉(首 token 变成真实内容 token);
+- `bos=true` 能把 gpt-oss 强制补上 199998(但一般不需要,`auto` 已判为不补);
+- Qwen `bos_token_id=None`,即使 `bos=true` 也无从补(保持 785),符合预期。
+
+**(b) 复现坑:`apply_chat_template(tokenize=True)` 返回类型不统一**
+- **gpt-oss**:返回 `tokenizers.Encoding` 对象 → 取 `.ids` 才是 token 列表;
+- **Qwen / Llama / Gemma**:返回 `BatchEncoding`(dict) → 取 `["input_ids"]`。
+- 直接 `list(...)` 会拿到 dict 的 key(`['input_ids','attention_mask']`)或报
+  `TypeError`。上面复现脚本里的 `to_ids()` 已统一处理三种返回类型。
+
+**(c) `add_bos_token` 属性不可信(再次强调)**:Llama-3.1 的 `add_bos_token=False`,
+但 plain 分词与 chat template 首位**都是** `<|begin_of_text|>`(128000)。必须以
+"实际分词首 token 是否 == bos_id"为准,这正是 `tokenizer_adds_bos()` 的探测逻辑。
+
+---
+
 ## 4. 单跑命令备忘
 
 只跑单个 cell(过滤器 `--models/--schemes/--recipes`):
@@ -174,4 +338,5 @@ CUDA_VISIBLE_DEVICES=1 python -u scripts/run_quantize.py \
 |---|---|
 | #1 attention_mask 二维 → 一维 | ✅ 已修 |
 | #2 torch 循环导入(预导入规避) | ✅ 已修(规避) |
-| #3 concat EOS / 边界 / 计数重置 | ⬜ 待修(本文档重点) |
+| #3 concat EOS / 边界 / 计数重置 | ✅ 已修(重写 `pack_documents`,见 §3.5) |
+| #3 附:EOS/BOS 可配 + 跨 6 模型系列验证 | ✅ 已验证(Qwen/Llama/gpt-oss/Gemma) |

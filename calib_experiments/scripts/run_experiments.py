@@ -95,6 +95,57 @@ def manifest_writer(workdir):
     return fh, writer
 
 
+def _run_parallel(args, plan_models, logs_dir):
+    """Launch one child ``run_experiments.py`` per model, in parallel.
+
+    each child is filtered to a single model (``--models <name>``) WITHOUT
+    ``--parallel``, and has ``CUDA_VISIBLE_DEVICES`` pinned to that model's
+    physical GPUs. Cells of the same model still run sequentially inside its
+    child. Per-model stdout/stderr is streamed to ``parallel__<model>.log``.
+    """
+    # Flags to forward verbatim to each child (everything except --parallel and
+    # --models, which we set per child).
+    passthrough = []
+    if args.schemes:
+        passthrough += ["--schemes"] + list(args.schemes)
+    if args.recipes:
+        passthrough += ["--recipes"] + list(args.recipes)
+    if args.force:
+        passthrough += ["--force"]
+    if args.skip_quant:
+        passthrough += ["--skip-quant"]
+    if args.skip_eval:
+        passthrough += ["--skip-eval"]
+    passthrough += ["--workdir", args.workdir]
+
+    procs = []
+    for model in plan_models:
+        mgpus = E.gpus_csv(model)
+        log_path = os.path.join(logs_dir, f"parallel__{model['name']}.log")
+        cmd = [sys.executable, os.path.abspath(__file__), "--models", model["name"]] + passthrough
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=mgpus, PYTHONUNBUFFERED="1")
+        log_fh = open(log_path, "w")
+        print(f"[parallel] launch {model['name']:25s} GPUs=[{mgpus}] -> {log_path}")
+        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT, env=env, text=True)
+        procs.append((model["name"], proc, log_fh))
+
+    print(f"[parallel] {len(procs)} model subprocess(es) running; waiting for completion...")
+    results = {}
+    for name, proc, log_fh in procs:
+        proc.wait()
+        log_fh.close()
+        results[name] = proc.returncode
+        print(f"[parallel] {name} finished rc={proc.returncode}")
+
+    failed = {k: v for k, v in results.items() if v != 0}
+    print("\n=== Parallel run summary ===")
+    for name, rc in results.items():
+        print(f"  {name:25s} rc={rc} {'OK' if rc == 0 else 'FAILED'}")
+    if failed:
+        print(f"[parallel] {len(failed)} model(s) failed: {', '.join(failed)}")
+    return
+
+
 def main():
     ap = argparse.ArgumentParser(description="Run the calibration-dataset study.")
     ap.add_argument("--workdir", default=os.path.join(ROOT, "runs"))
@@ -109,6 +160,12 @@ def main():
         "--gpu",
         default=None,
         help="GPU id for quant + eval. Precedence: --gpu > $CUDA_VISIBLE_DEVICES > config GPU.",
+    )
+    ap.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Run each model in its own subprocess on its configured GPUs (config MODELS[*].gpus), "
+        "in parallel. Cells of the SAME model still run sequentially within that subprocess.",
     )
     ap.add_argument("--continue-on-error", action="store_true", default=True)
     args = ap.parse_args()
@@ -148,10 +205,27 @@ def main():
     print(f"=== Calibration study plan: {len(plan)} cells ===")
     for model, scheme, recipe in plan:
         eid = E.exp_id(model["name"], scheme, recipe["key"])
-        print(f"  {eid:45s} dataset={recipe['dataset']}")
+        gpus = E.gpus_csv(model)
+        print(f"  {eid:45s} gpus=[{gpus}] dataset={recipe['dataset']}")
+
+    # Warn about GPU-assignment problems (overlaps / out-of-range).
+    plan_models = []
+    for model, _s, _r in plan:
+        if model["name"] not in [m["name"] for m in plan_models]:
+            plan_models.append(model)
+    for w in E.validate_gpu_assignments(plan_models):
+        print(f"[gpu-warn] {w}")
+
     if args.dry_run:
         print("\n(dry-run) nothing executed.")
         return
+
+    # -------------------- Parallel: one subprocess per model --------------------
+    # Each child re-invokes this script filtered to a single model, with
+    # CUDA_VISIBLE_DEVICES pinned to that model's physical GPUs. Cells of the
+    # same model still run sequentially inside its child.
+    if args.parallel and len(plan_models) > 1:
+        return _run_parallel(args, plan_models, logs_dir)
 
     fh, manifest = manifest_writer(args.workdir)
 
@@ -166,6 +240,10 @@ def main():
         eid = E.exp_id(model["name"], scheme, recipe["key"])
         out_model_dir = os.path.join(models_dir, eid)
         model_path_file = os.path.join(out_model_dir, "model_path.txt")
+
+        # Physical GPUs this model owns (may be several for a sharded model).
+        model_gpus_csv = E.gpus_csv(model) or str(args.gpu)
+        model_tp = E.tp_size(model)
 
         # ---------------- Quantize ----------------
         model_path = None
@@ -186,10 +264,10 @@ def main():
                     "--seqlen", str(E.SEQLEN),
                     "--iters", str(E.ITERS),
                     "--seed", str(E.SEED),
-                    "--device-map", str(model.get("device_map", args.gpu)),
+                    "--device-map", str(model.get("device_map", "auto")),
                 ]
-                env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(args.gpu))
-                print(f"\n[quantize] {eid}")
+                env = dict(os.environ, CUDA_VISIBLE_DEVICES=model_gpus_csv)
+                print(f"\n[quantize] {eid} on GPUs [{model_gpus_csv}] device_map={model.get('device_map', 'auto')}")
                 t0 = time.time()
                 rc, out = _tee(cmd, os.path.join(logs_dir, f"{eid}__quant.log"), env=env)
                 dt = round(time.time() - t0, 2)
@@ -253,13 +331,15 @@ def main():
                 OUTPUT_PATH=group_out,
                 MODE=mode,
                 TASKS=group["tasks"],
-                GPU=str(args.gpu),
+                GPU=model_gpus_csv,
+                TP_SIZE=str(model_tp),
                 BATCH_SIZE=str(group.get("batch_size", 64)),
                 SEED=str(E.SEED),
                 ENABLE_THINKING=str(model.get("enable_thinking", False)).lower(),
                 EXTRA_ARGS=group.get("extra_args", ""),
+                VLLM_EXTRA=str(model.get("vllm_extra", "")),
             )
-            print(f"[eval] {eid}/{mode}")
+            print(f"[eval] {eid}/{mode} on GPUs [{model_gpus_csv}] tp={model_tp}")
             t0 = time.time()
             rc, _ = _tee(
                 ["bash", RUN_EVAL], os.path.join(logs_dir, f"{eid}__eval-{mode}.log"), env=env

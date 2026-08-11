@@ -33,6 +33,140 @@ CALIB_DATASETS = {}
 _GITHUB_CODE_CLEAN_MAX_DATASETS_VERSION = Version("3.6.0")
 
 
+def tokenizer_adds_bos(tokenizer):
+    """Return True iff *this* tokenizer naturally prepends a BOS at position 0.
+
+    We probe by tokenizing a tiny string with ``add_special_tokens=True`` rather
+    than trusting the ``add_bos_token`` attribute, because some tokenizers
+    (notably Llama-3) leave ``add_bos_token=False`` yet still inject BOS via a
+    post-processor / template. The probe is the source of truth; the attribute
+    is only a fallback if probing fails.
+    """
+    bos = getattr(tokenizer, "bos_token_id", None)
+    if bos is None:
+        return False
+    try:
+        ids = tokenizer("a", add_special_tokens=True)["input_ids"]
+        if len(ids) > 0:
+            return ids[0] == bos
+    except Exception:
+        pass
+    return bool(getattr(tokenizer, "add_bos_token", False))
+
+
+def _resolve_add_bos(add_bos, tokenizer):
+    """Resolve the ``add_bos`` config (True/False/"auto"/None) to a bool."""
+    if add_bos is None or (isinstance(add_bos, str) and add_bos.lower() == "auto"):
+        return tokenizer.bos_token_id is not None and tokenizer_adds_bos(tokenizer)
+    if isinstance(add_bos, str):
+        add_bos = add_bos.lower() not in ("false", "0", "no", "off")
+    return bool(add_bos) and tokenizer.bos_token_id is not None
+
+
+def pack_documents(input_ids_iterable, seqlen, tokenizer, add_eos_separator=True, add_bos="auto"):
+    """Greedily pack tokenized documents into fixed-length calibration sequences.
+
+    This is the shared, corrected implementation used by every ``concat=true``
+    dataset (and by the datasets that pack internally, e.g. OpenCodeInstruct).
+
+    Behaviour / fixes vs. the old inline packers:
+
+    * **Inter-document EOS separator** (``add_eos_separator``, default True):
+      when the tokenizer defines an ``eos_token_id``, a single EOS is inserted
+      *between* documents so packed documents don't silently bleed into each
+      other. This gives the model a real boundary marker (matching standard
+      pretraining / calibration packing) and mitigates cross-document attention
+      contamination, instead of directly concatenating unrelated docs.
+    * **Per-document normalization**: each document's own leading BOS / trailing
+      EOS is stripped first, so we never end up with duplicated or misplaced
+      special tokens regardless of what the tokenizer emits. The old code kept
+      ``os_cnt`` / ``have_bos`` / ``have_eos`` as loop-wide state that was never
+      reset, which corrupted length accounting for tokenizers that auto-add
+      BOS/EOS (e.g. Llama). Here every document is handled independently.
+    * **Per-sequence BOS** (``add_bos``, default "auto"): each packed sequence
+      starts with exactly one BOS *iff appropriate*. ``"auto"`` follows the
+      tokenizer's natural behaviour (prepend BOS only when the tokenizer itself
+      would, e.g. Llama/Gemma yes, Qwen/gpt-oss no); pass ``True``/``False`` to
+      force it on/off.
+
+    Every returned sequence is *exactly* ``seqlen`` tokens with an all-ones
+    ``attention_mask`` (calibration attends to every position). A trailing
+    partial chunk that cannot fill ``seqlen`` is dropped, matching prior
+    behaviour.
+
+    Args:
+        input_ids_iterable: iterable of per-document token id sequences (lists or
+            1-D tensors).
+        seqlen (int): exact output sequence length.
+        tokenizer: tokenizer providing ``bos_token_id`` / ``eos_token_id``.
+        add_eos_separator (bool): insert an EOS between documents (default True).
+        add_bos (bool | "auto"): prepend BOS to each sequence. "auto" (default)
+            follows the tokenizer's natural BOS behaviour.
+
+    Returns:
+        list[dict]: ``[{"input_ids": LongTensor[seqlen], "attention_mask": LongTensor[seqlen]}, ...]``
+    """
+    bos_token_id = tokenizer.bos_token_id
+    eos_token_id = tokenizer.eos_token_id
+    use_bos = _resolve_add_bos(add_bos, tokenizer)
+    sep_id = eos_token_id if (add_eos_separator and eos_token_id is not None) else None
+
+    # Number of real content tokens per chunk (reserve slot 0 for BOS if used).
+    content_len = seqlen - (1 if use_bos else 0)
+    if content_len <= 0:
+        raise ValueError(f"seqlen={seqlen} too small to pack with BOS token.")
+
+    packed = []
+    buffer = []  # rolling stream of content tokens (already normalized)
+
+    def flush_full_chunks():
+        while len(buffer) >= content_len:
+            chunk = buffer[:content_len]
+            del buffer[:content_len]
+            if use_bos:
+                chunk = [bos_token_id] + chunk
+            packed.append(
+                {
+                    "input_ids": torch.tensor(chunk, dtype=torch.int64),
+                    "attention_mask": torch.ones([seqlen], dtype=torch.int64),
+                }
+            )
+
+    for input_id in input_ids_iterable:
+        if isinstance(input_id, torch.Tensor):
+            ids = input_id.to(torch.int64).tolist()
+        else:
+            ids = list(input_id)
+        if len(ids) == 0:
+            continue
+        # Strip this document's own leading BOS / trailing EOS (normalization).
+        if bos_token_id is not None and ids[0] == bos_token_id:
+            ids = ids[1:]
+        if eos_token_id is not None and len(ids) > 0 and ids[-1] == eos_token_id:
+            ids = ids[:-1]
+        if len(ids) == 0:
+            continue
+        buffer.extend(ids)
+        # Insert a document separator (EOS) between documents.
+        if sep_id is not None:
+            buffer.append(sep_id)
+        flush_full_chunks()
+
+    return packed
+
+
+def concat_dataset_element(dataset, seqlen, tokenizer, add_eos_separator=True, add_bos="auto"):
+    """Pack a tokenized ``datasets.Dataset`` into fixed-length calibration rows."""
+    data = pack_documents(
+        (eg["input_ids"] for eg in dataset),
+        seqlen,
+        tokenizer,
+        add_eos_separator=add_eos_separator,
+        add_bos=add_bos,
+    )
+    return Dataset.from_list(data)
+
+
 def get_code_calibration_dataset(nsamples, datasets_version=None):
     """Build an exact-size code calibration mix compatible with datasets."""
     if datasets_version is None:
@@ -424,45 +558,7 @@ def get_opencode_instruct_dataset(
     )
 
     calib_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    input_ids, concat_input_ids = [eg["input_ids"] for eg in calib_dataset], []
-    attention_mask_list, attention_mask = [], torch.ones([seqlen]).to(torch.int64)
-    buffer_input_id = torch.Tensor().to(torch.int64)
-    bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
-    os_cnt, have_bos, have_eos = 0, False, False
-
-    for input_id in input_ids:
-        if input_id[0] == bos_token_id:
-            input_id = input_id[1:]
-            os_cnt, have_bos = os_cnt + 1, True
-        if input_id[-1] == eos_token_id:
-            input_id = input_id[:-1]
-            os_cnt, have_eos = os_cnt + 1, True
-
-        if buffer_input_id.shape[-1] + input_id.shape[-1] + os_cnt > seqlen:
-            idx_keep = seqlen - buffer_input_id.shape[-1] - os_cnt
-            input_id_to_append = [buffer_input_id, input_id[:idx_keep]]
-            if have_bos:
-                input_id_to_append = [torch.tensor([bos_token_id])] + input_id_to_append
-            if have_eos:
-                input_id_to_append.append(torch.tensor([eos_token_id]))
-
-            concat_input_ids.append(torch.cat(input_id_to_append).to(torch.int64).tolist())
-            attention_mask_list.append(attention_mask.tolist())
-            buffer_input_id = input_id[idx_keep:]
-        else:
-            buffer_input_id = torch.cat([buffer_input_id, input_id])
-
-        if buffer_input_id.shape[-1] + os_cnt == seqlen:
-            input_id_to_append = [buffer_input_id]
-            if have_bos:
-                input_id_to_append = [torch.tensor([bos_token_id])] + input_id_to_append
-            if have_eos:
-                input_id_to_append.append(torch.tensor([eos_token_id]))
-            concat_input_ids.append(torch.cat(input_id_to_append).to(torch.int64).tolist())
-            attention_mask_list.append(attention_mask.tolist())
-            buffer_input_id = torch.Tensor().to(torch.int64)
-
-    data = [{"input_ids": a, "attention_mask": b} for a, b in zip(concat_input_ids, attention_mask_list)]
+    data = pack_documents((eg["input_ids"] for eg in calib_dataset), seqlen, tokenizer)
     calib_dataset = Dataset.from_list(data)
 
     return calib_dataset
@@ -1170,58 +1266,14 @@ def _get_dataset_impl(tokenizer, seqlen, dataset_name="NeelNanda/pile-10k", seed
             return False
         return True
 
-    def concat_dataset_element(dataset):
-        input_ids, concat_input_ids = [eg["input_ids"] for eg in dataset], []
-        attention_mask_list, attention_mask = [], torch.ones([seqlen]).to(torch.int64)
-        buffer_input_id = torch.Tensor().to(torch.int64)
-        bos_token_id, eos_token_id = tokenizer.bos_token_id, tokenizer.eos_token_id
-        os_cnt, have_bos, have_eos = 0, False, False
-
-        for input_id in input_ids:
-            if not isinstance(input_id, torch.Tensor):
-                input_id = torch.tensor(input_id, dtype=torch.int64)
-            if input_id[0] == bos_token_id:
-                input_id = input_id[1:]
-                os_cnt, have_bos = os_cnt + 1, True
-            if input_id[-1] == eos_token_id:
-                input_id = input_id[:-1]
-                os_cnt, have_eos = os_cnt + 1, True
-
-            if buffer_input_id.shape[-1] + input_id.shape[-1] + os_cnt > seqlen:
-                idx_keep = seqlen - buffer_input_id.shape[-1] - os_cnt
-                input_id_to_append = [buffer_input_id, input_id[:idx_keep]]
-                if have_bos:
-                    input_id_to_append = [torch.tensor([bos_token_id])] + input_id_to_append
-                if have_eos:
-                    input_id_to_append.append(torch.tensor([eos_token_id]))
-
-                concat_input_ids.append(torch.cat(input_id_to_append).to(torch.int64))
-                attention_mask_list.append(attention_mask)
-                buffer_input_id = input_id[idx_keep:]
-            else:
-                buffer_input_id = torch.cat([buffer_input_id, input_id])
-
-            if buffer_input_id.shape[-1] + os_cnt == seqlen:
-                input_id_to_append = [buffer_input_id]
-                if have_bos:
-                    input_id_to_append = [torch.tensor([bos_token_id])] + input_id_to_append
-                if have_eos:
-                    input_id_to_append.append(torch.tensor([eos_token_id]))
-                concat_input_ids.append(torch.cat(input_id_to_append).to(torch.int64))
-                attention_mask_list.append(attention_mask)
-                buffer_input_id = torch.Tensor().to(torch.int64)
-        data = [{"input_ids": a, "attention_mask": b} for a, b in zip(concat_input_ids, attention_mask_list)]
-        import datasets
-
-        dataset_new = datasets.Dataset.from_list(data)
-        return dataset_new
-
     datasets, data_lens = [], {}
     system_prompt = "You are a helpful assistant."
     for name in dataset_names:
         split = None
         do_concat = False
         apply_chat_template = False
+        concat_add_eos = True   # insert EOS between packed documents (default on)
+        concat_add_bos = "auto"  # per-sequence BOS: follow tokenizer behaviour
 
         if ":" in name:
             name, split_list = name.split(":")[0], name.split(":")[1:]
@@ -1233,6 +1285,10 @@ def _get_dataset_impl(tokenizer, seqlen, dataset_name="NeelNanda/pile-10k", seed
                     data_lens[name] = int(values[0])
                 if key == "concat":
                     do_concat = False if (len(values) > 0 and values[0].lower() == "false") else True
+                if key == "eos":
+                    concat_add_eos = False if (len(values) > 0 and values[0].lower() == "false") else True
+                if key == "bos":
+                    concat_add_bos = values[0].lower() if len(values) > 0 else "true"
                 if key == "apply_chat_template":
                     apply_chat_template = False if (len(values) > 0 and values[0].lower() == "false") else True
                 if key == "system_prompt":
@@ -1264,7 +1320,9 @@ def _get_dataset_impl(tokenizer, seqlen, dataset_name="NeelNanda/pile-10k", seed
             system_prompt=system_prompt,
         )
         if do_concat:
-            dataset = concat_dataset_element(dataset)
+            dataset = concat_dataset_element(
+                dataset, seqlen, tokenizer, add_eos_separator=concat_add_eos, add_bos=concat_add_bos
+            )
 
         dataset = dataset.filter(filter_func)
         if name in data_lens:

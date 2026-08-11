@@ -25,6 +25,9 @@
 #   MAX_GEN_TOKS            generation cap                       (default 2048)
 #   GPU_MEMORY_UTILIZATION  vLLM gpu_memory_utilization          (default 0.85)
 #   ADD_BOS_TOKEN           true|false                           (default True)
+#   VLLM_EXTRA              extra vLLM model_args appended verbatim, e.g.
+#                           "reasoning_parser=qwen3,language_model_only=True"
+#                           for Qwen3.6 reasoning models          (default empty)
 
 set -euo pipefail
 
@@ -47,6 +50,7 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 MAX_GEN_TOKS="${MAX_GEN_TOKS:-2048}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 ADD_BOS_TOKEN="${ADD_BOS_TOKEN:-True}"
+VLLM_EXTRA="${VLLM_EXTRA:-}"
 
 export CUDA_VISIBLE_DEVICES="$GPU"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -69,6 +73,12 @@ MODEL_ARGS="${MODEL_ARGS},enable_prefix_caching=False"
 # gsm8k uses the chat template; forward the Qwen3-style thinking flag.
 if [[ "$MODE" == "gsm8k" ]]; then
   MODEL_ARGS="${MODEL_ARGS},enable_thinking=${ENABLE_THINKING}"
+fi
+
+# Per-model extra vLLM args (e.g. reasoning_parser=qwen3,language_model_only=True
+# for Qwen3.6). Appended verbatim so config stays the single source of truth.
+if [[ -n "$VLLM_EXTRA" ]]; then
+  MODEL_ARGS="${MODEL_ARGS},${VLLM_EXTRA}"
 fi
 
 echo "[eval] backend=vllm mode=$MODE tasks=$TASKS model=$MODEL gpu=$GPU -> $OUTPUT_PATH"

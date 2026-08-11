@@ -124,6 +124,9 @@ def analyze_sequence(ids, attn, tokenizer, seqlen):
     eos_count = ids_list.count(eos_id) if eos_id is not None else 0
     bos_count = ids_list.count(bos_id) if bos_id is not None else 0
     valid = int(attn.sum().item())
+    # Upper bound must include added/special tokens (e.g. Qwen EOS 151645 sits
+    # above the *base* vocab_size 151643). len(tokenizer) counts added tokens.
+    id_upper = max(len(tokenizer), tokenizer.vocab_size)
     return {
         "len": n,
         "len_ok": n == seqlen,
@@ -131,7 +134,7 @@ def analyze_sequence(ids, attn, tokenizer, seqlen):
         "dtype_attn": str(attn.dtype),
         "min_id": int(ids.min().item()),
         "max_id": int(ids.max().item()),
-        "vocab_ok": int(ids.max().item()) < tokenizer.vocab_size,
+        "vocab_ok": int(ids.max().item()) < id_upper,
         "attn_valid": valid,
         "attn_all_ones": valid == n,
         "starts_with_bos": (bos_id is not None and ids_list[0] == bos_id),

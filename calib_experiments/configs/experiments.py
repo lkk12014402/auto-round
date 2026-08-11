@@ -52,19 +52,48 @@ SEED = 42
 #   enable_thinking : Qwen3-style flag forwarded to lm_eval model_args for gsm8k
 # ---------------------------------------------------------------------------
 
+# Each model owns a *disjoint* set of physical GPU ids via ``gpus`` so that
+# multiple models can be quantized+evaluated in parallel (one process per model,
+# see run_experiments.py --parallel). Fields:
+#   gpus            : list of physical GPU ids this model runs on. len>1 => the
+#                     model is sharded across cards (quant device_map="auto",
+#                     vLLM tensor_parallel_size=len(gpus)).
+#   device_map      : AutoRound device_map. "auto" spreads over the model's gpus
+#                     (recommended for big models). A single id also works.
+#   enable_thinking : Qwen3-style flag forwarded to vLLM/lm_eval for gsm8k.
+#   vllm_extra      : extra comma-separated vLLM model_args appended verbatim at
+#                     eval time (e.g. reasoning_parser / language_model_only for
+#                     Qwen3.6). Leave "" for plain models.
+#
+# 8x L20 example allocation (edit to taste): a small model on 1 card, a large
+# reasoning model sharded on 4 cards, etc. Keep the gpu sets disjoint.
 MODELS = [
     {
         "name": "Qwen3-0.6B",
         "path": "Qwen/Qwen3-0.6B",
-        "device_map": "0",
+        "gpus": [6],
+        "device_map": "auto",
         "enable_thinking": False,
+        "vllm_extra": "",
     },
-    # Uncomment / edit for the large model. Needs a big GPU or device_map=auto.
+    # ---- Example large Qwen3.6 reasoning model sharded over 4 cards ----
     # {
-    #     "name": "Qwen3.6-27B",
-    #     "path": "Qwen/Qwen3.6-27B",
+    #     "name": "Qwen3.6-30B",
+    #     "path": "Qwen/Qwen3.6-30B-A3B",
+    #     "gpus": [1, 2, 3, 4],
     #     "device_map": "auto",
     #     "enable_thinking": False,
+    #     # Qwen3.6 needs these at vLLM inference time:
+    #     "vllm_extra": "reasoning_parser=qwen3,language_model_only=True",
+    # },
+    # ---- Another mid model on 2 cards ----
+    # {
+    #     "name": "Qwen3-8B",
+    #     "path": "Qwen/Qwen3-8B",
+    #     "gpus": [5, 6],
+    #     "device_map": "auto",
+    #     "enable_thinking": False,
+    #     "vllm_extra": "",
     # },
 ]
 
@@ -204,8 +233,66 @@ PRIMARY_METRICS = {
     "gsm8k": "exact_match,strict-match",
 }
 
-# GPU used for both quantization and evaluation (single GPU by default).
+# Fallback GPU used when a model has no explicit ``gpus`` list (single-GPU mode
+# / non-parallel runs).
 GPU = "0"
+
+# Total physical GPUs available on the box (for validation only).
+NUM_GPUS = 8
+
+
+# ---------------------------------------------------------------------------
+# GPU-allocation helpers
+# ---------------------------------------------------------------------------
+
+def model_gpus(model):
+    """Return the list of physical GPU ids assigned to ``model``.
+
+    Falls back to the global ``GPU`` (parsed as comma list) when the model has
+    no explicit ``gpus`` field.
+    """
+    g = model.get("gpus")
+    if g is None:
+        return [int(x) for x in str(GPU).split(",") if x != ""]
+    if isinstance(g, int):
+        return [g]
+    return [int(x) for x in g]
+
+
+def gpus_csv(model):
+    """CUDA_VISIBLE_DEVICES string for ``model`` (e.g. "1,2,3,4")."""
+    return ",".join(str(x) for x in model_gpus(model))
+
+
+def tp_size(model):
+    """vLLM tensor_parallel_size = number of GPUs the model is sharded over."""
+    return max(1, len(model_gpus(model)))
+
+
+def validate_gpu_assignments(models=None):
+    """Sanity-check per-model GPU assignments.
+
+    Returns a list of human-readable warnings (overlapping cards, ids out of
+    range). Overlaps are allowed but flagged, since parallel runs on the same
+    card will contend for memory.
+    """
+    models = models if models is not None else MODELS
+    warnings = []
+    owner = {}
+    for m in models:
+        for gid in model_gpus(m):
+            if gid < 0 or gid >= NUM_GPUS:
+                warnings.append(
+                    f"model {m['name']!r} uses GPU {gid} which is outside 0..{NUM_GPUS - 1}"
+                )
+            if gid in owner:
+                warnings.append(
+                    f"GPU {gid} assigned to both {owner[gid]!r} and {m['name']!r} "
+                    f"(parallel runs will contend)"
+                )
+            else:
+                owner[gid] = m["name"]
+    return warnings
 
 
 # ---------------------------------------------------------------------------
